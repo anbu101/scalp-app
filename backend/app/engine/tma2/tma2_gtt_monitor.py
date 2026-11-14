@@ -73,7 +73,29 @@ def _entry_floor(orders, entry_order_id, fallback_ts=None):
 # ── FILL_TRUTH_TMA_20261102 END ──
 
 
+# ── BROKER_TRUTH_20261114 ── shared broker-truth rules
+try:
+    from app.execution import broker_truth as _BT
+except Exception:                                   # standalone harness
+    import importlib.util as _ilu
+    import sys as _sys
+    from pathlib import Path as _P
+    _BT = _sys.modules.get("_broker_truth")
+    if _BT is None:
+        _sp = _ilu.spec_from_file_location(
+            "_broker_truth", _P(__file__).resolve().parents[2] / "execution" / "broker_truth.py")
+        _BT = _ilu.module_from_spec(_sp)
+        _sys.modules["_broker_truth"] = _BT
+        _sp.loader.exec_module(_BT)
+
+
 class TMA2GTTMonitor:
+
+    # ── BROKER_TRUTH_20261114 ── same three rules as the Icarus monitor (see
+    # ic_gtt_monitor.py): strict reads (unreadable ≠ empty), no inference
+    # outside the session, the position is ours only when no other strategy
+    # holds the contract, and "GTT gone + position gone" is booked only with
+    # the exit order that proves it.
 
     POLL_INTERVAL = 20
     FILL_CONFIRM_RETRIES = 3
@@ -86,6 +108,9 @@ class TMA2GTTMonitor:
         self._running = False
         self._missing = 0
         self._pending = {}        # gtt_id -> fill-confirm retry count
+        self._unproven = set()    # ── BROKER_TRUTH_20261114 ──
+        self._unread_logged = 0.0
+        self._sid = getattr(manager, "_sid", "TMA_V2")
 
     def start(self):
         if self._running:
@@ -116,12 +141,21 @@ class TMA2GTTMonitor:
         if not gid:
             return   # unprotected leg: candle monitor is the sole guard
 
-        try:
-            gtts = self.executor.get_gtts()
-        except Exception as e:
-            write_audit_log(f"[TMA2_GTT_MONITOR][FETCH_FAIL] no action ERR={e}")
+        # ── BROKER_TRUTH_20261114 ── session gate + STRICT read
+        if not self._session_open():
+            self._missing = 0
+            self._pending.clear()
+            self._unproven.clear()        # a new session pages afresh
             return
-        by_id = {str(x.get("id")): x for x in (gtts or [])}
+        gtts = _BT.read_gtts(self.executor)
+        if gtts is None:
+            self._missing = 0
+            if time.time() - self._unread_logged > 300:
+                self._unread_logged = time.time()
+                write_audit_log("[TMA2_GTT_MONITOR] GTT list unreadable (session / "
+                                "token / network) — no action, retrying")
+            return
+        by_id = {str(x.get("id")): x for x in gtts}
         gtt = by_id.get(str(gid))
         sell = g["sell"]
 
@@ -157,7 +191,7 @@ class TMA2GTTMonitor:
                     self.manager.on_backstop_sell_exit(exit_price=px, reason="SL")
                     return
                 if st in _DEAD:
-                    if self._position_open(sell):
+                    if self._position_open(sell):     # unknown counts as open
                         self._escalate(gid, sell, None,
                                        f"GTT order {oid} {st}: "
                                        f"{info.get('status_message') or ''}")
@@ -176,7 +210,14 @@ class TMA2GTTMonitor:
                                 f"unconfirmed retry={retry}/{self.FILL_CONFIRM_RETRIES}")
                 if retry < self.FILL_CONFIRM_RETRIES:
                     return
-                if self._position_open(sell):
+                own = self._own_qty(sell)                 # ── BROKER_TRUTH_20261114 ──
+                if own is None:
+                    self._pending[gid] = self.FILL_CONFIRM_RETRIES - 1
+                    write_audit_log(f"[TMA2_GTT_MONITOR] gtt={gid} triggered, fill "
+                                    f"unconfirmed and {sell['symbol']} position not "
+                                    f"attributable — no action, retrying")
+                    return
+                if own < 0:
                     self._escalate(gid, sell, self._find_working_buy(sell),
                                    "GTT triggered, no fill after retries, "
                                    "position still open")
@@ -197,7 +238,14 @@ class TMA2GTTMonitor:
                         f"({self._missing}/{self.MISSING_THRESHOLD})")
         if self._missing < self.MISSING_THRESHOLD:
             return
-        if self._position_open(sell):
+        own = self._own_qty(sell)                         # ── BROKER_TRUTH_20261114 ──
+        if own is None:
+            self._missing = self.MISSING_THRESHOLD - 1
+            write_audit_log(f"[TMA2_GTT_MONITOR] SL GTT {gid} missing but "
+                            f"{sell['symbol']} position unreadable / shared — no "
+                            f"action, retrying")
+            return
+        if own < 0:
             write_audit_log(f"[TMA2_GTT_MONITOR][NAKED] {sell['symbol']} short "
                             f"open with NO GTT — alerting, not closing")
             try:
@@ -210,10 +258,27 @@ class TMA2GTTMonitor:
                 pass
             self._missing = 0
             return
-        price, _ = self._fill_from_orders(sell)        # ── FILL_TRUTH_TMA_20261102 ──
-        price = price or self._price_fallback(sell)
+        price, oid = self._fill_from_orders(sell)      # ── FILL_TRUTH_TMA_20261102 ──
+        # ── BROKER_TRUTH_20261114 ── no order, no booking (see IC monitor)
+        if not oid or not price:
+            self._missing = 0
+            if gid not in self._unproven:
+                self._unproven.add(gid)
+                write_audit_log(f"[TMA2_GTT_MONITOR][UNPROVEN] {sell['symbol']} GTT and "
+                                f"position read as gone but NO exit order found — "
+                                f"NOT booked")
+                try:
+                    from app.api.telegram_api import notify_critical
+                    notify_critical({"message":
+                        f"{self._sid}: {sell['symbol']} reads as gone at the broker "
+                        f"(no GTT, no position) but there is NO exit order for it "
+                        f"today. The app has NOT booked a close. Check Kite "
+                        f"Positions and GTT now.", "severity": "error"})
+                except Exception:
+                    pass
+            return
         write_audit_log(f"[TMA2_GTT_MONITOR] GTT gone AND position gone "
-                        f"→ BROKER_EXIT @{price}")
+                        f"→ BROKER_EXIT @{price} order={oid}")
         self._missing = 0
         self.manager.on_backstop_sell_exit(exit_price=price,
                                            reason="BROKER_EXIT")
@@ -303,13 +368,16 @@ class TMA2GTTMonitor:
             pass
         return float(sell.get("sl") or sell.get("entry") or 0.0)
 
+    # ── BROKER_TRUTH_20261114 BEGIN ──
+    def _session_open(self) -> bool:
+        return _BT.session_open()
+
+    def _own_qty(self, sell) -> Optional[int]:
+        return _BT.own_net_qty(self.executor, sell["symbol"], self._sid,
+                               log=write_audit_log)
+
     def _position_open(self, sell) -> bool:
-        try:
-            positions = self.executor.get_open_positions() or []
-        except Exception:
-            return True    # can't verify → assume open (never close blind)
-        for p in positions:
-            if p.get("tradingsymbol") == sell["symbol"] \
-                    and int(p.get("quantity") or 0) != 0:
-                return True
-        return False
+        """Unknown (unreadable / shared) counts as OPEN — never close blind."""
+        own = self._own_qty(sell)
+        return True if own is None else own < 0
+    # ── BROKER_TRUTH_20261114 END ──

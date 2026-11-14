@@ -16,6 +16,7 @@ import test_tma2_e2e as E                                           # noqa: E402
 from app.engine.tma import tma_gtt_monitor as M1                    # noqa: E402
 from app.engine.tma import tma_trade_manager as TM1                 # noqa: E402
 from app.engine.tma2 import tma2_gtt_monitor as M2                  # noqa: E402
+M2.TMA2GTTMonitor._session_open = lambda self: True         # ── BROKER_TRUTH_20261114 ── these tests simulate a live session
 from app.engine.tma2 import tma2_trade_manager as TM2               # noqa: E402
 
 FAILS = []

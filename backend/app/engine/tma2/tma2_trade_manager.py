@@ -150,6 +150,7 @@ except ImportError:  # standalone tests
     from app.execution.exit_order_driver import drive_exit_order
 # ── WING_FAST_FILL_20261111 ── shared hedge-wing placement + fast confirm
 from app.execution.wing_entry import place_wing, confirm_wing   # noqa: E402
+from app.execution import broker_truth as _BT                   # noqa: E402  ── BROKER_TRUTH_20261114 ──
 
 # ── FILL_TRUTH_TMA_20261102 BEGIN ── shared exit-fill rule (app/execution/fill_pick.py,
 # FILL_TRUTH_20261102). Loaded by path when the app package is stubbed.
@@ -228,6 +229,11 @@ class TMA2TradeManager:
         self._sleep, self._clock = time.sleep, time.time   # test-injectable
         # ── BROKER_RECON_20261026 ──
         self._closed_live_syms: set = set()
+        # ── BROKER_TRUTH_20261114 ── tell the other strategies what we hold
+        try:
+            _BT.LEDGER.register(self._sid, self._ledger_view)
+        except Exception as _e:
+            write_audit_log(f"[{self._sid}][LEDGER] register failed {_e!r}")
         self._recon_last_ts = 0
         self._recon_suspect: Dict[str, int] = {}
         self._recon_alerted: set = set()
@@ -358,7 +364,21 @@ class TMA2TradeManager:
             c = chain.candle(sym, ts - 60)
             if c and float(c["close"]) > 0:
                 cands.append((sym, float(c["close"])))
-        pick = select_strike(cands, snap["sell_premium_max"])
+        # ── BROKER_TRUTH_20261114 ── LIVE: never SELL a contract another
+        # strategy is LONG, nor BUY (hedge) one another strategy is SHORT —
+        # opposite sides cancel at the broker and the later exit can be
+        # refused for margin. The next candidate is taken instead.
+        _live = str(snap.get("mode", "")).upper() == "LIVE"
+        _sell_cands = cands
+        if _live:
+            _sell_cands = []
+            for _s, _p in cands:
+                _who = _BT.LEDGER.opposite(_s, self._sid, "SELL")
+                if _who:
+                    write_audit_log(f"[{self._sid}] {_s} not sold — {_who} is long this contract")
+                else:
+                    _sell_cands.append((_s, _p))
+        pick = select_strike(_sell_cands, snap["sell_premium_max"])
         if pick is None:
             self.diag["skipped_select"] += 1
             self._sig_log(ts, sig, "skipped_selection (no sell strike ≤ cap)")
@@ -368,6 +388,9 @@ class TMA2TradeManager:
         # REAL STRIKES ONLY — wing_mode real_fallback (cheapest real,
         # flagged) or skip (drop the signal). NO synthetic (spec).
         ladder = [(s, p) for (s, p) in cands if s != sell_sym]
+        if _live:                                  # ── BROKER_TRUTH_20261114 ──
+            ladder = [(s, p) for (s, p) in ladder
+                      if not _BT.LEDGER.opposite(s, self._sid, "BUY")]
         hpick = select_strike(ladder, snap["buy_premium_max"])
         hedge_fb = False
         if hpick is None and snap["wing_mode"] == "real_fallback":
@@ -456,12 +479,26 @@ class TMA2TradeManager:
                              severity="error", strategy_id=self._sid, mode="live")
                 return
             self._live_block = None                # ── PAPER_FALLBACK_20261103 ──
-            entered = self._enter_live(sig, snap, chain,
-                                       sell_sym, hedge_sym, sell_qty, buy_qty,
-                                       smeta, hmeta,
-                                       model_sell=float(fill_c["close"]),
-                                       model_hedge=float(hfill_c["close"]),
-                                       hedge_fb=pend["hedge_fallback"])
+            # ── BROKER_TRUTH_20261114 ── reserve the two contracts before the
+            # first order: other strategies treat them as shared until our
+            # own group shows them.
+            try:
+                _BT.LEDGER.reserve(self._sid, {sell_sym: -int(sell_qty),
+                                               hedge_sym: int(buy_qty)})
+            except Exception:
+                pass
+            try:
+                entered = self._enter_live(sig, snap, chain,
+                                           sell_sym, hedge_sym, sell_qty, buy_qty,
+                                           smeta, hmeta,
+                                           model_sell=float(fill_c["close"]),
+                                           model_hedge=float(hfill_c["close"]),
+                                           hedge_fb=pend["hedge_fallback"])
+            finally:
+                try:
+                    _BT.LEDGER.release(self._sid)
+                except Exception:
+                    pass
             if not entered:
                 # ── PAPER_FALLBACK_20261103 ── PAPER_LIVE: the paper book is a
                 # twin of the LIVE rows, so a margin-refused LIVE entry used to
@@ -608,6 +645,25 @@ class TMA2TradeManager:
         self._persist_entry(self.group)
 
     # ── LIVE entry: margin guard → BUY first → SELL confirm → GTT ────
+    # ── BROKER_TRUTH_20261114 BEGIN ──
+    def _ledger_view(self) -> Dict[str, int]:
+        """LIVE legs held now ({symbol: signed qty}); over-reports on purpose
+        (both legs stay listed until the group is finished)."""
+        g = self.group
+        if not g or g.get("mode") != "LIVE":
+            return {}
+        out: Dict[str, int] = {}
+        sq = int((g.get("sell") or {}).get("qty") or 0)
+        if sq:
+            out[g["sell"]["symbol"]] = -sq
+        hq = int((g.get("hedge") or {}).get("qty") or 0)
+        if hq:
+            hs = g["hedge"]["symbol"]
+            out[hs] = out.get(hs, 0) + hq
+        return out
+
+    # ── BROKER_TRUTH_20261114 END ──
+
     def _enter_live(self, sig, snap, chain, sell_sym, hedge_sym, sell_qty,
                     buy_qty, smeta, hmeta, *, model_sell, model_hedge,
                     hedge_fb) -> bool:
@@ -1261,18 +1317,12 @@ class TMA2TradeManager:
 
     # ── broker truth helpers ─────────────────────────────────────────
     def _net_qty(self, symbol: str) -> Optional[int]:
-        """Broker net quantity for symbol (0 when absent); None = unreadable."""
-        try:
-            pos = self.executor.get_open_positions_or_none()
-        except Exception as e:
-            write_audit_log(f"[{self._sid}][EXIT][POS_READ_ERR] {e}")
-            return None
-        if pos is None:
-            return None
-        for p in pos:
-            if p.get("tradingsymbol") == symbol:
-                return int(p.get("quantity") or 0)
-        return 0
+        """── BROKER_TRUTH_20261114 ── broker net quantity that is certainly
+        OURS (0 when absent). None = unreadable OR another strategy holds the
+        same contract — every caller then places exactly our own quantity
+        and treats our own COMPLETE fill as the truth."""
+        return _BT.own_net_qty(self.executor, symbol, self._sid,
+                               log=write_audit_log)
 
     @staticmethod
     def _vwap(fills) -> Optional[float]:
@@ -1309,6 +1359,13 @@ class TMA2TradeManager:
         settled = self._settle_leg_order(st, "SELL", sym, "BUY")
         if settled is None:
             return False
+        # ── BROKER_TRUTH_20261114 ── ORDER TRUTH FIRST: our own fills for the
+        # whole short are the exit, whatever the net position reads.
+        got = sum(q for q, _ in st["sell_fills"])
+        if got >= qty:
+            st["sell_done"] = True
+            st["sell_px"] = self._vwap(st["sell_fills"]) or st["model_sell_px"]
+            return True
         observed = self._net_qty(sym)
         if observed is not None and observed >= 0:
             # Flat at the broker: our fill, a GTT fill, or a manual exit.
@@ -1334,7 +1391,8 @@ class TMA2TradeManager:
             st["sell_done"] = True
             st["sell_px"] = self._vwap(st["sell_fills"]) or st["model_sell_px"]
             return True
-        buy_qty = qty if observed is None else min(qty, -observed)
+        # no usable net position (unreadable / shared) → what is left of OURS
+        buy_qty = (qty - got) if observed is None else min(qty, -observed)
         if observed is not None and -observed < qty:
             write_audit_log(f"[{self._sid}][EXIT][PARTIAL] {sym} open short "
                             f"{-observed} < {qty} — buying back only the open qty")
@@ -1349,7 +1407,8 @@ class TMA2TradeManager:
         filled = self._settle_leg_order(st, "SELL", sym, "BUY")
         if filled is None:
             return False
-        if filled and buy_qty == qty and observed is not None:
+        if sum(q for q, _ in st["sell_fills"]) >= qty or (
+                filled and buy_qty == qty and observed is not None):
             st["sell_done"] = True
             st["sell_px"] = self._vwap(st["sell_fills"]) or st["model_sell_px"]
             return True
@@ -1371,6 +1430,12 @@ class TMA2TradeManager:
         settled = self._settle_leg_order(st, "HEDGE", sym, "SELL")
         if settled is None:
             return False
+        got = sum(q for q, _ in st["hedge_fills"])          # ── BROKER_TRUTH_20261114 ──
+        if qty > 0 and got >= qty:
+            st["hedge_done"] = True
+            st["hedge_px"] = (self._vwap(st["hedge_fills"])
+                              or self._hedge_exit_price(g, st["exit_ts"]))
+            return True
         observed = self._net_qty(sym)
         if observed is not None and observed <= 0:
             px = self._vwap(st["hedge_fills"])
@@ -1387,7 +1452,11 @@ class TMA2TradeManager:
             st["hedge_px"] = (self._vwap(st["hedge_fills"])
                               or self._hedge_exit_price(g, st["exit_ts"]))
             return True
-        sell_qty = qty if observed is None else min(qty, observed)
+        sell_qty = (qty - got) if observed is None else min(qty, observed)
+        if sell_qty <= 0:                       # hedge-less group (qty 0): nothing to sell
+            st["hedge_done"] = True
+            st["hedge_px"] = self._hedge_exit_price(g, st["exit_ts"])
+            return True
         try:
             oid = self.executor.place_market_sell(sym, sell_qty)
         except Exception as e:
@@ -1399,7 +1468,8 @@ class TMA2TradeManager:
         if filled is None:
             return False
         after = self._net_qty(sym)
-        if (after is not None and after <= 0) or (filled and after is None):
+        if (sum(q for q, _ in st["hedge_fills"]) >= qty
+                or (after is not None and after <= 0) or (filled and after is None)):
             st["hedge_done"] = True
             st["hedge_px"] = (self._vwap(st["hedge_fills"])
                               or self._last_fill_px(sym, "SELL")
@@ -1512,6 +1582,12 @@ class TMA2TradeManager:
             return
         net = {p.get("tradingsymbol"): int(p.get("quantity") or 0) for p in pos}
         for sym, exp in watch.items():
+            # ── BROKER_TRUTH_20261114 ── another strategy on the same contract
+            # is not a mismatch (13 Nov: "broker −260, expected −130" while
+            # Velvet was short the same strike). Unknown → judge next time.
+            exp = _BT.expected_net(sym, self._sid, exp)
+            if exp is None:
+                continue
             got = net.get(sym, 0)
             key = (sym, got)
             if got == exp:
@@ -1684,10 +1760,21 @@ class TMA2TradeManager:
                 net = {}
                 for p in kite.positions().get("net", []):
                     net[p.get("tradingsymbol")] = int(p.get("quantity") or 0)
-                want_ok = (net.get(sell["tradingsymbol"], 0) == -int(sell["qty"]))
+                # ── BROKER_TRUTH_20261114 ── our quantity must be THERE; more
+                # on the same contract (another strategy, or a manual trade)
+                # is not a reason to abandon a live short. Less than ours, or
+                # the wrong side, still fails closed.
+                s_net = net.get(sell["tradingsymbol"], 0)
+                want_ok = s_net <= -int(sell["qty"])
+                extra = s_net != -int(sell["qty"])
                 if hedge is not None:
-                    want_ok = want_ok and (net.get(hedge["tradingsymbol"], 0)
-                                           == int(hedge["qty"]))
+                    h_net = net.get(hedge["tradingsymbol"], 0)
+                    want_ok = want_ok and h_net >= int(hedge["qty"])
+                    extra = extra or h_net != int(hedge["qty"])
+                if want_ok and extra:
+                    write_audit_log(f"[{self._sid}][ADOPT] broker holds MORE than this "
+                                    f"group on its contracts (another strategy / manual "
+                                    f"trade) — adopting our own quantity only")
                 if not want_ok:
                     self.disabled = True
                     write_audit_log(f"[{self._sid}][RECON] broker positions "

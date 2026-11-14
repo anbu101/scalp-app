@@ -87,6 +87,7 @@ sys.modules["app.engine.ic.ic_group_manager"] = ic_group_manager
 import ic_engine as ENG
 sys.modules["app.engine.ic.ic_engine"] = ENG
 import ic_gtt_monitor as MON
+MON.ICGTTMonitor._session_open = lambda self: True   # ── BROKER_TRUTH_20261114 ── these tests simulate a live session
 sys.modules["app.engine.ic.ic_gtt_monitor"] = MON
 import ic_runtime as RT
 sys.modules["app.engine.ic.ic_runtime"] = RT
@@ -248,6 +249,10 @@ class MonExec:
     def get_order_fill(self, oid): return self.order_fill.get(oid, {})
     def get_orders(self): return self.orders
     def get_open_positions(self): return self.positions
+    # ── BROKER_TRUTH_20261114 ── the monitor reads STRICTLY (None = unreadable)
+    def get_gtts_or_none(self): return None if self.fail_fetch else self.gtts
+    def get_open_positions_or_none(self): return self.positions
+
     def cancel_order(self, oid):
         self.cancelled = getattr(self, "cancelled", [])
         self.cancelled.append(oid)

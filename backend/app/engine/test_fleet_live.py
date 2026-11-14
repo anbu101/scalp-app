@@ -1,0 +1,1246 @@
+# backend/app/engine/test_fleet_live.py
+#
+# ── BROKER_TRUTH_20261114 ── THE FLEET, LIVE, ON ONE ACCOUNT.
+#
+# Icarus (IC_V2), Timberwolf (TMA_V2), Tigris (TSG_V1) and Velvet (VET_V1) —
+# the four REAL managers and the two REAL GTT monitors — trade through the
+# REAL ExecutionRouter into ONE Kite-shaped fake broker, exactly as one live
+# Zerodha account sees them: one net position per contract, one GTT list,
+# one order book, one login session.
+#
+# Every per-strategy suite so far ran its strategy ALONE on its own broker.
+# 13 Nov 2026 was the first day three of them were live together, and both
+# failures of that day live only in the combination:
+#   * a broker that cannot be READ (app started before the Kite login; the
+#     05:00 session flush) answered "nothing there" and two monitors booked
+#     open shorts as BROKER_EXIT;
+#   * Velvet and Timberwolf were short the SAME strike — Velvet's exit read
+#     Timberwolf's short as its own and bought twice.
+#
+# The chain below makes the strategies collide on purpose (same short, same
+# wings) and after every step the suite audits the account:
+#     broker net position per contract == sum of what each strategy holds
+#     every ACTIVE GTT belongs to an open leg of its owner
+#     nothing is left working in the order book
+#
+# Run:  PYTHONPATH=backend python3 backend/app/engine/test_fleet_live.py
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import threading
+import time
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+os.environ.setdefault("SCALP_TEST_MODE", "1")
+
+from app.execution import broker_truth as BT                          # noqa: E402
+from app.execution.execution_router import ExecutionRouter            # noqa: E402
+from app.execution.testkit_fake_kite import FakeKite, isolate         # noqa: E402
+from app.config import strategy_loader as SL                          # noqa: E402
+from app.marketdata.ltp_store import LTPStore                         # noqa: E402
+from app.engine.ic import ic_group_manager as ICM                     # noqa: E402
+from app.engine.ic import ic_gtt_monitor as ICMON                     # noqa: E402
+from app.engine.ic import ic_carry_store                              # noqa: E402
+from app.engine.ic.ic_live_core import StrikePick, G_OPEN, G_CLOSED, L_OPEN, L_CLOSED   # noqa: E402
+from app.engine.ic.ic_selection import ICSelection                    # noqa: E402
+from app.engine.tma2 import tma2_trade_manager as T2                  # noqa: E402
+from app.engine.tma2 import tma2_gtt_monitor as T2MON                 # noqa: E402
+from app.engine.tma2.tma2_common import TMA2Repo                      # noqa: E402
+from app.engine.tsg import tsg_manager as TS                          # noqa: E402
+from app.engine.tsg.tsg_live_core import D_OPEN, D_CLOSED             # noqa: E402
+from app.engine.vet import vet_manager as VM                          # noqa: E402
+from app.engine.vet.vet_common import VetRepo                         # noqa: E402
+from app.engine.vet.vet_live_core import ENTER, EXIT                  # noqa: E402
+
+IST = timezone(timedelta(hours=5, minutes=30))
+FAILS: list = []
+PASSED = [0]
+EXP = "2026-11-17"
+SPOT = 25100.0
+
+
+def check(name, cond, detail=""):
+    if cond:
+        PASSED[0] += 1
+    print(f"[{'ok  ' if cond else 'MISS'}] {name}" + (f" — {detail}" if detail and not cond else ""))
+    if not cond:
+        FAILS.append(name)
+
+
+def sym(k, t):
+    return f"NIFTY26N17{int(k)}{t}"
+
+
+# A chain built so the strategies COLLIDE:
+#   25050 CE @200  Velvet's short (ATM−1)  AND  Timberwolf's short (≤205)
+#   25300 CE @ 97  Icarus's short (≤100)   AND  Tigris's short (≤120)
+#   24950 PE @ 97  Icarus's short          AND  Tigris's short
+#   26100 CE @4.6  Velvet's wing (≤5), Timberwolf's hedge (≤5), Tigris's wing (≤8)
+#   26250 CE @4.0  Icarus's wing (≤4)
+CE = {25050: 200.0, 25100: 170.0, 25200: 128.0, 25300: 97.0, 25450: 60.0, 25600: 35.0,
+      26100: 4.6, 26250: 4.0, 26350: 3.2, 27050: 1.4}
+PE = {25150: 205.0, 25100: 172.0, 25000: 126.0, 24950: 97.0, 24800: 60.0, 24650: 36.0,
+      24100: 4.7, 24050: 4.0, 23950: 3.1, 23600: 1.3}
+S_VT, S_IC_CE, S_IC_PE = sym(25050, "CE"), sym(25300, "CE"), sym(24950, "PE")
+W_SHARED, W_IC_CE, W_IC_PE, W_TS_PE = sym(26100, "CE"), sym(26250, "CE"), sym(24050, "PE"), sym(24100, "PE")
+
+
+def prices():
+    out = {sym(k, "CE"): p for k, p in CE.items()}
+    out.update({sym(k, "PE"): p for k, p in PE.items()})
+    return out
+
+
+class FleetKite(FakeKite):
+    """One live account. `logged_in=False` is a broker that cannot be read or
+    traded (stale morning token, 05:00 flush, network): strict reads say None,
+    the legacy reads say [] — exactly what ZerodhaOrderExecutor does."""
+
+    def __init__(self, px):
+        super().__init__(px)
+        self.logged_in = True
+        self.market_open = True
+        self._lk = threading.RLock()
+        self.partial_once: dict = {}     # symbol -> qty: the next order there fills only that much
+
+    def _need(self):
+        if not self.logged_in:
+            raise RuntimeError("TokenException: Incorrect `api_key` or `access_token`.")
+
+    def _covers_short(self, s):          # ample margin: selling a hedge is allowed
+        return False
+
+    def tick(self):
+        with self._lk:
+            return super().tick()
+
+    def _new_order(self, s, txn, qty, price, **k):
+        with self._lk:
+            self._need()
+            part = self.partial_once.pop(s, None)
+            if not part:
+                return super()._new_order(s, txn, qty, price, **k)
+            # a partial fill, the rest resting where the market will not reach it
+            oid = super()._new_order(s, txn, qty, price, src=k.get("src", "APP"), match=False)
+            o = next(x for x in self.orders if x["order_id"] == oid)
+            o.update(filled_quantity=int(part), pending_quantity=int(qty) - int(part),
+                     average_price=self.px[s], price=(0.05 if txn == "BUY" else 1e9))
+            self.net[s] = self.net.get(s, 0) + (int(part) if txn == "BUY" else -int(part))
+            return oid
+
+    def _gtt(self, *a, **k):
+        with self._lk:
+            self._need()
+            return super()._gtt(*a, **k)
+
+    def modify_order(self, *a, **k):
+        with self._lk:
+            self._need()
+            return super().modify_order(*a, **k)
+
+    def cancel_order(self, *a, **k):
+        with self._lk:
+            self._need()
+            return super().cancel_order(*a, **k)
+
+    def get_order_fill(self, oid):
+        with self._lk:
+            self._need()
+            return super().get_order_fill(oid)
+
+    def get_orders(self):
+        with self._lk:
+            return super().get_orders() if self.logged_in else []
+
+    def get_open_positions(self):
+        with self._lk:
+            return super().get_open_positions() if self.logged_in else []
+
+    def get_open_positions_or_none(self):
+        with self._lk:
+            if not self.logged_in or not self.positions_readable:
+                return None
+            return super().get_open_positions()
+
+    def positions(self):
+        self._need()
+        return {"net": self.get_open_positions()}
+
+    def _gtt_rows(self):
+        return [{"id": g["id"], "status": g["status"],
+                 "condition": {"tradingsymbol": g["symbol"]},
+                 "orders": [dict(g["orders"][0], quantity=g["qty"], transaction_type=g["side"])]}
+                for g in self.gtts.values() if g["status"] != "deleted"]
+
+    def get_gtts(self):
+        with self._lk:
+            return self._gtt_rows() if self.logged_in else []
+
+    def get_gtts_or_none(self):
+        with self._lk:
+            return self._gtt_rows() if self.logged_in else None
+
+    def get_gtt_status(self, gid):
+        with self._lk:
+            return super().get_gtt_status(gid) if self.logged_in else None
+
+    def cancel_gtt(self, gid):
+        with self._lk:
+            self._need()
+            return super().cancel_gtt(gid)
+
+    def cancel_gtt_verified(self, gid, retries=4):       # the strict contract
+        try:
+            self.cancel_gtt(gid)
+        except Exception:
+            pass
+        rows = self.get_gtts_or_none()
+        if rows is None:
+            return False
+        st = next((r["status"] for r in rows if str(r["id"]) == str(gid)), "missing")
+        return st != "active"
+
+    def place_gtt_oco(self, symbol, qty, sl_price, tp_price, last_price=None, direction="LONG"):
+        """Two-leg GTT on a long: SELL at the stop (the target leg is not modelled)."""
+        return self._gtt(symbol, qty, sl_price, "SELL", 1.003)
+
+    # manual actions by a human in the Kite app
+    def manual(self, symbol, txn, qty):
+        return self._new_order(symbol, txn, qty, self.px[symbol] * (1.05 if txn == "BUY" else 0.95))
+
+
+# ── the fleet ──────────────────────────────────────────────────────────────
+class Fleet:
+    def __init__(self, kite=None, tmp=None, *, restore=False, adj_cap=85):
+        self.adj_cap = adj_cap
+        self.sent = isolate()
+        self.tmp = Path(tmp or tempfile.mkdtemp(prefix="fleet_"))
+        self.kite = kite or FleetKite(prices())
+        self.crit: list = []
+        self.closes: list = []          # (strategy, symbol/leg, reason, price)
+        self.now = datetime(2026, 11, 13, 9, 20, tzinfo=IST)
+        k = self.kite
+        BT.LEDGER.clear()               # a new process starts with an empty ledger
+        BT.session_open = lambda: k.market_open
+        for s, p in k.px.items():
+            LTPStore.update(s, p)
+        self._build_ic()
+        self._build_tma2()
+        self._build_tsg()
+        self._build_vet()
+
+    # Icarus ----------------------------------------------------------------
+    def _build_ic(self):
+        k = self.kite
+        ICM.STATE_DIR = ic_carry_store.STATE_DIR = self.tmp
+        legs = [
+            {"id": "L1", "action": "SELL", "opt_type": "CE", "lots": 3, "premium_max": 100, "sl_val": 42,
+             "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct", "mtc_other_on_sl": True, "mtc_partner": "L2"},
+            {"id": "L2", "action": "SELL", "opt_type": "PE", "lots": 3, "premium_max": 100, "sl_val": 42,
+             "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct", "mtc_other_on_sl": True, "mtc_partner": "L1"},
+            {"id": "L3", "action": "BUY", "opt_type": "CE", "lots": 3, "premium_max": 4, "sl_val": 0,
+             "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct", "mtc_other_on_sl": False, "mtc_partner": None},
+            {"id": "L4", "action": "BUY", "opt_type": "PE", "lots": 3, "premium_max": 4, "sl_val": 0,
+             "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct", "mtc_other_on_sl": False, "mtc_partner": None}]
+        cfg = {"quantity": {"lot_size": 65}, "freeze_qty": 1800, "exit_mode": "NEXT_OPEN",
+               "next_open_time": "09:16", "expiry_exit_time": "15:28", "adjust_on_sl": True,
+               "adjust_delay_s": 60, "gtt_limit_buffer_pct": 5, "legs": legs,
+               "adjust": {x: {"enabled": True, "lots": 3, "premium_max": self.adj_cap, "sl_val": 30,
+                              "sl_mode": "pct", "tp_val": 100, "tp_mode": "pct"} for x in ("L1", "L2")}}
+        ICM.load_strategy_config = lambda sid: dict(cfg)
+        ICM.load_global_config = lambda: {"trade_on": True}
+        ICM.check_strategy_max_loss = lambda sid: False
+        ICM.is_day_blocked = lambda sid: False
+        ICM.insert_trade = lambda **kw: None
+        ICM.insert_paper_trade = lambda **kw: None
+        ICM.close_paper_trade = lambda **kw: None
+        ICM.close_trade = lambda **kw: self.closes.append(
+            ("IC", kw.get("trade_id"), kw.get("exit_reason"), kw.get("exit_price")))
+        ICM.notify_critical = lambda d: self.crit.append("IC: " + str(d.get("message")))
+        ICM._now_ist = lambda: self.now
+        ICM._ENTRY_FILL_CAP_S, ICM._ENTRY_FILL_POLL_S, ICM._EXIT_RETRY_BACKOFF_S = 1, 0.01, 0
+        self.ic = ICM.ICGroupManager(strategy_id="IC_V2", executor=ExecutionRouter(k),
+                                     ltp_resolver=lambda s: k.px.get(s))
+        self.ic._sleep, self.ic._clock = k.clock.sleep, k.clock
+
+        def provider():
+            ce = [(int(s[10:15]), s, p) for s, p in k.px.items() if s.endswith("CE")]
+            pe = [(int(s[10:15]), s, p) for s, p in k.px.items() if s.endswith("PE")]
+            return date(2026, 11, 17), ce, pe, {s: 5000 + i for i, s in enumerate(k.px)}
+        self.ic.attach_chain_provider(provider)
+        self.icmon = ICMON.ICGTTMonitor(self.ic.executor, self.ic)
+
+    def ic_enter(self):
+        picks = {"L1": StrikePick(25300, S_IC_CE, self.kite.px[S_IC_CE]),
+                 "L2": StrikePick(24950, S_IC_PE, self.kite.px[S_IC_PE]),
+                 "L3": StrikePick(26250, W_IC_CE, self.kite.px[W_IC_CE]),
+                 "L4": StrikePick(24050, W_IC_PE, self.kite.px[W_IC_PE])}
+        sel = ICSelection(ok=True, expiry=date(2026, 11, 17), picks=picks,
+                          tokens={"L1": 11, "L2": 12, "L3": 13, "L4": 14})
+        return self.ic.enter_day(sel, mode="LIVE")
+
+    def ic_legs(self):
+        g = self.ic.current_group()
+        return {} if g is None else {k: v for k, v in g.legs.items()}
+
+    def ic_sweep(self, n=1):
+        for _ in range(n):
+            self.icmon._sweep()
+
+    # Timberwolf --------------------------------------------------------------
+    def _build_tma2(self):
+        k = self.kite
+        T2.record_alert = lambda code, msg="", **kw: self.sent["alerts"].append(((code, msg), kw))
+        T2.notify_critical = lambda d: self.crit.append("TMA2: " + str(d.get("message")))
+        T2._ENTRY_FILL_CAP_S, T2._ENTRY_FILL_POLL_S = 0.3, 0.05
+        T2._RECON_EVERY_S = 0
+        cfg = {"s1": {"main": {"premium_max": 205, "lots": 2, "sl_pct": 12, "tp_pct": 10,
+                               "sl_unit": "PCT", "tp_unit": "ABS"},
+                      "hedge": {"premium_max": 5, "lots": 2}, "max_trades_per_day": 0},
+               "trade_mode": "INTRADAY", "trade_execution_mode": "LIVE", "exit_time": "15:25"}
+        SL.load_strategy_config_ex = lambda sid: (cfg, False)
+        self.t2_db = str(self.tmp / "tma2.db")
+        self.t2 = T2.TMA2TradeManager({}, TMA2Repo(db_path=self.t2_db), executor=ExecutionRouter(k))
+        self.t2._sleep, self.t2._clock = k.clock.sleep, k.clock
+        self.t2mon = T2MON.TMA2GTTMonitor(self.t2.executor, self.t2)
+        self.chain = _T2Chain(k)
+
+    def ts_of(self, hh, mm):
+        return int(datetime(2026, 11, 13, hh, mm, tzinfo=IST).timestamp())
+
+    def t2_enter(self, at=(12, 55)):
+        ts = self.ts_of(*at)
+        self.t2.on_signal({"ts": ts, "side": "PE", "cond": "E1", "spot": SPOT}, self.chain)
+        self.t2.on_minute(ts, None, self.chain)
+        return ts
+
+    def t2_sweep(self, n=1):
+        for _ in range(n):
+            self.t2mon._sweep()
+
+    # Tigris --------------------------------------------------------------------
+    def _build_tsg(self):
+        k = self.kite
+        TS.STATE_DIR, TS.SESSION_PATH = self.tmp, self.tmp / "TSG_V1_session.json"
+        TS.TsgManager._sweep_stale_live_rows = lambda s: None
+        TS.TsgManager._alert = lambda s, code, msg, **kw: (
+            self.crit.append("TSG: " + msg) if kw.get("severity") == "error" else None)
+        TS.TsgManager._notify_group_entry = lambda s, *a, **kw: None
+        TS.TsgManager._notify_group_exit = lambda s, *a, **kw: None
+        TS._now_ist = lambda: self.now
+        TS.is_day_blocked = lambda sid: False
+        TS.check_strategy_max_loss = lambda sid: False
+        TS.insert_trade = lambda **kw: f"T{id(kw)}"
+        TS.close_trade = lambda **kw: self.closes.append(
+            ("TSG", kw.get("trade_id"), kw.get("exit_reason"), kw.get("exit_price")))
+        TS.insert_paper_trade = lambda **kw: "P"
+        TS.close_paper_trade = lambda **kw: None
+        cfg = {"lots": 2, "lot_size": 65, "mtm_sl_per_lot": 3000, "mtm_sl_hard_mult": 0, "mtm_target": 0,
+               "iv_sl_pct": 0, "iv_sl_delta_pts": 0, "min_entry_iv": 0, "entry_fill_timeout_s": 2,
+               "entry_repeg_max": 1,
+               "legs": [{"id": "L1", "action": "SELL", "opt_type": "CE", "premium_max": 120},
+                        {"id": "L2", "action": "SELL", "opt_type": "PE", "premium_max": 120},
+                        {"id": "L3", "action": "BUY", "opt_type": "CE", "premium_max": 8},
+                        {"id": "L4", "action": "BUY", "opt_type": "PE", "premium_max": 8}]}
+        TS.load_strategy_config = lambda sid: cfg
+        self.ts = TS.TsgManager(executor=ExecutionRouter(k),
+                                quote_fn=lambda syms: {s: k.px[s] for s in syms if s in k.px})
+        self.ts._sleep, self.ts._clock = k.clock.sleep, k.clock
+
+    def ts_enter(self):
+        rows = [{"tradingsymbol": s, "instrument_type": s[-2:], "strike": int(s[10:15]),
+                 "instrument_token": 1000 + int(s[10:15])} for s in self.kite.px]
+        return self.ts.enter_day((EXP, rows, dict(self.kite.px)), mode="LIVE")
+
+    def ts_legs(self):
+        return {} if self.ts._core is None else dict(self.ts._core.legs)
+
+    # Velvet ----------------------------------------------------------------------
+    def _build_vet(self):
+        k = self.kite
+        cfg = {"leg_action": "SELL", "hedge_enabled": True, "hedge_max_premium": 5.0, "atm_offset": -1,
+               "eod_square": False, "_spot": SPOT, "quantity": {"lots": 2, "lot_size": 65}}
+        self.vet_db = str(self.tmp / "vet.db")
+        repo = VetRepo(self.vet_db)
+        repo.ensure_schema()
+
+        def chain(side, ts):
+            return [{"tradingsymbol": s, "token": 1000 + int(s[10:15]), "strike": float(s[10:15]),
+                     "expiry": EXP, "instrument_type": side, "ltp": p}
+                    for s, p in k.px.items() if s.endswith(side)]
+        self.vet = VM.VetManager(cfg, repo=repo, chain_fn=chain, quote_fn=lambda s: k.px.get(s),
+                                 executor=ExecutionRouter(k), mode="LIVE")
+        self.vet._sleep, self.vet._clock = k.clock.sleep, k.clock
+        self.vet._page = lambda msg, code="": self.crit.append("VET: " + msg)
+        self.vet.notify_activity = False
+
+    def vet_enter(self, ts=1000):
+        self.vet.on_decision({"action": ENTER, "side": "CE", "bar_ts": ts, "condition": -1}, ts=ts)
+        return self.vet.pos
+
+    def vet_exit(self, ts=2000):
+        self.vet.on_decision({"action": EXIT, "side": "CE", "bar_ts": ts, "condition": 1}, ts=ts)
+
+    # the account audit -----------------------------------------------------------
+    def expected(self):
+        out = {}
+        for sid, v in BT.LEDGER.snapshot().items():
+            for s, q in v.items():
+                out[s] = out.get(s, 0) + q
+        return {s: q for s, q in out.items() if q}
+
+    def audit(self, label):
+        k = self.kite
+        net = {s: q for s, q in k.net.items() if q}
+        exp = self.expected()
+        check(f"AUDIT {label}: broker positions == what the strategies hold", net == exp,
+              f"broker {net} vs app {exp}")
+        check(f"AUDIT {label}: nothing left working in the order book", not k.open_orders(),
+              str(k.open_orders()))
+        owners = set()
+        for leg in self.ic_legs().values():
+            if leg.state == L_OPEN:
+                owners |= {str(x) for x in (self.ic.leg_runtime(leg.leg_id).get("gtt_ids") or [])}
+        g = self.t2.group
+        if g and (g.get("sell") or {}).get("gtt_id"):
+            owners.add(str(g["sell"]["gtt_id"]))
+        active = {str(x["id"]) for x in k.active_gtts()}
+        check(f"AUDIT {label}: every active GTT belongs to an open leg", active <= owners,
+              f"orphans {active - owners}")
+
+    def audit_quiet(self):
+        """(ok, detail) — the same account audit, without printing."""
+        k = self.kite
+        net = {s: q for s, q in k.net.items() if q}
+        exp = self.expected()
+        if net != exp:
+            return False, f"broker {net} vs app {exp}"
+        if k.open_orders():
+            return False, f"working orders {k.open_orders()}"
+        return True, ""
+
+    def flatten_all(self):
+        k = self.kite
+        k.logged_in = k.market_open = k.positions_readable = k.modify_ok = True
+        for _ in range(3):
+            if self.vet.pos is not None:
+                self.vet_exit(ts=9000) if not self.vet.pos.get("exit_state") else self.vet.retry_exit(9060)
+            if self.t2.group is not None:
+                self.t2.kill_close(self.ts_of(15, 20))
+                if self.t2.group is not None:
+                    self.t2.on_minute(self.ts_of(15, 21), None, self.chain)
+            if self.ts._core is not None and self.ts._core.state != D_CLOSED:
+                self.ts.kill_all()
+            g = self.ic.current_group()
+            if g is not None and g.state != G_CLOSED:
+                self.ic.force_square_off_all(reason="KILL")
+
+    def buys(self, s):
+        return sum(q for t, x, q, _ in self.kite.events if t == "BUY" and x == s)
+
+    def sells(self, s):
+        return sum(q for t, x, q, _ in self.kite.events if t == "SELL" and x == s)
+
+
+class _T2Chain:
+    def __init__(self, kite):
+        self.k = kite
+
+    def symbols(self, side):
+        return [s for s in self.k.px if s.endswith(side)]
+
+    def candle(self, s, ts):
+        p = self.k.px.get(s)
+        return None if p is None else {"ts": ts, "open": p, "high": p, "low": p, "close": p}
+
+    def meta(self, s):
+        return {"token": 2000 + int(s[10:15]), "strike": int(s[10:15]), "expiry": EXP}
+
+    def last_close_at_or_before(self, s, ts, *a):
+        return self.k.px.get(s)
+
+
+def all_in(f: Fleet, *, tsg=True):
+    """The whole fleet enters, colliding on shorts and wings."""
+    ok_ic = f.ic_enter()
+    ok_ts = f.ts_enter() if tsg else True
+    v = f.vet_enter()
+    f.t2_enter()
+    return ok_ic and ok_ts and v is not None and f.t2.group is not None
+
+
+# ═══ 1. the fleet enters together ════════════════════════════════════════════
+def t_entry_collisions():
+    f = Fleet()
+    check("ENTRY: all four strategies enter live", all_in(f))
+    k = f.kite
+    check("ENTRY: Velvet and Timberwolf are short the SAME strike (−130 each → −260)",
+          k.net.get(S_VT) == -260 and f.vet.pos["main"]["tradingsymbol"] == S_VT
+          and f.t2.group["sell"]["symbol"] == S_VT, str(k.net))
+    check("ENTRY: Icarus and Tigris are short the SAME strikes (−195 and −130 → −325)",
+          k.net.get(S_IC_CE) == -325 and k.net.get(S_IC_PE) == -325, str(k.net))
+    check("ENTRY: three strategies are long the SAME wing (130 × 3 → +390)",
+          k.net.get(W_SHARED) == 390, str(k.net.get(W_SHARED)))
+    check("LEDGER: each strategy sees who else is on its contracts",
+          BT.LEDGER.others(S_VT, "VET_V1") == -130 and BT.LEDGER.others(S_VT, "TMA_V2") == -130
+          and BT.LEDGER.others(S_IC_CE, "IC_V2") == -130 and BT.LEDGER.others(W_IC_CE, "IC_V2") == 0)
+    check("LEDGER: a shared contract has no 'own' net position; a sole one does",
+          BT.own_net_qty(f.vet.executor, S_VT, "VET_V1") is None
+          and BT.own_net_qty(f.ic.executor, W_IC_CE, "IC_V2") == 195)
+    f.audit("after entry")
+    f.t2._recon_tick(f.ts_of(12, 58))
+    f.t2._recon_tick(f.ts_of(13, 2))
+    check("RECON: Timberwolf does NOT raise 'broker −260, expected −130' (13 Nov 12:58)",
+          not any("RECON" in c for c in f.crit), str(f.crit))
+    return f
+
+
+# ═══ 2. 13 Nov 15:20 — Velvet exits while Timberwolf holds the same short ════
+def t_velvet_exit_leaves_timberwolf():
+    f = t_entry_collisions()
+    k = f.kite
+    b0, s0 = f.buys(S_VT), f.sells(W_SHARED)
+    f.crit.clear()
+    f.vet_exit()
+    check("13 NOV: Velvet buys back EXACTLY its own 130 — once", f.buys(S_VT) - b0 == 130,
+          str(f.buys(S_VT) - b0))
+    check("13 NOV: Velvet is closed on the first attempt, no 'NOT CONFIRMED' page",
+          f.vet.pos is None and not any("NOT CONFIRMED" in c for c in f.crit), str(f.crit))
+    check("13 NOV: Timberwolf's short is untouched at the broker (−130) and in the app",
+          k.net.get(S_VT) == -130 and f.t2.group is not None
+          and not f.t2.group.get("exit_state"))
+    check("13 NOV: Timberwolf's SL GTT is still armed",
+          any(g["symbol"] == S_VT and g["qty"] == 130 for g in k.active_gtts()))
+    check("13 NOV: Velvet sold only its own wing (130 of the shared 390)",
+          f.sells(W_SHARED) - s0 == 130 and k.net.get(W_SHARED) == 260)
+    f.audit("after Velvet's exit")
+    f.t2_sweep(4)
+    f.t2._recon_tick(f.ts_of(15, 24))
+    f.t2._recon_tick(f.ts_of(15, 28))
+    check("13 NOV: Timberwolf's monitor and recon stay quiet (it is simply the sole holder now)",
+          f.t2.group is not None and not f.crit, str(f.crit))
+    # Timberwolf now exits on its own
+    f.t2.kill_close(f.ts_of(15, 25))
+    check("THEN: Timberwolf closes its own short and hedge; contract flat",
+          f.t2.group is None and k.net.get(S_VT, 0) == 0 and k.net.get(W_SHARED) == 130)
+    f.audit("after Timberwolf's exit")
+
+
+# ═══ 3. the mirror image — Timberwolf exits first ═════════════════════════════
+def t_timberwolf_exit_leaves_velvet():
+    f = t_entry_collisions()
+    k = f.kite
+    b0 = f.buys(S_VT)
+    f.crit.clear()
+    f.t2.kill_close(f.ts_of(13, 30))
+    check("MIRROR: Timberwolf buys back exactly its own 130 and closes in one attempt",
+          f.buys(S_VT) - b0 == 130 and f.t2.group is None
+          and not any("NOT FILLED" in c for c in f.crit), str(f.crit))
+    check("MIRROR: Velvet's short and wing are untouched",
+          k.net.get(S_VT) == -130 and f.vet.pos is not None and k.net.get(W_SHARED) == 260)
+    check("MIRROR: Timberwolf's GTT is gone", not any(g["symbol"] == S_VT for g in k.active_gtts()))
+    f.audit("after Timberwolf's exit")
+    f.vet_exit()
+    check("MIRROR: Velvet then exits normally", f.vet.pos is None and k.net.get(S_VT, 0) == 0)
+    f.audit("after Velvet's exit")
+
+
+# ═══ 4. Timberwolf's SL GTT fires on the shared strike ═════════════════════════
+def t_gtt_fires_on_shared_strike():
+    f = t_entry_collisions()
+    k = f.kite
+    b0 = f.buys(S_VT)
+    k.set_px(S_VT, 226.0)                       # crosses Timberwolf's 224 trigger
+    check("GTT: the broker bought back Timberwolf's 130 (its GTT), not Velvet's",
+          f.buys(S_VT) - b0 == 130 and k.net.get(S_VT) == -130)
+    f.t2_sweep()
+    check("GTT: monitor books Timberwolf's SL at the GTT fill and sells its hedge",
+          f.t2.group is None and k.net.get(W_SHARED) == 260)
+    check("GTT: no second buy-back by the app", f.buys(S_VT) - b0 == 130)
+    check("GTT: Velvet still holds its short", f.vet.pos is not None and not f.vet.pos.get("exit_state"))
+    f.audit("after the GTT")
+
+
+# ═══ 5. Icarus's SL on a strike Tigris is also short ═══════════════════════════
+def t_icarus_sl_with_tigris_on_same_strike():
+    f = t_entry_collisions()
+    k = f.kite
+    b0 = f.buys(S_IC_CE)
+    k.set_px(S_IC_PE, 60.0)                     # partner in profit
+    k.set_px(S_IC_CE, 140.0)                    # crosses Icarus's 137.75 trigger
+    check("IC SL: the broker bought back Icarus's 195 (its GTT); Tigris's 130 remain",
+          f.buys(S_IC_CE) - b0 == 195 and k.net.get(S_IC_CE) == -130, str(k.net.get(S_IC_CE)))
+    f.ic_sweep()
+    L = f.ic_legs()
+    check("IC SL: L1 booked SL from the GTT fill — no app buy-back on top",
+          L["L1"].state == L_CLOSED and L["L1"].exit_reason == "SL" and f.buys(S_IC_CE) - b0 == 195)
+    f.ic.process_due(int(time.time()) + 61)
+    L = f.ic_legs()
+    check("IC SL: L2 re-pinned to cost with a new GTT; adjustment L1A bought",
+          L["L2"].mtc_repinned and "L1A" in L and L["L1A"].state == L_OPEN)
+    check("IC SL: Tigris is untouched (4 legs open)",
+          f.ts._core.state == D_OPEN and len(f.ts._core.open_ids()) == 4)
+    f.audit("after Icarus's SL + adjustment")
+    return f
+
+
+# ═══ 6. Tigris flattens everything while Icarus holds the same strikes ═════════
+def t_tigris_exit_leaves_icarus():
+    f = t_entry_collisions()
+    k = f.kite
+    b_ce, b_pe = f.buys(S_IC_CE), f.buys(S_IC_PE)
+    f.crit.clear()
+    f.ts.square_off_all("EOD")
+    check("TSG EOD: Tigris buys back exactly its own 130 on each shared short",
+          f.buys(S_IC_CE) - b_ce == 130 and f.buys(S_IC_PE) - b_pe == 130)
+    check("TSG EOD: day closed in one pass, no stuck-exit page",
+          f.ts._core.state == D_CLOSED and not f.crit, str(f.crit))
+    check("TSG EOD: Icarus's condor is intact (−195 / −195) with both GTTs armed",
+          k.net.get(S_IC_CE) == -195 and k.net.get(S_IC_PE) == -195
+          and f.ic.current_group().state == G_OPEN
+          and {g["symbol"] for g in k.active_gtts()} >= {S_IC_CE, S_IC_PE})
+    f.audit("after Tigris's exit")
+
+
+# ═══ 7. 13 Nov 07:43 / 14 Nov 05:00 — a broker that cannot be read ═════════════
+def t_unreadable_broker_books_nothing():
+    f = t_entry_collisions()
+    k = f.kite
+    before = dict(k.net)
+    n_orders = len(k.events)
+    f.crit.clear()
+    # (a) overnight: session over, 05:00 token flush
+    k.market_open, k.logged_in = False, False
+    f.ic_sweep(8)
+    f.t2_sweep(8)
+    check("05:00 FLUSH: Icarus books NOTHING (was BROKER_EXIT after 3 sweeps)",
+          all(l.state == L_OPEN for l in f.ic_legs().values()))
+    check("05:00 FLUSH: Timberwolf books NOTHING", f.t2.group is not None)
+    # (b) the session opens but the app is still not logged in (stale token)
+    k.market_open = True
+    f.ic_sweep(8)
+    f.t2_sweep(8)
+    check("STALE TOKEN IN SESSION: still nothing booked, no order sent",
+          all(l.state == L_OPEN for l in f.ic_legs().values()) and f.t2.group is not None
+          and len(k.events) == n_orders and k.net == before)
+    # (c) token valid but Kite answers EMPTY outside the session (overnight reset)
+    k.logged_in, k.market_open = True, False
+    real_net, real_gtts = dict(k.net), dict(k.gtts)
+    k.net, k.gtts = {}, {}
+    f.ic_sweep(8)
+    f.t2_sweep(8)
+    check("EMPTY ANSWERS OUTSIDE THE SESSION: nothing inferred",
+          all(l.state == L_OPEN for l in f.ic_legs().values()) and f.t2.group is not None)
+    # (d) the same empty answers INSIDE the session, with no exit order to prove them
+    k.market_open = True
+    f.ic_sweep(8)
+    f.t2_sweep(8)
+    check("EMPTY ANSWERS, NO EXIT ORDER: not booked — 'no order, no booking'",
+          all(l.state == L_OPEN for l in f.ic_legs().values()) and f.t2.group is not None)
+    check("…and on SHARED contracts nobody even pages (whose position vanished is unknowable)",
+          not [t for t in f.sent["telegram"] if "NO exit order" in str(t)])
+    k.net, k.gtts = real_net, real_gtts
+    f.ic_sweep(3)
+    f.t2_sweep(3)
+    check("BACK TO NORMAL: positions and GTTs exactly as before", k.net == before)
+    f.audit("after the unreadable broker")
+
+
+def t_empty_reads_sole_holder_pages_once():
+    f = Fleet()
+    k = f.kite
+    f.ic_enter()
+    f.t2_enter()                                   # nobody shares a contract here
+    real_net, real_gtts = dict(k.net), dict(k.gtts)
+    k.net, k.gtts = {}, {}                         # Kite answers "nothing" with no exit order
+    f.ic_sweep(9)
+    f.t2_sweep(9)
+    check("NO ORDER, NO BOOKING (sole holder): Icarus and Timberwolf book nothing",
+          all(l.state == L_OPEN for l in f.ic_legs().values()) and f.t2.group is not None)
+    pages = [t for t in f.sent["telegram"] if "NO exit order" in str(t)]
+    check("…and page ONCE per short (Icarus L1, L2, Timberwolf) — not every sweep",
+          len(pages) == 3, str(len(pages)))
+    k.net, k.gtts = real_net, real_gtts
+    f.audit("after empty reads")
+
+
+# ═══ 8. a real manual exit is still recognised (sole holder) ═══════════════════
+def t_manual_exit_still_detected():
+    f = Fleet()
+    k = f.kite
+    f.t2_enter()
+    g = f.t2.group
+    check("MANUAL: Timberwolf alone on its strike", g is not None and k.net.get(S_VT) == -130)
+    k.manual(S_VT, "BUY", 130)                                   # human buys back in Kite …
+    k.gtts[str(g["sell"]["gtt_id"])]["status"] = "deleted"       # … and deletes the GTT
+    f.t2_sweep(3)
+    check("MANUAL: booked BROKER_EXIT at the manual fill (order found), hedge sold",
+          f.t2.group is None and k.net.get(W_SHARED, 0) == 0)
+    f.audit("after a manual exit")
+
+
+def t_manual_exit_on_shared_strike_is_not_guessed():
+    f = t_entry_collisions()
+    k = f.kite
+    g = f.t2.group
+    k.manual(S_VT, "BUY", 130)                                   # human buys 130 of the shared −260
+    k.gtts[str(g["sell"]["gtt_id"])]["status"] = "deleted"
+    f.crit.clear()
+    f.t2_sweep(5)
+    check("MANUAL ON A SHARED STRIKE: whose 130 was it? Nobody is booked by guesswork",
+          f.t2.group is not None and f.vet.pos is not None)
+
+
+# ═══ 9. overnight carry, start-up before login, then the 09:16 square-off ══════
+def t_carry_boot_before_login_then_squareoff():
+    f = t_icarus_sl_with_tigris_on_same_strike()       # L1 stopped, L2 at cost, L1A open
+    k = f.kite
+    f.ts.square_off_all("EOD")
+    f.t2.kill_close(f.ts_of(15, 25))
+    f.now = datetime(2026, 11, 13, 15, 31, tzinfo=IST)
+    check("CARRY: Icarus commits the carry (L2 + wings + L1A); Velvet carries too",
+          f.ic.commit_carry("LIVE") and f.vet.pos is not None)
+    held = dict(k.net)
+    armed = {str(g["id"]) for g in k.active_gtts()}
+    check("CARRY: two GTTs armed overnight (L2 cost-stop, L1A)", len(armed) == 2, str(armed))
+    # ── next morning 07:43: the app starts BEFORE the Kite login ──
+    k.market_open, k.logged_in = False, False
+    f2 = Fleet(kite=k, tmp=f.tmp, restore=True)
+    f2.now = datetime(2026, 11, 16, 7, 43, tzinfo=IST)
+    check("BOOT: Icarus restores the carried group",
+          f2.ic.restore_carry_payload(ic_carry_store.load_carry("IC_V2")))
+    f2.vet.resume_from_db()
+    open0 = sorted(l for l, v in f2.ic_legs().items() if v.state == L_OPEN)
+    f2.ic_sweep(8)                                      # the 13 Nov 07:43 sweeps
+    check("BOOT BEFORE LOGIN: no BROKER_EXIT — every carried leg still open",
+          sorted(l for l, v in f2.ic_legs().items() if v.state == L_OPEN) == open0, str(open0))
+    check("BOOT BEFORE LOGIN: pre-market GTT teardown waits, forgets no id",
+          f2.ic.premarket_cancel_gtts() is False
+          and sum(len(f2.ic.leg_runtime(l).get("gtt_ids") or []) for l in open0) == 2)
+    # ── 09:10 login ──
+    k.logged_in = True
+    f2.now = datetime(2026, 11, 16, 9, 10, tzinfo=IST)
+    check("09:10 LOGIN: overnight GTTs cancelled for real", f2.ic.premarket_cancel_gtts() is True
+          and not k.active_gtts())
+    # ── 09:15 open, 09:16 square-off ──
+    k.market_open = True
+    f2.ic_sweep(3)
+    f2.now = datetime(2026, 11, 16, 9, 16, tzinfo=IST)
+    n0 = len(k.events)
+    check("09:16: Icarus squares off every carried leg itself", f2.ic.morning_square_off() == 0
+          and f2.ic.current_group().state == G_CLOSED)
+    ev = [e for e in k.events[n0:] if e[0] != "GTT"]
+    check("09:16: short bought back first, then the longs sold — 3 legs, 3 orders",
+          [e[0] for e in ev] == ["BUY", "SELL", "SELL", "SELL"] or len(ev) == len(open0), str(ev))
+    check("09:16: Icarus's contracts are flat; Velvet's carried position is untouched",
+          k.net.get(S_IC_PE, 0) == 0 and k.net.get(W_IC_CE, 0) == 0 and k.net.get(W_IC_PE, 0) == 0
+          and k.net.get(S_VT) == held.get(S_VT) and f2.vet.pos is not None, str(k.net))
+    f2.audit("after the 09:16 square-off")
+
+
+# ═══ 9b. the login itself, before the open (how the friend remembers 13 Nov) ═══
+def t_login_moment_before_open_books_nothing():
+    f = Fleet()
+    k = f.kite
+    f.ic_enter()
+    f.now = datetime(2026, 11, 12, 15, 31, tzinfo=IST)
+    check("LOGIN: Icarus carries a full condor overnight", f.ic.commit_carry("LIVE"))
+    k.market_open, k.logged_in = False, False
+    f2 = Fleet(kite=k, tmp=f.tmp, restore=True)
+    f2.now = datetime(2026, 11, 13, 7, 42, tzinfo=IST)
+    f2.ic.restore_carry_payload(ic_carry_store.load_carry("IC_V2"))
+    n0 = len(k.events)
+    f2.ic_sweep(2)                                   # two sweeps before the login …
+    k.logged_in = True                               # … the Kite login lands at 07:43 …
+    f2.ic_sweep(4)                                   # … and the sweeps go on
+    check("LOGIN: sweeps straddling the login book nothing",
+          all(l.state == L_OPEN for l in f2.ic_legs().values()))
+    # Kite, readable now, but answering EMPTY before the open (positions not
+    # loaded yet / GTT list blank) — whatever it says, 07:43 is not a session
+    real_net, real_gtts = dict(k.net), dict(k.gtts)
+    k.net = {}
+    f2.ic_sweep(4)
+    k.gtts = {}
+    f2.ic_sweep(4)
+    check("LOGIN: empty pre-market answers after the login book nothing either",
+          all(l.state == L_OPEN for l in f2.ic_legs().values()) and len(k.events) == n0)
+    k.net, k.gtts = real_net, real_gtts
+    f2.now = datetime(2026, 11, 13, 7, 44, tzinfo=IST)
+    check("LOGIN: the pre-market teardown now cancels the overnight GTTs for real",
+          f2.ic.premarket_cancel_gtts() is True and not k.active_gtts())
+    k.market_open = True
+    f2.ic_sweep(3)
+    f2.now = datetime(2026, 11, 13, 9, 16, tzinfo=IST)
+    check("LOGIN: 09:16 — all four carried legs squared off by the app, account flat",
+          f2.ic.morning_square_off() == 0 and k.flat() and f2.ic.current_group().state == G_CLOSED)
+    f2.audit("after the login-morning square-off")
+
+
+# ═══ 10. a network / token outage in the middle of the session ═════════════════
+def t_midday_outage():
+    f = t_entry_collisions()
+    k = f.kite
+    before = dict(k.net)
+    k.logged_in = False
+    f.ic_sweep(10)
+    f.t2_sweep(10)
+    f.t2._recon_tick(f.ts_of(11, 31))
+    f.t2._recon_tick(f.ts_of(11, 35))
+    check("OUTAGE: six minutes unreadable → nothing booked, nothing sent",
+          all(l.state == L_OPEN for l in f.ic_legs().values()) and f.t2.group is not None
+          and k.net == before)
+    k.logged_in = True
+    f.ic_sweep(3)
+    f.t2_sweep(3)
+    f.audit("after the outage")
+
+
+# ═══ 11. everything exits at the same moment, on shared contracts ══════════════
+def t_parallel_exits():
+    f = t_entry_collisions()
+    k = f.kite
+    errs = []
+
+    def run(fn):
+        try:
+            fn()
+        except Exception as e:                      # pragma: no cover
+            errs.append(repr(e))
+    th = [threading.Thread(target=run, args=(fn,)) for fn in (
+        lambda: f.ic.force_square_off_all(reason="KILL"),
+        lambda: f.ts.kill_all(),
+        lambda: f.t2.kill_close(f.ts_of(15, 20)),
+        lambda: f.vet_exit())]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join(60)
+    check("PARALLEL: four strategies exit at once without an exception", not errs, str(errs))
+    check("PARALLEL: the account is completely flat", k.flat(), str({s: q for s, q in k.net.items() if q}))
+    check("PARALLEL: every strategy's book is closed",
+          f.ic.current_group().state == G_CLOSED and f.ts._core.state == D_CLOSED
+          and f.t2.group is None and f.vet.pos is None)
+    over = {s: (f.buys(s), f.sells(s)) for s in k.px if f.buys(s) != f.sells(s)}
+    check("PARALLEL: bought == sold on every contract (nobody closed anyone else's leg)", not over, str(over))
+    check("PARALLEL: no GTT left armed", not k.active_gtts(), str(k.active_gtts()))
+    f.audit("after parallel exits")
+
+
+# ═══ 12. simultaneous entries on the same contracts ════════════════════════════
+def t_parallel_entries():
+    f = Fleet()
+    k = f.kite
+    errs = []
+
+    def run(fn):
+        try:
+            fn()
+        except Exception as e:                      # pragma: no cover
+            errs.append(repr(e))
+    th = [threading.Thread(target=run, args=(fn,)) for fn in (f.ic_enter, f.ts_enter, f.vet_enter, f.t2_enter)]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join(60)
+    check("PARALLEL ENTRY: all four enter at the same moment", not errs
+          and f.ic.current_group() is not None and f.ts._core is not None
+          and f.vet.pos is not None and f.t2.group is not None, str(errs))
+    f.audit("after parallel entries")
+    check("PARALLEL ENTRY: reservations are released once the legs are on the books",
+          not BT.LEDGER._reserved, str(BT.LEDGER._reserved))
+
+
+# ═══ 13. a mid-day restart with shared contracts ═══════════════════════════════
+def t_restart_with_shared_contracts():
+    f = t_entry_collisions()
+    k = f.kite
+    f2 = Fleet(kite=k, tmp=f.tmp, restore=True)
+    f2.now = f.now
+    rows = TMA2Repo(db_path=f.t2_db).open_rows() if hasattr(TMA2Repo, "open_rows") else None
+    if rows is None:
+        import sqlite3
+        c = sqlite3.connect(f.t2_db)
+        c.row_factory = sqlite3.Row
+        rows = [dict(r) for r in c.execute("SELECT * FROM tma2_trades WHERE status='OPEN'")]
+    f2.t2.adopt_rows(rows, kite=k)
+    check("RESTART: Timberwolf adopts its group although the strike shows −260 (was: DISABLED)",
+          f2.t2.group is not None and not f2.t2.disabled)
+    f2.vet.resume_from_db()
+    check("RESTART: Velvet resumes; Tigris and Icarus restore their sessions",
+          f2.vet.pos is not None and f2.ts._core is not None and len(f2.ts._core.open_ids()) == 4
+          and f2.ic.restore_session_payload(ic_carry_store.load_session("IC_V2")))
+    f2.audit("after the restart")
+    f2.vet_exit()
+    f2.t2.kill_close(f2.ts_of(15, 20))
+    f2.ts.kill_all()
+    f2.ic.force_square_off_all(reason="KILL")
+    check("RESTART: the restored fleet flattens cleanly", k.flat(), str({s: q for s, q in k.net.items() if q}))
+    over = {s: (f2.buys(s), f2.sells(s)) for s in k.px if f2.buys(s) != f2.sells(s)}
+    check("RESTART: bought == sold on every contract", not over, str(over))
+
+
+# ═══ 14. each strategy alone still uses broker truth (nothing was dulled) ══════
+def t_sole_holder_guards_intact():
+    f = Fleet()
+    k = f.kite
+    f.vet_enter()
+    k.manual(S_VT, "BUY", 130)                         # human flattens Velvet's short in Kite
+    b0 = f.buys(S_VT)
+    f.vet_exit()
+    check("SOLE HOLDER: Velvet sees its short already flat and does NOT buy again",
+          f.buys(S_VT) == b0 and f.vet.pos is None and k.net.get(S_VT, 0) == 0)
+    f = Fleet()
+    k = f.kite
+    f.ic_enter()
+    k.manual(S_IC_CE, "BUY", 195)
+    b0 = f.buys(S_IC_CE)
+    f.ic.force_square_off_all(reason="EOD")
+    check("SOLE HOLDER: Icarus skips the buy-back of a leg already flat at the broker",
+          f.buys(S_IC_CE) == b0 and k.net.get(S_IC_CE, 0) == 0)
+
+
+# ═══ 15. entry failures on contracts another strategy holds ════════════════════
+def t_entry_unwinds_touch_only_own_legs():
+    f = Fleet()
+    k = f.kite
+    f.ts_enter()
+    f.vet_enter()
+    held = dict(k.net)
+    # Timberwolf: hedge fills, SELL is rejected by the broker → hedge unwound
+    k.reject[S_VT] = "RMS: margin exceeds"
+    f.t2_enter()
+    k.reject.pop(S_VT)
+    check("ENTRY UNWIND (Timberwolf): no group, only its own hedge sold back",
+          f.t2.group is None and {s: q for s, q in k.net.items() if q} == {s: q for s, q in held.items() if q},
+          str(k.net))
+    # Icarus: L2 short rejected → L1 bought back, wings sold; Tigris's shorts untouched
+    k.reject[S_IC_PE] = "Insufficient funds"
+    ok = f.ic_enter()
+    k.reject.pop(S_IC_PE)
+    check("ENTRY UNWIND (Icarus): aborted, every filled leg flattened, Tigris/Velvet intact",
+          not ok and {s: q for s, q in k.net.items() if q} == {s: q for s, q in held.items() if q},
+          str(k.net))
+    f.audit("after two entry unwinds")
+    # Velvet on a second account-day: main rejected after the wing filled
+    f2 = Fleet()
+    k2 = f2.kite
+    f2.t2_enter()
+    held2 = dict(k2.net)
+    k2.reject[S_VT] = "RMS"
+    v = f2.vet_enter()
+    k2.reject.pop(S_VT)
+    check("ENTRY UNWIND (Velvet): no position, its wing sold back, Timberwolf intact",
+          v is None and {s: q for s, q in k2.net.items() if q} == {s: q for s, q in held2.items() if q},
+          str(k2.net))
+    f2.audit("after Velvet's entry unwind")
+
+
+# ═══ 16. a partly filled exit on a shared strike is finished, not repeated ═════
+def t_partial_fill_then_retry_on_shared_strike():
+    f = t_entry_collisions()
+    k = f.kite
+    b0 = f.buys(S_VT)
+    k.partial_once[S_VT] = 65                      # Velvet's buy-back fills 65 of 130 …
+    k.modify_ok = False                            # … and cannot be re-priced
+    f.crit.clear()
+    f.vet_exit(ts=2000)
+    check("PARTIAL: Velvet is NOT closed, wing kept, one page",
+          f.vet.pos is not None and k.net.get(S_VT) == -195
+          and sum("NOT CONFIRMED" in c for c in f.crit) == 1, f"{k.net.get(S_VT)} {f.crit}")
+    check("PARTIAL: the half-filled order was cancelled", not k.open_orders())
+    k.modify_ok = True
+    f.vet.retry_exit(2060)
+    filled = sum(o["filled_quantity"] for o in k.orders
+                 if o["tradingsymbol"] == S_VT and o["transaction_type"] == "BUY")
+    check("PARTIAL: the retry buys only the missing 65 — 130 in total, never 195",
+          f.vet.pos is None and filled == 130 and k.net.get(S_VT) == -130, f"filled {filled} net {k.net.get(S_VT)}")
+    check("PARTIAL: Timberwolf untouched", f.t2.group is not None and not f.t2.group.get("exit_state"))
+    f.audit("after the partial fill + retry")
+
+    # the same for Timberwolf (Velvet holds the strike), and for Tigris / Icarus
+    f = t_entry_collisions()
+    k = f.kite
+    k.partial_once[S_VT] = 65
+    k.modify_ok = False
+    f.t2.kill_close(f.ts_of(13, 30))
+    check("PARTIAL (Timberwolf): stuck, hedge kept", f.t2.group is not None and k.net.get(S_VT) == -195)
+    k.modify_ok = True
+    f.t2.on_minute(f.ts_of(13, 31), None, f.chain)
+    check("PARTIAL (Timberwolf): retry buys the missing 65 only; Velvet untouched",
+          f.t2.group is None and k.net.get(S_VT) == -130 and f.vet.pos is not None, str(k.net.get(S_VT)))
+    k.partial_once[S_IC_CE] = 65
+    k.modify_ok = False
+    f.ts.square_off_all("EOD")
+    k.modify_ok = True
+    f.ts.on_minute(f.now + timedelta(minutes=1))
+    check("PARTIAL (Tigris): retry completes with its own 130; Icarus's 195 untouched",
+          f.ts._core.state == D_CLOSED and k.net.get(S_IC_CE) == -195, str(k.net.get(S_IC_CE)))
+    f.audit("after partial fills across strategies")
+    # Icarus alone on its strikes now → broker truth sizes the retry
+    k.partial_once[S_IC_CE] = 65
+    k.modify_ok = False
+    f.ic.force_square_off_all(reason="KILL")
+    k.modify_ok = True
+    f.ic.force_square_off_all(reason="KILL")
+    check("PARTIAL (Icarus): second pass closes the remaining 130 — flat, not long",
+          k.net.get(S_IC_CE, 0) == 0 and f.ic.current_group().state == G_CLOSED, str(k.net.get(S_IC_CE)))
+
+
+# ═══ 17. every other exit route, each on a shared contract ═════════════════════
+def t_exit_routes_on_shared_contracts():
+    # Timberwolf target (app-driven) while Velvet is short the same strike
+    f = t_entry_collisions()
+    k = f.kite
+    b0 = f.buys(S_VT)
+    k.set_px(S_VT, 9.5)
+    f.t2.on_minute(f.ts_of(13, 10), None, f.chain)
+    check("TP (Timberwolf): one buy-back of 130, GTT cancelled, Velvet untouched",
+          f.t2.group is None and f.buys(S_VT) - b0 == 130 and k.net.get(S_VT) == -130
+          and not any(g["symbol"] == S_VT for g in k.active_gtts()))
+    f.audit("after Timberwolf's target")
+
+    # Timberwolf GTT gap: triggered, limit left behind, the app finishes ITS order
+    f = t_entry_collisions()
+    k = f.kite
+    b0 = f.buys(S_VT)
+    k.set_px(S_VT, 250.0)                            # gaps past trigger 224 and limit ≈235
+    f.t2_sweep()
+    filled = sum(o["filled_quantity"] for o in k.orders
+                 if o["tradingsymbol"] == S_VT and o["transaction_type"] == "BUY")
+    check("GTT GAP (Timberwolf): its resting GTT order is re-priced and filled — 130 bought, once",
+          f.t2.group is None and filled == 130 and k.net.get(S_VT) == -130, f"{filled} {k.net.get(S_VT)}")
+    f.audit("after the GTT gap")
+
+    # Tigris basket stop while Icarus is short the same strikes
+    f = t_entry_collisions()
+    k = f.kite
+    k.set_px(S_IC_CE, 127.0)
+    k.set_px(S_IC_PE, 127.0)                         # −₹7,800 on Tigris; under Icarus's 137.75 stops
+    f.ts.on_minute(f.now)
+    check("MTM STOP (Tigris): closed by its own orders; Icarus still short 195 / 195",
+          f.ts._core.state == D_CLOSED and k.net.get(S_IC_CE) == -195 and k.net.get(S_IC_PE) == -195
+          and f.ic.current_group().state == G_OPEN)
+    f.audit("after Tigris's basket stop")
+
+    # Icarus's cost-stop (after an SL) fires on the strike Tigris is short
+    f = t_icarus_sl_with_tigris_on_same_strike()
+    k = f.kite
+    b0 = f.buys(S_IC_PE)
+    k.set_px(S_IC_PE, 98.0)                          # L2 re-pinned to cost 97 → GTT buys back
+    f.ic_sweep()
+    check("COST STOP (Icarus): L2 closed by its GTT (195); Tigris's 130 on that strike remain",
+          f.ic_legs()["L2"].state == L_CLOSED and f.buys(S_IC_PE) - b0 == 195
+          and k.net.get(S_IC_PE) == -130, str(k.net.get(S_IC_PE)))
+    # … and the adjustment's stop (a long) fires
+    adj = f.ic_legs()["L1A"]
+    s0 = f.sells(adj.symbol)
+    k.set_px(adj.symbol, 40.0)                       # GAPS below the stop (42) and its limit
+    f.ic_sweep(ICMON.ICGTTMonitor.FILL_CONFIRM_RETRIES)
+    sold = sum(o["filled_quantity"] for o in k.orders
+               if o["tradingsymbol"] == adj.symbol and o["transaction_type"] == "SELL")
+    check("ADJ STOP GAP (Icarus): GTT limit left behind → cancelled, market-out — 195 sold, once",
+          f.ic_legs()["L1A"].state == L_CLOSED and sold == 195 and k.net.get(adj.symbol, 0) == 0,
+          f"sold {sold} net {k.net.get(adj.symbol)}")
+    f.audit("after Icarus's cost-stop and adjustment stop")
+
+    # Velvet: stop/target check, then a kill, with Timberwolf on the strike
+    f = t_entry_collisions()
+    k = f.kite
+    b0 = f.buys(S_VT)
+    f.vet.kill(ts=3000)
+    check("KILL (Velvet): closes its own 130 once; Timberwolf untouched",
+          f.vet.pos is None and f.buys(S_VT) - b0 == 130 and f.t2.group is not None)
+    f.audit("after Velvet's kill")
+
+    # positions unreadable for everyone, everything exits anyway (order truth)
+    f = t_entry_collisions()
+    k = f.kite
+    k.positions_readable = False
+    f.vet_exit()
+    f.t2.kill_close(f.ts_of(15, 20))
+    f.ts.kill_all()
+    f.ic.force_square_off_all(reason="KILL")
+    over = {s: (f.buys(s), f.sells(s)) for s in k.px if f.buys(s) != f.sells(s)}
+    check("POSITIONS UNREADABLE: all four still exit — flat, bought == sold everywhere",
+          k.flat() and not over, f"{ {s: q for s, q in k.net.items() if q} } {over}")
+
+
+# ═══ 17b. OPPOSITE sides of one contract (Icarus's adjustment vs a short) ══════
+def _icarus_l1_stopped(f):
+    k = f.kite
+    f.ic_enter()
+    k.set_px(S_IC_PE, 60.0)
+    k.set_px(S_IC_CE, 140.0)                         # L1's GTT fires
+    f.ic_sweep()
+    f.ic.process_due(int(time.time()) + 61)          # cost-stop on L2 + the adjustment BUY
+    return f.ic_legs().get("L1A")
+
+
+def t_opposite_sides_are_avoided():
+    S_NEXT = sym(25100, "CE")
+    # (a) the adjustment's natural pick is the strike Velvet and Timberwolf are SHORT
+    f = Fleet(adj_cap=205)                           # cap 205 → highest CE ≤ 205 is 25050 @200
+    k = f.kite
+    f.vet_enter()
+    f.t2_enter()
+    adj = _icarus_l1_stopped(f)
+    check("ADJ vs SHORT: Icarus does NOT buy the strike Velvet/Timberwolf are short — next one taken",
+          adj is not None and adj.symbol == S_NEXT and k.net.get(S_VT) == -260,
+          f"{getattr(adj, 'symbol', None)} net {k.net.get(S_VT)}")
+    f.audit("after the adjustment avoided a short strike")
+
+    # (b) the other way round: Icarus's adjustment is LONG the strike others would sell
+    f = Fleet(adj_cap=205)
+    k = f.kite
+    adj = _icarus_l1_stopped(f)
+    check("setup: with nobody on it, the adjustment takes 25050 CE", adj is not None and adj.symbol == S_VT)
+    v = f.vet_enter()
+    f.t2_enter()
+    check("SHORT vs ADJ: Velvet steps one strike further instead of selling Icarus's long",
+          v is not None and v["main"]["tradingsymbol"] == S_NEXT, str(v and v["main"]["tradingsymbol"]))
+    check("SHORT vs ADJ: Timberwolf takes the next strike under its cap too",
+          f.t2.group is not None and f.t2.group["sell"]["symbol"] == S_NEXT,
+          str(f.t2.group and f.t2.group["sell"]["symbol"]))
+    check("SHORT vs ADJ: Icarus's long is whole at the broker (+195)", k.net.get(S_VT) == 195)
+    f.audit("after shorts avoided a long strike")
+    f.flatten_all()
+    over = {x: (f.buys(x), f.sells(x)) for x in k.px if f.buys(x) != f.sells(x)}
+    check("…and everything flattens: flat, bought == sold", k.flat() and not over, str(over))
+
+
+def t_opposite_sides_if_they_happen_anyway():
+    """Avoidance switched off (as after a restart into an old overlap): the
+    account nets the two sides, yet every strategy still closes only its own."""
+    f = Fleet(adj_cap=205)
+    k = f.kite
+    f.vet_enter()
+    f.t2_enter()
+    real = BT.LEDGER.opposite
+    BT.LEDGER.opposite = lambda *a, **kw: None
+    try:
+        adj = _icarus_l1_stopped(f)
+    finally:
+        BT.LEDGER.opposite = real
+    check("OPPOSITE: Icarus is long 195 of the strike two strategies are short 260 → broker nets −65",
+          adj is not None and adj.symbol == S_VT and k.net.get(S_VT) == -65, str(k.net.get(S_VT)))
+    f.audit("with opposite sides netted")
+    check("OPPOSITE: nobody treats the netted −65 as its own position",
+          BT.own_net_qty(f.ic.executor, S_VT, "IC_V2") is None
+          and BT.own_net_qty(f.vet.executor, S_VT, "VET_V1") is None)
+    # Icarus's adjustment stop fires: its GTT sells exactly its 195
+    s0 = f.sells(S_VT)
+    k.set_px(S_VT, 139.8)                            # 30% stop of 200 → 140 (limit 139.6)
+    f.ic_sweep()
+    check("OPPOSITE: the adjustment's GTT sells its own 195; the two shorts remain (−260)",
+          f.ic_legs()["L1A"].state == L_CLOSED and f.sells(S_VT) - s0 == 195 and k.net.get(S_VT) == -260,
+          str(k.net.get(S_VT)))
+    f.t2_sweep(4)
+    check("OPPOSITE: Velvet and Timberwolf are untouched by it",
+          f.vet.pos is not None and f.t2.group is not None)
+    f.audit("after the adjustment's stop")
+    b0 = f.buys(S_VT)
+    f.vet_exit()
+    f.t2.kill_close(f.ts_of(15, 20))
+    check("OPPOSITE: each short then buys back exactly its own 130",
+          f.buys(S_VT) - b0 == 260 and k.net.get(S_VT, 0) == 0 and f.vet.pos is None and f.t2.group is None)
+    f.flatten_all()
+    over = {x: (f.buys(x), f.sells(x)) for x in k.px if f.buys(x) != f.sells(x)}
+    check("OPPOSITE: account flat, bought == sold on every contract", k.flat() and not over, str(over))
+
+
+# ═══ 18. randomised days: any order of entries, exits, stops, outages ══════════
+def t_random_days(seeds=150):
+    import random
+    bad = []
+    for seed in range(seeds):
+        rnd = random.Random(seed)
+        f = Fleet()
+        f.sent["telegram"].clear()
+        k = f.kite
+        acts = {
+            "ic_in": f.ic_enter, "ts_in": f.ts_enter, "vet_in": f.vet_enter, "t2_in": f.t2_enter,
+            "vet_out": lambda: f.vet.pos is not None and f.vet_exit(ts=2000 + rnd.randint(0, 9) * 60),
+            "t2_out": lambda: f.t2.kill_close(f.ts_of(14, rnd.randint(0, 59))),
+            "ts_out": lambda: f.ts._core is not None and f.ts.square_off_all("EOD"),
+            "ic_out": lambda: f.ic.current_group() is not None and f.ic.force_square_off_all(reason="EOD"),
+            "shock_vt": lambda: k.set_px(S_VT, 226.0),          # Timberwolf's stop
+            "shock_ic": lambda: k.set_px(S_IC_CE, 140.0),       # Icarus's L1 stop
+            "calm": lambda: (k.set_px(S_VT, 200.0), k.set_px(S_IC_CE, 97.0)),
+            "sweep": lambda: (f.ic_sweep(3), f.t2_sweep(3)),
+            "due": lambda: f.ic.process_due(int(time.time()) + 61),
+            "recon": lambda: (f.t2._recon_tick(f.ts_of(13, rnd.randint(0, 20))),
+                              f.t2._recon_tick(f.ts_of(13, 30 + rnd.randint(0, 20)))),
+            "outage": lambda: (setattr(k, "logged_in", False), f.ic_sweep(4), f.t2_sweep(4),
+                               setattr(k, "logged_in", True)),
+            "night": lambda: (setattr(k, "market_open", False), setattr(k, "logged_in", False),
+                              f.ic_sweep(4), f.t2_sweep(4),
+                              setattr(k, "logged_in", True), setattr(k, "market_open", True)),
+            "blind": lambda: setattr(k, "positions_readable", not k.positions_readable),
+        }
+        plan = ["ic_in", "ts_in", "vet_in", "t2_in", "vet_out", "t2_out", "ts_out", "ic_out"] \
+            + [rnd.choice(["shock_vt", "shock_ic", "calm", "sweep", "due", "recon", "outage",
+                           "night", "blind", "sweep", "sweep"]) for _ in range(10)]
+        rnd.shuffle(plan)
+        done = []
+        try:
+            for a in plan:
+                done.append(a)
+                acts[a]()
+                if a in ("shock_vt", "shock_ic"):
+                    f.ic_sweep(3)
+                    f.t2_sweep(3)
+                ok, why = f.audit_quiet()
+                if not ok:
+                    bad.append((seed, done[-6:], why))
+                    break
+            else:
+                f.flatten_all()
+                over = {x: (f.buys(x), f.sells(x)) for x in k.px if f.buys(x) != f.sells(x)}
+                if not k.flat() or over or k.active_gtts():
+                    bad.append((seed, "final", f"net { {x: q for x, q in k.net.items() if q} } "
+                                               f"over {over} gtts {len(k.active_gtts())}"))
+                booked = [t for t in f.sent["telegram"] if "BROKER_EXIT" in str(t)]
+                if booked:
+                    bad.append((seed, "final", f"BROKER_EXIT booked: {booked[:1]}"))
+        except Exception as e:
+            import traceback
+            bad.append((seed, done[-6:], f"{e!r} {traceback.format_exc()[-400:]}"))
+    check(f"RANDOM DAYS: {seeds} shuffled days (entries, exits, stops, outages, blind positions) — "
+          f"the account always matches the books, ends flat, bought == sold, no GTT left",
+          not bad, str(bad[:3]))
+
+
+SCENARIOS = (t_entry_collisions, t_velvet_exit_leaves_timberwolf, t_timberwolf_exit_leaves_velvet,
+             t_gtt_fires_on_shared_strike, t_icarus_sl_with_tigris_on_same_strike,
+             t_tigris_exit_leaves_icarus, t_unreadable_broker_books_nothing,
+             t_empty_reads_sole_holder_pages_once,
+             t_manual_exit_still_detected, t_manual_exit_on_shared_strike_is_not_guessed,
+             t_carry_boot_before_login_then_squareoff, t_login_moment_before_open_books_nothing,
+             t_midday_outage, t_parallel_exits,
+             t_parallel_entries, t_restart_with_shared_contracts, t_sole_holder_guards_intact,
+             t_entry_unwinds_touch_only_own_legs, t_partial_fill_then_retry_on_shared_strike,
+             t_exit_routes_on_shared_contracts, t_opposite_sides_are_avoided,
+             t_opposite_sides_if_they_happen_anyway, t_random_days)
+
+if __name__ == "__main__":
+    only = sys.argv[1:]
+    for fn in SCENARIOS:
+        if only and fn.__name__ not in only:
+            continue
+        print(f"\n── {fn.__name__} ──")
+        try:
+            fn()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            FAILS.append(f"{fn.__name__} raised {e!r}")
+    print(f"\n{PASSED[0]} checks passed, {len(FAILS)} failed")
+    if FAILS:
+        for x in FAILS:
+            print("  FAILED:", x)
+        sys.exit(1)
+    print("ALL FLEET LIVE CHECKS PASSED")

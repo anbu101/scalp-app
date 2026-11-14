@@ -77,7 +77,52 @@ def _fill_pick():
     return fp
 # ── FILL_TRUTH_20261102 END ──
 
+# ── BROKER_TRUTH_20261114 BEGIN ── shared broker-truth rules (strict reads,
+# session gate, live ledger). Loaded by path when the package is stubbed.
+def _bt():
+    global _BT
+    try:
+        return _BT
+    except NameError:
+        pass
+    try:
+        from app.execution import broker_truth as bt
+    except Exception:
+        import importlib.util
+        import sys as _sys
+        from pathlib import Path
+        bt = _sys.modules.get("_broker_truth")
+        if bt is None:
+            spec = importlib.util.spec_from_file_location(
+                "_broker_truth",
+                Path(__file__).resolve().parents[2] / "execution" / "broker_truth.py")
+            bt = importlib.util.module_from_spec(spec)
+            _sys.modules["_broker_truth"] = bt
+            spec.loader.exec_module(bt)
+    _BT = bt
+    return bt
+# ── BROKER_TRUTH_20261114 END ──
+
+
 class ICGTTMonitor:
+
+    # ── BROKER_TRUTH_20261114 ── WHAT CHANGED AND WHY
+    # 13 Nov 07:43 (app start, before the day's Kite login) and 14 Nov 05:00
+    # (overnight session flush): get_gtts() and get_open_positions() both
+    # answered [] because they could not READ. Three sweeps later this
+    # monitor concluded "GTTs gone AND position gone" and booked BROKER_EXIT
+    # on live carried shorts that were still open at the broker; the 09:16
+    # square-off then had nothing to close. (Until 12 Nov a second bug hid
+    # this one: the pre-market teardown wrongly "confirmed" every GTT gone
+    # within seconds of start-up and emptied the ids this monitor watches.)
+    #   * the GTT list and the positions are STRICT reads: unreadable = do
+    #     nothing this sweep, never "empty";
+    #   * outside the derivatives session (09:15–15:40, trading days) the
+    #     monitor infers nothing — a GTT cannot fire and nobody can exit;
+    #   * the position is THIS strategy's only when no other strategy holds
+    #     the contract; shared or unreadable = unknown = no inference;
+    #   * "GTTs gone and position gone" is booked ONLY with the exit order
+    #     that proves it. No order → alert once, change nothing.
 
     POLL_INTERVAL        = 20
     FILL_CONFIRM_RETRIES = 3
@@ -92,6 +137,8 @@ class ICGTTMonitor:
         self._running = False
         self._missing = {}        # leg_id -> consecutive all-missing sweeps
         self._pending = {}        # gtt_id -> fill-confirm retry count
+        self._unproven = set()    # ── BROKER_TRUTH_20261114 ── legs alerted "gone, no order"
+        self._unread_logged = 0.0
 
     def start(self):
         if self._running:
@@ -122,11 +169,22 @@ class ICGTTMonitor:
         if not watch:
             return
 
-        # one broker fetch per sweep (fetch error → touch NOTHING)
-        try:
-            gtts = self.executor.get_gtts()
-        except Exception as e:
-            write_audit_log(f"[IC_GTT_MONITOR][FETCH_FAIL] no action ERR={e}")
+        # ── BROKER_TRUTH_20261114 ── nothing can fire or fill outside the
+        # session: infer NOTHING (and forget half-counted evidence).
+        if not self._session_open():
+            self._missing.clear()
+            self._pending.clear()
+            self._unproven.clear()        # a new session pages afresh
+            return
+
+        # one broker fetch per sweep. STRICT: unreadable → touch NOTHING.
+        gtts = _bt().read_gtts(self.executor)
+        if gtts is None:
+            self._missing.clear()
+            if time.time() - self._unread_logged > 300:
+                self._unread_logged = time.time()
+                write_audit_log(f"[IC_GTT_MONITOR][{self.sid}] GTT list unreadable "
+                                f"(session / token / network) — no action, retrying")
             return
         by_id = {str(g.get("id")): g for g in gtts}
 
@@ -166,7 +224,17 @@ class ICGTTMonitor:
                 # broker, ESCALATE: cancel the stale limit, market-out via the
                 # single close path. Only when the position is genuinely gone
                 # do we fall back to the old BROKER_EXIT stamp.
-                if self._position_open(leg):
+                own = self._own_qty(leg)          # ── BROKER_TRUTH_20261114 ──
+                if own is None:
+                    # positions unreadable, or the contract is shared with
+                    # another strategy: cannot tell "filled" from "resting".
+                    # Keep the count at the threshold and look again.
+                    self._pending[gid] = self.FILL_CONFIRM_RETRIES - 1
+                    write_audit_log(f"[IC_GTT_MONITOR] gtt={gid} triggered, fill "
+                                    f"unconfirmed and {leg.symbol} position not "
+                                    f"attributable — no action, retrying")
+                    continue
+                if self._is_open(leg, own):
                     # sliced legs: sibling GTTs share the trigger and fired
                     # together — their resting limits are the same double-
                     # fill hazard. Sweep them ALL before the market-out.
@@ -214,7 +282,14 @@ class ICGTTMonitor:
         if count < self.MISSING_THRESHOLD:
             return
 
-        if self._position_open(leg):
+        own = self._own_qty(leg)                  # ── BROKER_TRUTH_20261114 ──
+        if own is None:
+            self._missing[leg.leg_id] = self.MISSING_THRESHOLD - 1
+            write_audit_log(f"[IC_GTT_MONITOR] {leg.leg_id} GTTs missing but "
+                            f"{leg.symbol} position unreadable / shared — no "
+                            f"action, retrying")
+            return
+        if self._is_open(leg, own):
             # NAKED SHORT: protection deleted but position alive. Alert loudly,
             # change nothing — the tick poll still guards the SL level.
             write_audit_log(f"[IC_GTT_MONITOR][NAKED] {leg.symbol} position "
@@ -232,10 +307,30 @@ class ICGTTMonitor:
             return
 
         price, oid = self._fill_from_orders(leg)        # ── FILL_TRUTH_20261102 ──
-        price = price or self._price_fallback(leg)
+        # ── BROKER_TRUTH_20261114 ── no order, no booking. A real manual exit
+        # leaves a COMPLETE order in today's book; "gone" with no order is a
+        # read we cannot trust (or a prior-day exit a human must confirm).
+        if not oid or not price:
+            self._missing.pop(leg.leg_id, None)
+            if leg.leg_id not in self._unproven:
+                self._unproven.add(leg.leg_id)
+                write_audit_log(f"[IC_GTT_MONITOR][UNPROVEN] {leg.leg_id} {leg.symbol} "
+                                f"GTTs and position read as gone but NO exit order "
+                                f"found — NOT booked")
+                try:
+                    from app.api.telegram_api import notify_critical
+                    notify_critical({"message":
+                        f"{self.sid}: {leg.symbol} ({leg.leg_id}) reads as gone at the "
+                        f"broker (no GTT, no position) but there is NO exit order for "
+                        f"it today. The app has NOT booked a close. Check Kite "
+                        f"Positions and GTT now.", "severity": "error"})
+                except Exception:
+                    pass
+            return
         write_audit_log(f"[IC_GTT_MONITOR] {leg.leg_id} GTTs gone AND position "
                         f"gone → BROKER_EXIT @{price} order={oid}")
         self._missing.pop(leg.leg_id, None)
+        self._unproven.discard(leg.leg_id)
         self._handoff(leg, price, "BROKER_EXIT", oid)
 
     # ------------------------------------------------------------------
@@ -362,12 +457,22 @@ class ICGTTMonitor:
             except Exception as e:
                 write_audit_log(f"[IC_GTT_MONITOR][STALE_CANCEL_ERR] {oid} {e}")
 
+    # ── BROKER_TRUTH_20261114 BEGIN ──
+    def _session_open(self) -> bool:
+        return _bt().session_open()
+
+    def _own_qty(self, leg) -> Optional[int]:
+        """This strategy's net quantity on the leg's contract, or None when
+        the positions are unreadable or another strategy holds it too."""
+        return _bt().own_net_qty(self.executor, leg.symbol, self.sid,
+                                 log=write_audit_log)
+
+    @staticmethod
+    def _is_open(leg, own: int) -> bool:
+        return own < 0 if leg.is_short else own > 0
+
     def _position_open(self, leg) -> bool:
-        try:
-            positions = self.executor.get_open_positions() or []
-        except Exception:
-            return True    # can't verify → assume open (never close blind)
-        for p in positions:
-            if p.get("tradingsymbol") == leg.symbol and int(p.get("quantity") or 0) != 0:
-                return True
-        return False
+        """Kept for callers outside this file: unknown counts as OPEN."""
+        own = self._own_qty(leg)
+        return True if own is None else self._is_open(leg, own)
+    # ── BROKER_TRUTH_20261114 END ──

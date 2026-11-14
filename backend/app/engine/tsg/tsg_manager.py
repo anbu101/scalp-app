@@ -53,6 +53,7 @@ from typing import Callable, Dict, List, Optional
 from app.event_bus.audit_logger import write_audit_log
 from app.execution.exit_order_driver import drive_exit_order   # ── TSG_EXIT_CONFIRM_20261026 ──
 from app.execution.wing_entry import place_wing   # ── WING_FAST_FILL_20261111 ──
+from app.execution import broker_truth as _BT     # ── BROKER_TRUTH_20261114 ──
 from app.event_bus.inapp_events import record_alert
 from app.config.strategy_loader import load_strategy_config
 from app.risk.risk_mtm_guard import is_day_blocked
@@ -143,6 +144,11 @@ class TsgManager:
         self._exit_fills: Dict[str, list] = {}
         self._exit_alerted_at: Dict[str, float] = {}
         self._sleep, self._clock = time.sleep, time.time   # test-injectable
+        # ── BROKER_TRUTH_20261114 ── tell the other strategies what we hold
+        try:
+            _BT.LEDGER.register(STRATEGY_ID, self._ledger_view)
+        except Exception:
+            pass
         self._restore_session()
         self._sweep_stale_live_rows()   # ── TSG_STALE_SWEEP ──
 
@@ -348,8 +354,18 @@ class TsgManager:
         self._paper = (mode != "LIVE")
         entry_px = {l.leg_id: dict(ladder[l.opt_type]).get(l.symbol)
                     for l in planned}
-        ok = (self._enter_paper(planned, entry_px) if self._paper
-              else self._enter_live(planned, entry_px))
+        # ── BROKER_TRUTH_20261114 ── live: reserve the contracts first
+        if self._paper:
+            ok = self._enter_paper(planned, entry_px)
+        else:
+            self._reserve_entry(planned)
+            try:
+                ok = self._enter_live(planned, entry_px)
+            finally:
+                try:
+                    _BT.LEDGER.release(STRATEGY_ID)
+                except Exception:
+                    pass
         if ok:
             self._anchor_entry_ivs(ltp)
             self._persist()
@@ -389,6 +405,32 @@ class TsgManager:
                 write_audit_log(f"[TSG][PAPER][ROW_FAIL] {l.leg_id}: {e!r}")
         write_audit_log("[TSG][ENTRY][PAPER] day OPEN")
         return True
+
+    # ── BROKER_TRUTH_20261114 BEGIN ──
+    def _ledger_view(self) -> Dict[str, int]:
+        """LIVE legs held now ({symbol: signed qty}); over-reports on purpose
+        (a leg stays listed until it is closed in our own state)."""
+        core = self._core
+        if core is None or self._paper:
+            return {}
+        out: Dict[str, int] = {}
+        for leg in list(core.legs.values()):
+            if leg.state != L_OPEN or not leg.symbol:
+                continue
+            q = int(leg.qty or 0)
+            if q:
+                out[leg.symbol] = out.get(leg.symbol, 0) + (-q if leg.is_short else q)
+        return out
+
+    def _reserve_entry(self, planned: List[TsgLeg]) -> None:
+        """Reserve the day's contracts before the first order so other
+        strategies treat them as shared until our own state shows them."""
+        try:
+            _BT.LEDGER.reserve(STRATEGY_ID, {
+                l.symbol: (-int(l.qty) if l.is_short else int(l.qty)) for l in planned})
+        except Exception:
+            pass
+    # ── BROKER_TRUTH_20261114 END ──
 
     def _enter_live(self, planned: List[TsgLeg], entry_px: Dict) -> bool:
         """LD3: buys before sells; all-or-unwind (IC D6)."""
@@ -751,9 +793,19 @@ class TsgManager:
                     pos = fn() if callable(fn) else None
                     if pos is None:
                         continue
-                    leaks = [p for p in pos
-                             if p.get("tradingsymbol") in syms
-                             and int(p.get("quantity") or 0) != 0]
+                    # ── BROKER_TRUTH_20261114 ── a position another strategy
+                    # legitimately holds on the same contract is not a leak
+                    # (the alert says "CLOSE MANUALLY" — it must be right).
+                    leaks = []
+                    for p in pos:
+                        s_ = p.get("tradingsymbol")
+                        if s_ not in syms:
+                            continue
+                        others = _BT.LEDGER.others(s_, STRATEGY_ID)
+                        if others is None:
+                            continue
+                        if int(p.get("quantity") or 0) != int(others):
+                            leaks.append(p)
                     if leaks:
                         det = ", ".join(
                             f"{p.get('tradingsymbol')} "
@@ -1037,19 +1089,10 @@ class TsgManager:
                                 clock=self._clock)
 
     def _observed_qty(self, symbol: str) -> Optional[int]:
-        fn = getattr(self.executor, "get_open_positions_or_none", None)
-        if not callable(fn):
-            return None
-        try:
-            pos = fn()
-        except Exception:
-            return None
-        if pos is None:
-            return None
-        for p in pos:
-            if p.get("tradingsymbol") == symbol:
-                return int(p.get("quantity") or 0)
-        return 0
+        """── BROKER_TRUTH_20261114 ── broker net qty that is certainly OURS;
+        None when unreadable OR another strategy holds the same contract."""
+        return _BT.own_net_qty(self.executor, symbol, STRATEGY_ID,
+                               log=write_audit_log)
 
     def _last_fill(self, symbol: str, txn: str) -> Optional[float]:
         try:
@@ -1108,10 +1151,19 @@ class TsgManager:
                 self._exit_working.pop(lid, None)
                 if r.avg_price > 0 and (r.filled_qty or r.filled):
                     fills.append((r.filled_qty or leg.qty, r.avg_price))
-            obs = self._observed_qty(leg.symbol)
-            flat = obs is not None and ((obs >= 0) if leg.is_short else (obs <= 0))
+            # ── BROKER_TRUTH_20261114 ── ORDER TRUTH FIRST: our own fills for
+            # the whole leg are the exit, whatever the net position reads
+            # (another strategy may hold the same contract).
+            if sum(f[0] for f in fills) >= leg.qty:
+                obs, flat = None, False
+            else:
+                obs = self._observed_qty(leg.symbol)
+                flat = obs is not None and ((obs >= 0) if leg.is_short else (obs <= 0))
             if not flat and not (obs is None and sum(f[0] for f in fills) >= leg.qty):
-                qty = leg.qty if obs is None else min(leg.qty, abs(obs))
+                # ── BROKER_TRUTH_20261114 ── no usable net position → our own
+                # quantity minus our own fills so far
+                qty = (max(0, leg.qty - sum(f[0] for f in fills)) or leg.qty) \
+                    if obs is None else min(leg.qty, abs(obs))
                 if leg.is_short:
                     oid = self.executor.place_buy_exit(leg.symbol, qty, reason)
                 else:
@@ -1126,9 +1178,12 @@ class TsgManager:
                 self._exit_working.pop(lid, None)
                 if r.avg_price > 0 and (r.filled_qty or r.filled):
                     fills.append((r.filled_qty or qty, r.avg_price))
-                obs = self._observed_qty(leg.symbol)
-                flat = (obs is not None and ((obs >= 0) if leg.is_short else (obs <= 0))) \
-                    or (obs is None and r.filled)
+                if sum(f[0] for f in fills) >= leg.qty:   # ── BROKER_TRUTH_20261114 ── our fills cover the leg
+                    flat = True
+                else:
+                    obs = self._observed_qty(leg.symbol)
+                    flat = (obs is not None and ((obs >= 0) if leg.is_short else (obs <= 0))) \
+                        or (obs is None and r.filled)
                 why = f"exit did not fill ({r.status} {r.message})".strip()
             else:
                 flat = True

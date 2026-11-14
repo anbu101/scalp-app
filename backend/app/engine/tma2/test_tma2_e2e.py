@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from app.config import strategy_loader as SL                     # noqa: E402
 from app.engine.tma2 import tma2_trade_manager as TM             # noqa: E402
 from app.engine.tma2 import tma2_gtt_monitor as GM               # noqa: E402
+GM.TMA2GTTMonitor._session_open = lambda self: True         # ── BROKER_TRUTH_20261114 ── these tests simulate a live session
 from app.engine.tma2.tma2_common import TMA2Repo                 # noqa: E402
 from app.execution.execution_router import ExecutionRouter       # noqa: E402
 from app.execution.testkit_fake_kite import FakeKite, isolate    # noqa: E402

@@ -113,6 +113,20 @@ except ImportError:                                        # standalone tests
     _sys2.modules["_wing_entry"] = _m2
     _sp2.loader.exec_module(_m2)
     place_wing, confirm_wing = _m2.place_wing, _m2.confirm_wing
+# ── BROKER_TRUTH_20261114 ── shared broker-truth rules (strict reads, ledger)
+try:
+    from app.execution import broker_truth as _BT
+except ImportError:                                        # standalone tests
+    import importlib.util as _ilu3
+    import sys as _sys3
+    from pathlib import Path as _P3
+    _BT = _sys3.modules.get("_broker_truth")
+    if _BT is None:
+        _sp3 = _ilu3.spec_from_file_location(
+            "_broker_truth", _P3(__file__).resolve().parents[2] / "execution" / "broker_truth.py")
+        _BT = _ilu3.module_from_spec(_sp3)
+        _sys3.modules["_broker_truth"] = _BT
+        _sp3.loader.exec_module(_BT)
 
 ENTRY_CONFIRM_S = 20          # main-leg entry: wait this long, then cancel+confirm
 ORDER_POLL_S = 0.3            # ── ENTRY_FAST_CONFIRM_20261109 ── order status poll (the driver's default is 1 s): the
@@ -167,6 +181,11 @@ class VetManager:
         self.executor = executor
         self.mode = str(mode or "PAPER").upper()
         self.pos: Optional[Dict] = None        # {group_id, side, main, wing}
+        # ── BROKER_TRUTH_20261114 ── tell the other strategies what we hold
+        try:
+            _BT.LEDGER.register("VET_V1", self._ledger_view)
+        except Exception:
+            pass
         self.frozen: bool = False
         self.freeze_reason: Optional[str] = None
         self._day_entries: int = 0
@@ -285,6 +304,27 @@ class VetManager:
             write_audit_log(f"[VET][MGR] offset {off} walks off the {side} "
                             f"ladder (len {len(ladder)}) — no entry")
             return None
+        # ── BROKER_TRUTH_20261114 ── LIVE: never take a contract another
+        # strategy holds on the OPPOSITE side (e.g. selling the strike
+        # Icarus's adjustment is long) — the two cancel at the broker and the
+        # later exit can be refused for margin. Step one strike further OTM
+        # (at most 3). The paper book keeps the backtest's pick.
+        if self._live:
+            _side = "SELL" if self.is_sell else "BUY"
+            _step = 1 if side == "CE" else -1
+            for _ in range(3):
+                _who = _BT.LEDGER.opposite(ladder[ti]["tradingsymbol"], "VET_V1", _side)
+                if not _who:
+                    break
+                write_audit_log(f"[VET][MGR] {ladder[ti]['tradingsymbol']} skipped — {_who} "
+                                f"holds the other side of this contract; one strike further OTM")
+                if not (0 <= ti + _step < len(ladder)):
+                    return None
+                ti += _step
+            else:
+                if _BT.LEDGER.opposite(ladder[ti]["tradingsymbol"], "VET_V1", _side):
+                    write_audit_log("[VET][MGR] no strike free of an opposite position — no entry")
+                    return None
         pick = ladder[ti]
         pmin = float(self.cfg.get("premium_min") or 0)
         pmax = float(self.cfg.get("premium_max") or 0)
@@ -313,6 +353,8 @@ class VetManager:
                 continue
             if expiry and c.get("expiry") and c["expiry"] != expiry:
                 continue
+            if self._live and _BT.LEDGER.opposite(c.get("tradingsymbol"), "VET_V1", "BUY"):
+                continue                       # ── BROKER_TRUTH_20261114 ── someone is short it
             px = c.get("ltp")
             if px is None or float(px) <= 0 or float(px) > cap:
                 continue
@@ -485,8 +527,39 @@ class VetManager:
             return None
 
     # ── entry ───────────────────────────────────────────────────────────
+    # ── BROKER_TRUTH_20261114 BEGIN ──
+    def _ledger_view(self) -> Dict[str, int]:
+        """LIVE legs held now ({symbol: signed qty}); both legs stay listed
+        until the position is closed in our own state (over-reports)."""
+        p = self.pos
+        if not p or not self._live:
+            return {}
+        out: Dict[str, int] = {}
+        for key in ("main", "wing"):
+            leg = p.get(key)
+            if not leg:
+                continue
+            q = self._leg_qty(leg)
+            short = str(leg.get("direction") or "").upper() == "SHORT"
+            s_ = leg.get("tradingsymbol")
+            if s_ and q:
+                out[s_] = out.get(s_, 0) + (-q if short else q)
+        return out
+
     def open_position(self, side: str, *, ts: int, bar_ts: int,
                       condition: int) -> Optional[Dict]:
+        try:
+            return self._open_position_impl(side, ts=ts, bar_ts=bar_ts,
+                                            condition=condition)
+        finally:
+            try:
+                _BT.LEDGER.release("VET_V1")
+            except Exception:
+                pass
+    # ── BROKER_TRUTH_20261114 END ──
+
+    def _open_position_impl(self, side: str, *, ts: int, bar_ts: int,
+                            condition: int) -> Optional[Dict]:
         if self.frozen or self.pos is not None:
             return None
         if self.entries_gate is not None and not self.entries_gate():   # ── FLEET_MODES_20260923 ──
@@ -507,6 +580,11 @@ class VetManager:
         gid = uuid.uuid4().hex[:12]
         wing_row = None
         wing_oid = None
+        if self._live:        # ── BROKER_TRUTH_20261114 ── before the first order
+            try:
+                _BT.LEDGER.reserve("VET_V1", {main["tradingsymbol"]: -int(_eq) if self.is_sell else int(_eq)})
+            except Exception:
+                pass
 
         # ── WING FIRST (LD5) ── the account must never be briefly naked.
         if self.wants_wing:
@@ -529,6 +607,11 @@ class VetManager:
                        "This is the documented live/backtest divergence."))
                 self._alert_wing_missing(side, ts)   # ── WING_REACH_20261111 ──
                 return None
+            if self._live:    # ── BROKER_TRUTH_20261114 ──
+                try:
+                    _BT.LEDGER.reserve("VET_V1", {wing["tradingsymbol"]: int(_eq)})
+                except Exception:
+                    pass
             wing_oid, _wing_lim = self._buy_wing(wing["tradingsymbol"],
                                                  wing.get("token"), _eq)   # ── WING_FAST_FILL_20261111 ──
             if wing_oid is None:
@@ -1008,19 +1091,9 @@ class VetManager:
             pass
 
     def _net_qty(self, sym: str) -> Optional[int]:
-        fn = getattr(self.executor, "get_open_positions_or_none", None)
-        if not callable(fn):
-            return None
-        try:
-            pos = fn()
-        except Exception:
-            return None
-        if pos is None:
-            return None
-        for p in pos:
-            if p.get("tradingsymbol") == sym:
-                return int(p.get("quantity") or 0)
-        return 0
+        """── BROKER_TRUTH_20261114 ── broker net qty that is certainly OURS;
+        None when unreadable OR another strategy holds the same contract."""
+        return _BT.own_net_qty(self.executor, sym, "VET_V1", log=write_audit_log)
 
     def _last_fill(self, sym: str, txn: str) -> Optional[float]:
         try:
@@ -1063,13 +1136,28 @@ class VetManager:
             st["working"].pop(key, None)
             if r.avg_price > 0 and (r.filled_qty or r.filled):
                 fills.append((r.filled_qty or qty, r.avg_price))
-        obs = self._net_qty(sym)
-        flat = obs is not None and ((obs >= 0) if short else (obs <= 0))
+        # ── BROKER_TRUTH_20261114 ── ORDER TRUTH FIRST. 13 Nov 15:20: our
+        # buy-back of 25050 CE filled (COMPLETE, 130) but Timberwolf was short
+        # the same strike, the net position still read −130, the leg was
+        # called "not confirmed", and the next minute bought 130 MORE —
+        # closing Timberwolf's short. Our own fills for the whole leg ARE
+        # the exit; the net position is consulted only when it is ours alone.
+        if fills and sum(f[0] for f in fills) >= qty:
+            flat, obs = True, None
+        else:
+            obs = self._net_qty(sym)
+            flat = obs is not None and ((obs >= 0) if short else (obs <= 0))
         if not flat:
             if obs is None and fills and sum(f[0] for f in fills) >= qty:
                 flat = True
             else:
-                left = qty if obs is None else min(qty, abs(obs))
+                # ── BROKER_TRUTH_20261114 ── without a usable net position the
+                # remaining quantity is OUR quantity minus OUR fills so far
+                # (a partly filled earlier attempt must not be bought twice).
+                done_q = sum(f[0] for f in fills)
+                left = max(0, qty - done_q) if obs is None else min(qty, abs(obs))
+                if left <= 0:
+                    left = qty
                 oid = (self._close_short(sym, reason, left) if short
                        else self._close_long(sym, left))
                 if oid is None:
@@ -1083,9 +1171,12 @@ class VetManager:
                 st["working"].pop(key, None)
                 if r.avg_price > 0 and (r.filled_qty or r.filled):
                     fills.append((r.filled_qty or left, r.avg_price))
-                obs = self._net_qty(sym)
-                flat = (obs is not None and ((obs >= 0) if short else (obs <= 0))) \
-                    or (obs is None and r.filled)
+                if sum(f[0] for f in fills) >= qty:   # ── BROKER_TRUTH_20261114 ── our fills cover the leg
+                    flat = True
+                else:
+                    obs = self._net_qty(sym)
+                    flat = (obs is not None and ((obs >= 0) if short else (obs <= 0))) \
+                        or (obs is None and r.filled)
                 if not flat:
                     st["why"] = f"exit did not fill ({r.status})"
                     return False

@@ -865,6 +865,7 @@ _mk("app.execution.base_executor").BaseOrderExecutor = object
 _FK = _load_by_path("_testkit_fake_kite", "execution/testkit_fake_kite.py")
 _RT = _load_by_path("_execution_router", "execution/execution_router.py")
 import ic_gtt_monitor as GMON                                    # noqa: E402
+GMON.ICGTTMonitor._session_open = lambda self: True              # ── BROKER_TRUTH_20261114 ── e2e = live session
 
 IC_PX = {"N24150CE": 84.15, "N24100PE": 78.0, "N24700CE": 3.8, "N23200PE": 3.5,
          "N24200CE": 82.0, "N24000PE": 80.0}

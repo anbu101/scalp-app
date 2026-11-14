@@ -102,6 +102,33 @@ from app.engine.ic.ic_selection import ICSelection
 from app.engine.ic import ic_carry_store
 
 
+# ── BROKER_TRUTH_20261114 BEGIN ── shared broker-truth rules (strict reads,
+# live ledger). Loaded by path when the package is stubbed (test harnesses);
+# the path-loaded copy is shared with ic_gtt_monitor through sys.modules.
+def _bt():
+    global _BT
+    try:
+        return _BT
+    except NameError:
+        pass
+    try:
+        from app.execution import broker_truth as bt
+    except Exception:
+        import importlib.util
+        import sys as _sys
+        bt = _sys.modules.get("_broker_truth")
+        if bt is None:
+            spec = importlib.util.spec_from_file_location(
+                "_broker_truth",
+                Path(__file__).resolve().parents[2] / "execution" / "broker_truth.py")
+            bt = importlib.util.module_from_spec(spec)
+            _sys.modules["_broker_truth"] = bt
+            spec.loader.exec_module(bt)
+    _BT = bt
+    return bt
+# ── BROKER_TRUTH_20261114 END ──
+
+
 # ── FILL_TRUTH_20261102 BEGIN ── shared exit-fill rule (app/execution/fill_pick.py),
 # loaded by path when the app package is stubbed (standalone test harness).
 def _fill_pick():
@@ -242,6 +269,11 @@ class ICGroupManager:
         self._entry_lock = threading.Lock()
         # ── IC_GROUPING ── per-condor key shared by all legs (incl. ·ADJ).
         self._group_id: Optional[str] = None
+        # ── BROKER_TRUTH_20261114 ── tell the other strategies what we hold
+        try:
+            _bt().LEDGER.register(self.strategy_id, self._ledger_view)
+        except Exception as _e:
+            write_audit_log(f"[IC][{self.strategy_id}][LEDGER] register failed {_e!r}")
         # ── IC_V2 ── phantom condor (ADJ_ONLY)
         self._adjust_only = False
         # ── IC_PAPER_FALLBACK_20261103 ── LIVE entry refused on margin in
@@ -368,6 +400,16 @@ class ICGroupManager:
             return False
         try:
             self._unwind_report = None                     # ── IC_ENTRY_FAIL_REPORT_20261105 ──
+            # ── BROKER_TRUTH_20261114 ── from before the first order until
+            # our own state shows the legs, other strategies must see these
+            # contracts as shared (their exits then use their own fills only).
+            if str(mode).upper() == "LIVE":
+                try:
+                    _bt().LEDGER.reserve(self.strategy_id, {
+                        p.symbol: 1 for p in (selection.picks or {}).values()
+                        if getattr(p, "symbol", None)})
+                except Exception:
+                    pass
             ok = self._enter_day_impl(selection, mode=mode)
             rep = self._unwind_report
             if not ok and rep is not None:
@@ -385,7 +427,28 @@ class ICGroupManager:
                 return paper
             return ok
         finally:
+            try:
+                _bt().LEDGER.release(self.strategy_id)     # ── BROKER_TRUTH_20261114 ──
+            except Exception:
+                pass
             self._entry_lock.release()
+
+    # ── BROKER_TRUTH_20261114 ── the LIVE legs this manager holds right now
+    # ({symbol: signed qty}). Over-reports on purpose (a leg stays listed
+    # until it is CLOSED in our own state); phantoms and paper hold nothing.
+    def _ledger_view(self) -> Dict[str, int]:
+        core = self._core
+        if core is None or self._paper:
+            return {}
+        out: Dict[str, int] = {}
+        for leg in list(core.legs.values()):
+            if leg.state != L_OPEN:
+                continue
+            if (self._rt.get(leg.leg_id) or {}).get("phantom"):
+                continue
+            q = int(getattr(leg, "qty", 0) or 0) or 1
+            out[leg.symbol] = out.get(leg.symbol, 0) + (-q if leg.is_short else q)
+        return out
 
     def _enter_day_impl(self, selection: ICSelection, *, mode: str, _paper_retry: bool = False) -> bool:
         cfg = self._cfg()
@@ -1169,6 +1232,24 @@ class ICGroupManager:
             return
 
         cands = ce_cands if src.opt_type == "CE" else pe_cands
+        # ── BROKER_TRUTH_20261114 ── never BUY a contract another strategy is
+        # SHORT (e.g. Velvet's or Timberwolf's short strike): the two would
+        # cancel at the broker and the later exit could be refused for
+        # margin. Take the next candidate under the cap instead. LIVE only —
+        # the paper book keeps the backtest's pick.
+        if not self._paper:
+            try:
+                _kept = []
+                for _c in cands:
+                    _who = _bt().LEDGER.opposite(_c[1], self.strategy_id, "BUY")
+                    if _who:
+                        write_audit_log(f"[IC][{self.strategy_id}][ADJ] {_c[1]} skipped — "
+                                        f"{_who} is short this contract")
+                    else:
+                        _kept.append(_c)
+                cands = _kept
+            except Exception as _e:
+                write_audit_log(f"[IC][{self.strategy_id}][ADJ] opposite-side check failed {_e!r}")
         pick = select_strike(cands, cap=float(acfg.get("premium_max") or 0),
                              fallback_cheapest=False)
         if pick is None:
@@ -1220,7 +1301,19 @@ class ICGroupManager:
                             f"qty={qty} sl={leg.sl} tp={leg.tp}")
         else:
             # LIVE: place + confirm synchronously (engine thread, house-OK)
-            ok = self._place_and_confirm(leg)
+            try:                                       # ── BROKER_TRUTH_20261114 ──
+                _bt().LEDGER.reserve(self.strategy_id, {leg.symbol: 1})
+            except Exception:
+                pass
+            try:
+                ok = self._place_and_confirm(leg)
+                if ok:
+                    core.add_adjust_leg(leg)           # our own state now shows the leg
+            finally:
+                try:
+                    _bt().LEDGER.release(self.strategy_id)
+                except Exception:
+                    pass
             if not ok:
                 self._rt.pop(aid, None)
                 write_audit_log(f"[IC][{self.strategy_id}][ADJ][LIVE][DEAD] {aid} entry failed → dropped")
@@ -1228,7 +1321,6 @@ class ICGroupManager:
                              f"{self.strategy_id} adjustment {aid} entry failed — dropped",
                              severity="error", strategy_id=self.strategy_id, mode="live")
                 return
-            core.add_adjust_leg(leg)
             # ── IC_FILL_ANCHOR_20261102 ── SL/TP off the CONFIRMED FILL (was:
             # the pick LTP, "fill-independent"). 2026-11-02 L2·ADJ: picked at
             # 91.20, bought at 88.30 → SL 63.84 / TP 182.40 vs the backtest's
@@ -1879,6 +1971,10 @@ class ICGroupManager:
             sym = str((g.get("condition") or {}).get("tradingsymbol") or "")
             if sym not in want or held.get(sym, 0) != 0:
                 continue
+            # ── BROKER_TRUTH_20261114 ── net 0 can be two strategies on
+            # opposite sides of one contract; a GTT there may be THEIRS.
+            if _bt().LEDGER.shared(sym, self.strategy_id):
+                continue
             qtys = {int(o.get("quantity") or 0) for o in (g.get("orders") or [])} - {0}
             if qtys and not (qtys & want[sym]):
                 continue
@@ -1996,6 +2092,11 @@ class ICGroupManager:
             if r.filled_qty > 0 and r.avg_price > 0:
                 rt.setdefault("exit_fills", []).append((r.filled_qty, r.avg_price))
         if rt.get("exit_fills"):
+            # ── BROKER_TRUTH_20261114 ── our own fills for the whole leg ARE
+            # the exit, whatever the net position reads (another strategy
+            # may hold the same contract).
+            if sum(q for q, _ in rt["exit_fills"]) >= sum(int(c) for c in rt["slices"]):
+                return self._exit_done(leg, rt["exit_fills"])
             obs0 = self._observed_qty(leg)
             if obs0 is not None and ((obs0 >= 0) if leg.is_short else (obs0 <= 0)):
                 return self._exit_done(leg, rt["exit_fills"])
@@ -2011,17 +2112,11 @@ class ICGroupManager:
         #                   fill (D3), say so loudly.
         #   partial       → close only the observed open quantity.
         qty_to_close = None      # None = full slices as before
-        try:
-            pos = self.executor.get_open_positions_or_none()
-        except Exception as e:
-            pos = None
-            write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][POS_READ_ERR] {e}")
-        if pos is not None:
-            observed = 0
-            for p in pos:
-                if p.get("tradingsymbol") == leg.symbol:
-                    observed = int(p.get("quantity") or 0)
-                    break
+        # ── BROKER_TRUTH_20261114 ── the net position is ours only when no
+        # other strategy holds this contract; shared / unreadable → None →
+        # place exactly our own quantity and trust our own fills.
+        observed = self._observed_qty(leg)
+        if observed is not None:
             already_flat = (observed >= 0) if leg.is_short else (observed <= 0)
             if already_flat:
                 write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][ALREADY_FLAT] "
@@ -2060,6 +2155,13 @@ class ICGroupManager:
         # buy-backs working at once.
         fills = rt.setdefault("exit_fills", [])
         working = rt.setdefault("exit_working", [])
+        # ── BROKER_TRUTH_20261114 ── no usable net position (unreadable /
+        # shared) and an earlier attempt partly filled → close only what is
+        # left of OUR quantity, never the full slices again.
+        if qty_to_close is None and fills:
+            _left = sum(int(c) for c in rt["slices"]) - sum(q for q, _ in fills)
+            if _left > 0:
+                qty_to_close = _left
         remaining = qty_to_close
         for chunk in self._rt[leg.leg_id]["slices"]:
             if remaining is not None:
@@ -2092,9 +2194,15 @@ class ICGroupManager:
                 fills.append((r.filled_qty, r.avg_price))
             if not r.filled:
                 break                      # stop placing; broker truth decides
-        obs = self._observed_qty(leg)
         filled_all = sum(q for q, _ in fills) >= sum(int(c) for c in rt["slices"]) \
             if qty_to_close is None else sum(q for q, _ in fills) > 0 and remaining == 0
+        # ── BROKER_TRUTH_20261114 ── ORDER TRUTH FIRST. Our own orders filled
+        # the whole leg → it is closed. (13 Nov: Velvet's identical check
+        # read Timberwolf's short on the same strike as "still open" after
+        # its own buy-back had filled, and bought again.)
+        if sum(q for q, _ in fills) >= sum(int(c) for c in rt["slices"]):
+            return self._exit_done(leg, fills)
+        obs = self._observed_qty(leg)
         if obs is not None:
             if (obs >= 0) if leg.is_short else (obs <= 0):
                 return self._exit_done(leg, fills)
@@ -2111,16 +2219,11 @@ class ICGroupManager:
                                 clock=self._clock)
 
     def _observed_qty(self, leg: LegCore) -> Optional[int]:
-        try:
-            pos = self.executor.get_open_positions_or_none()
-        except Exception:
-            return None
-        if pos is None:
-            return None
-        for p in pos:
-            if p.get("tradingsymbol") == leg.symbol:
-                return int(p.get("quantity") or 0)
-        return 0
+        """── BROKER_TRUTH_20261114 ── broker net qty that is certainly OURS:
+        None when the positions are unreadable OR another strategy holds the
+        same contract (then our own orders' fills are the only truth)."""
+        return _bt().own_net_qty(self.executor, leg.symbol, self.strategy_id,
+                                 log=write_audit_log)
 
     def _exit_done(self, leg: LegCore, fills):
         rt = self._rt[leg.leg_id]
