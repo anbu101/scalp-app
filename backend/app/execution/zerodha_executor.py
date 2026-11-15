@@ -939,14 +939,35 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 "ask" if q["ask"] > 0 else "ltp")
     # ── TSG_ENTRY_REPEG END (pricing helpers) ─────────
 
-    def _resolve_ltp(self, symbol: str) -> Optional[float]:
+    # ── EXIT_PRICE_FAST_20261115 ── exits are priced off a FRESH live tick when
+    # there is one (no REST round trip at all), else REST as before. A REST
+    # call that HANGS (Kite's client times out after 7 s) is not retried for
+    # an exit: three hung calls held an SL buy-back for ~22 s.
+    EXIT_TICK_FRESH_S = 2.0
+    SLOW_CALL_S = 2.0
+
+    def _exit_ltp(self, symbol: str, attempts: int = 3) -> Optional[float]:
+        try:
+            r = LTPStore.get_with_timestamp(symbol)
+            if r and r[0] and float(r[0]) > 0 and (time.time() - float(r[1])) <= self.EXIT_TICK_FRESH_S:
+                return float(r[0])
+        except Exception:
+            pass
+        own = self.__dict__.get("_resolve_ltp")      # replaced on this object: call it as before
+        if own is not None:
+            return own(symbol)
+        return self._resolve_ltp(symbol, attempts=attempts, stop_when_slow=True)
+
+    def _resolve_ltp(self, symbol: str, attempts: int = 3,
+                     stop_when_slow: bool = False) -> Optional[float]:
         """REST-primary LTP fetch (for order placement), retrying."""
         ltp = None
         # ── ORDER_LTP_RETRY_20260911 ── up to 3 REST attempts, rate-limit
         # aware, every failure audited. One silent one-shot cost a whole
         # TSG day on 2026-09-09 (wing outside the ticker universe + a 09:16
         # REST burst).
-        for attempt in range(1, 4):
+        for attempt in range(1, attempts + 1):
+            _t0 = time.time()
             try:
                 data_kite = self.broker_manager.get_data_kite()
                 if not data_kite:
@@ -960,11 +981,15 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 write_audit_log(f"[ZERODHA][LTP_RETRY] {symbol} attempt {attempt}/3: "
                                 f"empty quote")
             except Exception as e:
-                write_audit_log(f"[ZERODHA][LTP_RETRY] {symbol} attempt {attempt}/3: {e!r}")
-                if attempt < 3:
+                write_audit_log(f"[ZERODHA][LTP_RETRY] {symbol} attempt {attempt}/{attempts}: {e!r}")
+                if stop_when_slow and time.time() - _t0 >= self.SLOW_CALL_S:
+                    write_audit_log(f"[ZERODHA][LTP_RETRY] {symbol}: price call hung "
+                                    f"{time.time() - _t0:.1f}s — not retried for an exit")
+                    break
+                if attempt < attempts:
                     time.sleep(1.1 if "too many requests" in repr(e).lower() else 0.4)
                 continue
-            if attempt < 3:
+            if attempt < attempts:
                 time.sleep(0.4)
 
         if not ltp or ltp <= 0:
@@ -1149,7 +1174,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 f"BUY_EXIT_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
             )
 
-        ltp = self._resolve_ltp(symbol)
+        ltp = self._exit_ltp(symbol)          # ── EXIT_PRICE_FAST_20261115 ──
         if not ltp or ltp <= 0:
             raise RuntimeError(f"LTP unavailable for buy_exit {symbol}")
 
@@ -2053,23 +2078,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 f"SELL_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
             )
 
-        ltp = None
-        try:
-            data_kite = self.broker_manager.get_data_kite()
-            if data_kite:
-                _k = f"{_fo_exchange(symbol)}:{symbol}"   # ── LVB_V1_20261023 ──
-                quote   = data_kite.ltp(_k)
-                rest_ltp = quote.get(_k, {}).get("last_price")
-                if rest_ltp and rest_ltp > 0:
-                    ltp = rest_ltp
-                    write_audit_log(f"[ZERODHA-SELL] LTP from REST: {symbol} ltp={ltp}")
-        except Exception as e:
-            write_audit_log(f"[ZERODHA-SELL] REST LTP failed for {symbol}: {e}")
-
-        if not ltp or ltp <= 0:
-            ltp = LTPStore.get(symbol)
-            if ltp and ltp > 0:
-                write_audit_log(f"[ZERODHA-SELL] LTP from LTPStore: {symbol} ltp={ltp}")
+        ltp = self._exit_ltp(symbol, attempts=1)   # ── EXIT_PRICE_FAST_20261115 ── tick, else REST once, else LTPStore
 
         if not ltp or ltp <= 0:
             raise RuntimeError(f"LTP unavailable for {symbol}")
