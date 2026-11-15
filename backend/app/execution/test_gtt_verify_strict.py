@@ -100,8 +100,12 @@ def t_broker_lag():
     k = Kite({"5": "active"})
     k.lag = 2
     ok = ex_for(k).cancel_gtt_verified("5")
-    check("Kite list lags the delete for two reads → retried, then True",
-          ok and any("STILL_ARMED GTT_ID=5" in l for l in LOG))
+    # ── EXIT_LATENCY_20261115 ── was: "retried, then True" (a second cancel
+    # after a fixed 1.5 s). The list is now polled inside the same window, so
+    # a short lag is absorbed without sending the cancel again.
+    check("Kite list lags the delete for two reads → confirmed in the same attempt, one cancel",
+          ok and k.deletes == 1 and any("CONFIRMED_GONE GTT_ID=5" in l and "attempt=0" in l for l in LOG),
+          f"ok={ok} deletes={k.deletes}")
 
 
 def t_spent_states():

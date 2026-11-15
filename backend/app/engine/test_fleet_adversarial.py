@@ -566,6 +566,245 @@ def b11_dead_gtt_then_stop_still_exits():
     return f
 
 
+# ═══ third round: O1 — stop fires while the GTT service is unreadable ════════
+def b12_icarus_stop_fires_gtt_blind_then_forced_exit():
+    """O1: the GTT API is down, price runs through Icarus's stop on a shared
+    strike (its GTT fires and fills at the broker), then the forced exit runs
+    within seconds. It must not buy the leg a second time."""
+    f = fleet(); k = f.kite
+    f.ic_enter(); f.ts_enter()
+    b0 = filled(k, S_IC_CE, "BUY")
+    k.gtt_api_down = True
+    k.set_px(S_IC_CE, 140.0)                              # GTT fires + fills 195; the app cannot see it
+    f.ic.force_square_off_all(reason="EOD")
+    k.gtt_api_down = False
+    for _ in range(3):
+        f.ic_sweep(3); f.ic.process_due(int(F.time.time()) + 61)
+    bought = filled(k, S_IC_CE, "BUY") - b0
+    expect("B12", "Icarus: stop fired while the GTT API was down, then a forced exit: its 195 bought ONCE, Tigris untouched",
+           bought == 195 and k.net.get(S_IC_CE) == -130,
+           f"bought={bought} net={k.net.get(S_IC_CE)} (Tigris holds -130)")
+    return f
+
+
+def b13_timberwolf_stop_fires_gtt_blind_then_forced_exit():
+    """O1 for Timberwolf: same shape on the strike it shares with Velvet."""
+    f = fleet(); k = f.kite
+    f.vet_enter(); f.t2_enter()
+    b0 = filled(k, S_VT, "BUY")
+    k.gtt_api_down = True
+    k.set_px(S_VT, 226.0)                                 # Timberwolf's GTT fires + fills 130
+    f.t2.kill_close(f.ts_of(14, 30))
+    k.gtt_api_down = False
+    for m in range(1, 4):
+        f.t2.on_minute(f.ts_of(14, 30) + 60 * m, None, f.chain); f.t2_sweep(3)
+    bought = filled(k, S_VT, "BUY") - b0
+    expect("B13", "Timberwolf: stop fired while the GTT API was down, then a forced exit: its 130 bought ONCE, Velvet untouched",
+           bought == 130 and k.net.get(S_VT) == -130,
+           f"bought={bought} net={k.net.get(S_VT)} (Velvet holds -130)")
+    return f
+
+
+def b12r_icarus_blind_stop_resting():
+    """O1 fix, the stop's order RESTS (gap past its limit): adopted and driven,
+    still exactly 195 bought, nothing left working."""
+    f = fleet(); k = f.kite
+    f.ic_enter(); f.ts_enter()
+    b0 = filled(k, S_IC_CE, "BUY")
+    k.gtt_api_down = True
+    k.set_px(S_IC_CE, 200.0)
+    f.ic.force_square_off_all(reason="EOD")
+    k.gtt_api_down = False
+    for _ in range(3):
+        f.ic_sweep(3); f.ic.process_due(int(F.time.time()) + 61)
+    bought = filled(k, S_IC_CE, "BUY") - b0
+    expect("B12r", "Icarus: blind stop whose order rests: adopted, 195 bought once, nothing left working",
+           bought == 195 and k.net.get(S_IC_CE) == -130
+           and not [o for o in k.open_orders() if o["tradingsymbol"] == S_IC_CE],
+           f"bought={bought} net={k.net.get(S_IC_CE)} working={[o['order_id'] for o in k.open_orders()]}")
+    return f
+
+
+def b12n_icarus_blind_no_fire_still_exits():
+    """O1 fix must not swallow a real exit: GTT API down, the stop has NOT
+    fired, Tigris has just bought back its own 130 → Icarus still buys 195."""
+    f = fleet(); k = f.kite
+    f.ic_enter(); f.ts_enter()
+    b0 = filled(k, S_IC_CE, "BUY")
+    k.gtt_api_down = True
+    f.ts.kill_all()                                       # an APP order on the same strike
+    f.ic.force_square_off_all(reason="EOD")
+    k.gtt_api_down = False
+    for _ in range(3):
+        f.ic_sweep(3); f.ic.process_due(int(F.time.time()) + 61)
+    bought = filled(k, S_IC_CE, "BUY") - b0
+    expect("B12n", "Icarus: GTT API down, stop not fired, Tigris exits first: Icarus still buys its 195, account flat",
+           bought == 325 and k.net.get(S_IC_CE, 0) == 0 and f.ic_legs()["L1"].state != L_OPEN,
+           f"bought={bought} (want 130 Tigris + 195 Icarus) net={k.net.get(S_IC_CE, 0)}")
+    return f
+
+
+def b12m_icarus_blind_manual_other_qty():
+    """O1 fix is strict on quantity: a manual buy of 65 is not taken as the stop."""
+    f = fleet(); k = f.kite
+    f.ic_enter(); f.ts_enter()
+    k.gtt_api_down = True
+    k.manual(S_IC_CE, "BUY", 65) if hasattr(k, "manual") else None
+    b0 = filled(k, S_IC_CE, "BUY")
+    f.ic.force_square_off_all(reason="EOD")
+    k.gtt_api_down = False
+    bought = filled(k, S_IC_CE, "BUY") - b0
+    expect("B12m", "Icarus: a manual buy of another quantity is not counted as its stop: it buys its own 195",
+           hasattr(k, "manual") and bought == 195, f"bought after the manual 65={bought}")
+    return f
+
+
+def b13r_timberwolf_blind_stop_resting():
+    f = fleet(); k = f.kite
+    f.vet_enter(); f.t2_enter()
+    b0 = filled(k, S_VT, "BUY")
+    k.gtt_api_down = True
+    k.set_px(S_VT, 260.0)                                 # gap: the stop's limit rests
+    f.t2.kill_close(f.ts_of(14, 30))
+    k.gtt_api_down = False
+    for m in range(1, 4):
+        f.t2.on_minute(f.ts_of(14, 30) + 60 * m, None, f.chain); f.t2_sweep(3)
+    bought = filled(k, S_VT, "BUY") - b0
+    expect("B13r", "Timberwolf: blind stop whose order rests: adopted, 130 bought once, Velvet untouched",
+           bought == 130 and k.net.get(S_VT) == -130
+           and not [o for o in k.open_orders() if o["tradingsymbol"] == S_VT],
+           f"bought={bought} net={k.net.get(S_VT)} working={[o['order_id'] for o in k.open_orders()]}")
+    return f
+
+
+def b13n_timberwolf_blind_no_fire_still_exits():
+    f = fleet(); k = f.kite
+    f.vet_enter(); f.t2_enter()
+    b0 = filled(k, S_VT, "BUY")
+    k.gtt_api_down = True
+    f.vet_exit(ts=2000)                                   # Velvet's APP buy on the shared strike
+    f.t2.kill_close(f.ts_of(14, 30))
+    k.gtt_api_down = False
+    bought = filled(k, S_VT, "BUY") - b0
+    expect("B13n", "Timberwolf: GTT API down, stop not fired, Velvet exits first: Timberwolf still buys its 130, account flat",
+           bought == 260 and k.net.get(S_VT, 0) == 0 and f.t2.group is None,
+           f"bought={bought} net={k.net.get(S_VT, 0)} group_open={f.t2.group is not None}")
+    return f
+
+
+def _t2_stuck_then_stop(f, k, api_back):
+    f.vet_enter(); f.t2_enter()
+    b0 = filled(k, S_VT, "BUY")
+    k.gtt_api_down = True
+    k.logged_in = False                                   # the buy-back cannot be placed: exit stuck
+    f.t2.kill_close(f.ts_of(14, 30))
+    k.logged_in = True
+    stuck = f.t2.group is not None and bool(f.t2.group.get("exit_state"))
+    k.set_px(S_VT, 226.0)                                 # the stop fires + fills 130 at the broker
+    if api_back:
+        k.gtt_api_down = False
+        f.t2_sweep(3)                                     # the GTT monitor confirms the fill
+    for m in range(1, 4):
+        f.t2.on_minute(f.ts_of(14, 30) + 60 * m, None, f.chain); f.t2_sweep(1)
+    k.gtt_api_down = False
+    f.t2.on_minute(f.ts_of(14, 35), None, f.chain); f.t2_sweep(1)
+    return stuck, filled(k, S_VT, "BUY") - b0
+
+
+def b14_timberwolf_stop_fills_during_stuck_exit():
+    """O1 (retry path): Timberwolf's forced exit is stuck (the buy-back could
+    not be placed), its stop then fires and the GTT monitor confirms the fill.
+    The retry must count that fill, not buy the short back again (that would
+    close Velvet's short on the shared strike)."""
+    f = fleet(); k = f.kite
+    stuck, bought = _t2_stuck_then_stop(f, k, api_back=True)
+    expect("B14", "Timberwolf: stop fills during a stuck exit (monitor confirms): 130 bought once, Velvet untouched",
+           stuck and bought == 130 and k.net.get(S_VT) == -130 and f.t2.group is None,
+           f"stuck={stuck} bought={bought} net={k.net.get(S_VT)} group_open={f.t2.group is not None}")
+    return f
+
+
+def b14b_timberwolf_stop_fills_during_stuck_exit_blind():
+    """…and the same while the GTT list is still unreadable at the retry."""
+    f = fleet(); k = f.kite
+    stuck, bought = _t2_stuck_then_stop(f, k, api_back=False)
+    expect("B14b", "Timberwolf: stop fills during a stuck exit, GTT still unreadable: 130 bought once, Velvet untouched",
+           stuck and bought == 130 and k.net.get(S_VT) == -130 and f.t2.group is None,
+           f"stuck={stuck} bought={bought} net={k.net.get(S_VT)} group_open={f.t2.group is not None}")
+    return f
+
+def _ic_stuck_then_stop(f, k, api_back):
+    f.ic_enter(); f.ts_enter()
+    b0 = filled(k, S_IC_CE, "BUY")
+    k.gtt_api_down = True
+    k.logged_in = False                                   # the buy-backs cannot be placed: exit stuck
+    try:
+        f.ic.force_square_off_all(reason="EOD")
+    except Exception:
+        pass
+    k.logged_in = True
+    stuck = f.ic_legs()["L1"].state == L_OPEN
+    k.set_px(S_IC_CE, 140.0)                              # its stop fires + fills 195
+    if api_back:
+        k.gtt_api_down = False
+        f.ic_sweep(3)
+    for _ in range(3):
+        f.ic.process_due(int(F.time.time()) + 61); f.ic_sweep(1)
+    k.gtt_api_down = False
+    for _ in range(3):
+        f.ic.process_due(int(F.time.time()) + 61); f.ic_sweep(1)
+    f.ic.force_square_off_all(reason="EOD")
+    return stuck, filled(k, S_IC_CE, "BUY") - b0
+
+
+def b15_icarus_stop_fills_during_stuck_exit():
+    f = fleet(); k = f.kite
+    stuck, bought = _ic_stuck_then_stop(f, k, api_back=True)
+    expect("B15", "Icarus: stop fills during a stuck exit (monitor sees it): 195 bought once, Tigris untouched",
+           stuck and bought == 195 and k.net.get(S_IC_CE) == -130 and f.ic_legs()["L1"].state != L_OPEN,
+           f"stuck={stuck} bought={bought} net={k.net.get(S_IC_CE)}")
+    return f
+
+
+def b15b_icarus_stop_fills_during_stuck_exit_blind():
+    f = fleet(); k = f.kite
+    stuck, bought = _ic_stuck_then_stop(f, k, api_back=False)
+    expect("B15b", "Icarus: stop fills during a stuck exit, GTT still unreadable at the retry: 195 bought once",
+           stuck and bought == 195 and k.net.get(S_IC_CE) == -130 and f.ic_legs()["L1"].state != L_OPEN,
+           f"stuck={stuck} bought={bought} net={k.net.get(S_IC_CE)}")
+    return f
+
+
+def b16_adopted_gtt_order_not_proof_for_another():
+    """Found by the blind soak (seed 1225): Timberwolf's exit is stuck with its
+    GTT still armed; the stop then gaps, the monitor hands the resting order to
+    the manager, which re-pegs it to a fill. That order was not claimed, so
+    Velvet — later short the same strike, after one empty positions answer —
+    took it as proof of ITS OWN exit and booked a close with its short open."""
+    f = fleet(); k = f.kite
+    f.t2_enter()
+    k.gtt_api_down = True
+    k.positions_lie = True
+    f.t2.kill_close(f.ts_of(14, 30))                      # stuck (unproven flat), GTT not cancelled
+    k.positions_lie = False
+    k.gtt_api_down = False
+    k.set_px(S_VT, 260.0)                                 # gap: the stop's limit rests
+    f.t2_sweep(4)                                         # escalation: adopted, re-pegged to a fill
+    t2_closed = f.t2.group is None and k.net.get(S_VT, 0) == 0
+    k.set_px(S_VT, 200.0)
+    f.vet_enter()
+    k.positions_lie = True
+    f.vet_exit(ts=3000)
+    k.positions_lie = False
+    for i in range(4):
+        if f.vet.pos is not None:
+            f.vet.retry_exit(3060 + 60 * i)
+    booked_blind = f.vet.pos is None and k.net.get(S_VT, 0) == -130
+    expect("B16", "An adopted GTT order is claimed: Velvet never books its exit from Timberwolf's stop order",
+           t2_closed and not booked_blind,
+           f"timberwolf closed={t2_closed} velvet booked closed={f.vet.pos is None} net={k.net.get(S_VT, 0)}")
+    return f
+
 def z_soak(seeds=None):
     """Seeded random days WITH faults. Oracle at the end of each day, after the
     faults clear and the app gets its normal hooks: flat, bought == sold on
@@ -573,7 +812,8 @@ def z_soak(seeds=None):
     import random
     seeds = int(os.environ.get("ADV_SOAK_SEEDS", seeds or 120))
     bad = []
-    for seed in range(seeds):
+    only = os.environ.get("ADV_SOAK_ONLY")
+    for seed in ([int(only) - 1000] if only else range(seeds)):
         rnd = random.Random(1000 + seed)
         f = fleet(); k = f.kite
         tok = lambda: f.ic.leg_runtime("L1").get("token")          # noqa: E731
@@ -591,6 +831,8 @@ def z_soak(seeds=None):
                 f.t2.kill_close(f.ts_of(14, 30))
             finally:
                 k.positions_lie = False
+        blind = os.environ.get("ADV_BLIND_SHOCKS") == "1"   # O1: let prices move while GTTs are unreadable
+        down = (lambda: False) if blind else (lambda: k.gtt_api_down)
         acts = {
             "ic_in": f.ic_enter, "ts_in": f.ts_enter, "vet_in": f.vet_enter, "t2_in": f.t2_enter,
             "vet_out": lambda: f.vet.pos is not None and f.vet_exit(ts=2000 + rnd.randint(0, 9) * 60),
@@ -600,10 +842,10 @@ def z_soak(seeds=None):
             # (a stop that fires while the GTT service is unreadable, followed at
             #  once by a forced exit on a shared strike, is a documented limit —
             #  see the report — so prices only move while GTTs can be read)
-            "shock_vt": lambda: k.gtt_api_down or k.set_px(S_VT, 226.0),
-            "gap_vt": lambda: k.gtt_api_down or k.set_px(S_VT, 260.0),
-            "shock_ic": lambda: k.gtt_api_down or k.set_px(S_IC_CE, 140.0),
-            "gap_ic": lambda: k.gtt_api_down or k.set_px(S_IC_CE, 200.0),
+            "shock_vt": lambda: down() or k.set_px(S_VT, 226.0),
+            "gap_vt": lambda: down() or k.set_px(S_VT, 260.0),
+            "shock_ic": lambda: down() or k.set_px(S_IC_CE, 140.0),
+            "gap_ic": lambda: down() or k.set_px(S_IC_CE, 200.0),
             "calm": lambda: (k.set_px(S_VT, 200.0), k.set_px(S_IC_CE, 97.0)),
             "sweep": lambda: (f.ic_sweep(3), f.t2_sweep(3)),
             "due": lambda: f.ic.process_due(int(F.time.time()) + 61),
@@ -627,6 +869,8 @@ def z_soak(seeds=None):
         try:
             for a in plan:
                 done.append(a)
+                if only:
+                    f.sent["audit"].append(f"======== ACT {a} gtt_down={k.gtt_api_down} net={nz(k)}")
                 acts[a]()
             # the day ends: faults clear, the app runs its normal hooks
             k.gtt_api_down = k.hide_gtt_orders = k.positions_lie = False
@@ -640,6 +884,9 @@ def z_soak(seeds=None):
                 f.t2.on_minute(f.ts_of(15, 30 + i), None, f.chain)
                 if f.ts._core is not None:
                     f.ts.on_minute(f.ts_of(15, 30 + i)) if False else None
+            if only:
+                with open(f"/tmp/soak_{1000 + seed}.log", "w") as _fh:
+                    _fh.write("\n".join(str(m) for m in f.sent["audit"]))
             over = {x[-7:]: (filled(k, x, "BUY"), filled(k, x, "SELL")) for x in k.px
                     if filled(k, x, "BUY") != filled(k, x, "SELL")}
             if not k.flat() or over or k.active_gtts() or k.open_orders():
@@ -651,6 +898,9 @@ def z_soak(seeds=None):
         except Exception as e:
             import traceback
             bad.append((1000 + seed, done[-6:], f"{e!r} {traceback.format_exc()[-300:]}"))
+    if os.environ.get("ADV_SOAK_DUMP") == "1":
+        for b in bad:
+            print("BAD", b, file=sys.stderr)
     expect("Z1", f"SOAK: {seeds} random days with faults (GTT API down, late order ids, failed cancels, "
                  f"gaps, outages, empty answers) — every day ends flat, bought == sold, no GTT armed, nothing working",
            not bad, f"{len(bad)} bad day(s); first: {bad[:1]}")
@@ -658,7 +908,7 @@ def z_soak(seeds=None):
 
 STAGE = {1: ["a3_", "a3i_", "a4_", "a10_", "a10t_", "a7", "b1_", "b2_", "b3_", "b4_", "b11_"],
          2: ["a1_", "a2_", "a2u_", "b5_", "b6_", "b7_"],
-         3: ["a6", "a8_", "b8_", "b9_", "b10_", "z_soak"],
+         3: ["a6", "a8_", "b8_", "b9_", "b10_", "b12", "b13", "b14", "b15", "b16", "z_soak"],
          4: ["a5_", "a11_", "a12_"]}
 
 
@@ -676,7 +926,13 @@ TESTS = [a1_timberwolf_forced_exit_gtt_uncancellable, a2_icarus_leftover_gtt_on_
          b5_kill_list_survives_restart, b6_kill_list_gtt_fires_first,
          b7_kill_list_normal_exits_stay_empty, b8_flat_proof_prior_day_exit,
          b9_flat_proof_real_manual_exit, b10_flat_lie_then_truth,
-         b11_dead_gtt_then_stop_still_exits, z_soak]
+         b11_dead_gtt_then_stop_still_exits, b12_icarus_stop_fires_gtt_blind_then_forced_exit,
+         b13_timberwolf_stop_fires_gtt_blind_then_forced_exit, b12r_icarus_blind_stop_resting,
+         b12n_icarus_blind_no_fire_still_exits, b12m_icarus_blind_manual_other_qty,
+         b13r_timberwolf_blind_stop_resting, b13n_timberwolf_blind_no_fire_still_exits,
+         b14_timberwolf_stop_fills_during_stuck_exit, b14b_timberwolf_stop_fills_during_stuck_exit_blind,
+         b15_icarus_stop_fills_during_stuck_exit, b15b_icarus_stop_fills_during_stuck_exit_blind,
+         b16_adopted_gtt_order_not_proof_for_another, z_soak]
 
 if __name__ == "__main__":
     import io

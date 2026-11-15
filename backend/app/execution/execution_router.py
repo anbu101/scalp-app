@@ -106,6 +106,11 @@ class ExecutionRouter(BaseOrderExecutor):
         fn = getattr(self._executor, "get_gtts_or_none", None)
         return fn() if callable(fn) else None
 
+    # ── EXIT_LATENCY_20261115 ── what the last verified cancel saw (no broker call)
+    def gtt_last_state(self, gtt_id):
+        fn = getattr(self._executor, "gtt_last_state", None)
+        return fn(gtt_id) if callable(fn) else None
+
     # ── ROUTER_GTT_FORWARDS_20261026 BEGIN ── (2026-10-26 TMA_V2 incident:
     # "'ExecutionRouter' object has no attribute 'place_gtt_sl_only_short'"
     # — the live short ran with NO broker-side SL.) Same bug class as

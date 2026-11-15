@@ -1192,6 +1192,8 @@ class TMA2TradeManager:
             return
         g["sell"]["gtt_id"] = None
         st_seed = {"SELL": str(stale_order_id)} if stale_order_id else {}
+        if stale_order_id:                     # ── BLIND_STOP_20261115 ── ours now
+            _BT.claim_orders([str(stale_order_id)])
         write_audit_log(f"[{self._sid}][EXIT][GTT_UNFILLED] {g['sell']['symbol']} "
                         f"GTT triggered, limit unfilled — adopting order "
                         f"{stale_order_id or '(unknown)'} for re-peg")
@@ -1253,43 +1255,47 @@ class TMA2TradeManager:
             # cancel-verified first (engine-driven exits). Non-forced
             # (TP/XOVER): unverified cancel → DO NOT exit (double-buy risk).
             gid = g["sell"].get("gtt_id")
-            # ── GTT_KILL_LIST_20261115 ── a GTT that has ALREADY triggered may
-            # have its limit still resting (gap). Adopt that order for the
-            # buy-back instead of placing a second one beside it.
-            if gid and not sell_already_flat and "SELL" not in seed_working:
-                try:
-                    if self.executor.get_gtt_status(gid) == "triggered":
-                        _fired = _BT.fired_gtt_orders(
-                            self.executor, gid, symbol=g["sell"]["symbol"], short=True,
-                            qtys=[int(g["sell"]["qty"])])
-                        if _fired:
-                            _BT.claim_orders(_fired)
-                            seed_working = dict(seed_working, SELL=_fired[0])
-                            write_audit_log(f"[{self._sid}][EXIT][ADOPT] GTT {gid} already "
-                                            f"triggered — its order {_fired[0]} adopted")
-                        else:
-                            # not listed yet: a broker-placed (non-app) buy that
-                            # already filled on this contract is this stop's fill
-                            _q, _px = _BT.foreign_exit_fill(
-                                self.executor, g["sell"]["symbol"], True,
-                                want_qty=int(g["sell"]["qty"]), not_before_ts=g.get("sig_ts"))
-                            if _q and _px:
-                                g["_gtt_prefill"] = (_q, _px)
-                                write_audit_log(f"[{self._sid}][EXIT][GTT_FILL] the fired GTT "
-                                                f"already filled {_q} @{_px}")
-                            if getattr(self, "_gtt_kill", None) is not None:
-                                # its order is not listed yet: make sure it
-                                # leaves nothing resting once it is
-                                self._gtt_kill.add(gid, g["sell"]["symbol"],
-                                                   "forced exit over a fired stop", spent=True)
-                except Exception as e:
-                    write_audit_log(f"[{self._sid}][EXIT][ADOPT_ERR] gtt={gid} {e!r}")
             if gid and not sell_already_flat:
                 gone = False
                 try:
                     gone = self.executor.cancel_gtt_verified(gid)
                 except Exception as e:
                     write_audit_log(f"[{self._sid}][EXIT][CANCEL_ERR] gtt={gid} {e}")
+                # ── GTT_KILL_LIST_20261115 ── a GTT that has ALREADY triggered may
+                # have its limit still resting (gap). Adopt that order for the
+                # buy-back instead of placing a second one beside it.
+                # ── EXIT_LATENCY_20261115 ── whether it had triggered is read from
+                # what the verified cancel just SAW (gtt_last_state): no extra
+                # read of the GTT list before the buy-back.
+                if gone and "SELL" not in seed_working:
+                    try:
+                        _seen = getattr(self.executor, "gtt_last_state", None)
+                        if callable(_seen) and _seen(gid) == "triggered":
+                            _fired = _BT.fired_gtt_orders(
+                                self.executor, gid, symbol=g["sell"]["symbol"], short=True,
+                                qtys=[int(g["sell"]["qty"])])
+                            if _fired:
+                                _BT.claim_orders(_fired)
+                                seed_working = dict(seed_working, SELL=_fired[0])
+                                write_audit_log(f"[{self._sid}][EXIT][ADOPT] GTT {gid} already "
+                                                f"triggered — its order {_fired[0]} adopted")
+                            else:
+                                # not listed yet: a broker-placed (non-app) buy that
+                                # already filled on this contract is this stop's fill
+                                _q, _px = _BT.foreign_exit_fill(
+                                    self.executor, g["sell"]["symbol"], True,
+                                    want_qty=int(g["sell"]["qty"]), not_before_ts=g.get("sig_ts"))
+                                if _q and _px:
+                                    g["_gtt_prefill"] = (_q, _px)
+                                    write_audit_log(f"[{self._sid}][EXIT][GTT_FILL] the fired GTT "
+                                                    f"already filled {_q} @{_px}")
+                                if getattr(self, "_gtt_kill", None) is not None:
+                                    # its order is not listed yet: make sure it
+                                    # leaves nothing resting once it is
+                                    self._gtt_kill.add(gid, g["sell"]["symbol"],
+                                                       "forced exit over a fired stop", spent=True)
+                    except Exception as e:
+                        write_audit_log(f"[{self._sid}][EXIT][ADOPT_ERR] gtt={gid} {e!r}")
                 if gone:
                     g["sell"]["gtt_id"] = None
                 elif not forced:
@@ -1302,6 +1308,25 @@ class TMA2TradeManager:
                                  mode="live")
                     return
                 else:
+                    # ── BLIND_STOP_20261115 ── O1: the GTT could not be read, so it
+                    # may have fired already: adopt / count what the stop placed.
+                    try:
+                        _seen = getattr(self.executor, "gtt_last_state", None)
+                        if "SELL" not in seed_working and (not callable(_seen) or _seen(gid) is None):
+                            _w, _q, _px = _BT.blind_stop_orders(
+                                self.executor, g["sell"]["symbol"], True,
+                                qtys=[int(g["sell"]["qty"])], want_qty=int(g["sell"]["qty"]),
+                                stop_px=g["sell"].get("sl"), not_before_ts=g.get("sig_ts"))
+                            if _w:
+                                seed_working = dict(seed_working, SELL=_w[0])
+                            elif _q and _px:
+                                g["_gtt_prefill"] = (_q, _px)
+                            if _w or _q:
+                                write_audit_log(f"[{self._sid}][EXIT][BLIND_STOP] gtt={gid} unreadable — "
+                                                f"its stop already placed {_w or ''} filled {_q} @{_px}: "
+                                                f"adopted, not bought again")
+                    except Exception as e:
+                        write_audit_log(f"[{self._sid}][EXIT][BLIND_STOP_ERR] gtt={gid} {e!r}")
                     try:
                         notify_critical({"message":
                             f"{self._sid} {reason}: GTT {gid} on "
@@ -1326,6 +1351,15 @@ class TMA2TradeManager:
                             f"{reason} sell_flat={bool(sell_already_flat)}")
         for _leg, _oid in (seed_working or {}).items():
             st["working"].setdefault(_leg, _oid)
+        # ── BLIND_STOP_20261115 ── a stop fill confirmed by the GTT monitor
+        # while this exit was already under way IS the short's exit (the flag
+        # used to count only when the exit started fresh).
+        if sell_already_flat and not st["sell_done"] and st.get("attempts", 0) > 0:
+            _q = int(g["sell"]["qty"]) - sum(q for q, _ in st["sell_fills"])
+            if _q > 0:
+                st["sell_fills"].append((_q, float(res["exit_price"])))
+                write_audit_log(f"[{self._sid}][EXIT][GTT_FILL] stop fill {_q} "
+                                f"@{res['exit_price']} confirmed during the exit — counted")
         st["attempts"] += 1
 
         if not st["sell_done"] and not self._exit_sell_leg(g, st):
@@ -1443,6 +1477,55 @@ class TMA2TradeManager:
             fills.append((r.filled_qty, r.avg_price))
         return r.filled
 
+    def _recheck_sell_gtt(self, g: Dict, st: dict, want: int) -> bool:
+        """BLIND_STOP_20261115 — True when the stop GTT turns out to have
+        placed an order (now adopted in st["working"]) or a fill (counted)."""
+        gid, sym = g["sell"]["gtt_id"], g["sell"]["symbol"]
+        gone = False
+        try:
+            gone = self.executor.cancel_gtt_verified(gid)
+        except Exception as e:
+            write_audit_log(f"[{self._sid}][EXIT][RECHK_CANCEL_ERR] gtt={gid} {e}")
+        _seen = getattr(self.executor, "gtt_last_state", None)
+        seen = _seen(gid) if callable(_seen) else None
+        if gone:
+            g["sell"]["gtt_id"] = None
+        try:
+            if seen == "triggered":
+                fired = _BT.fired_gtt_orders(self.executor, gid, symbol=sym, short=True,
+                                             qtys=[int(g["sell"]["qty"])])
+                if getattr(self, "_gtt_kill", None) is not None:
+                    self._gtt_kill.add(gid, sym, "exit retry over a fired stop", spent=True)
+                if fired:
+                    _BT.claim_orders(fired)
+                    st["working"]["SELL"] = fired[0]
+                    write_audit_log(f"[{self._sid}][EXIT][RECHK] GTT {gid} fired — its order "
+                                    f"{fired[0]} adopted")
+                    return True
+                q, px = _BT.foreign_exit_fill(self.executor, sym, True, want_qty=want,
+                                              not_before_ts=g.get("sig_ts"))
+                if q and px:
+                    st["sell_fills"].append((q, px))
+                    write_audit_log(f"[{self._sid}][EXIT][RECHK] GTT {gid} fired — filled {q} @{px}")
+                    return True
+                return False
+            if seen is None and not gone:
+                w, q, px = _BT.blind_stop_orders(self.executor, sym, True,
+                                                 qtys=[int(g["sell"]["qty"])], want_qty=want,
+                                                 stop_px=g["sell"].get("sl"),
+                                                 not_before_ts=g.get("sig_ts"))
+                if w:
+                    st["working"]["SELL"] = w[0]
+                elif q and px:
+                    st["sell_fills"].append((q, px))
+                if w or q:
+                    write_audit_log(f"[{self._sid}][EXIT][BLIND_STOP] retry: gtt={gid} unreadable — "
+                                    f"its stop already placed {w or ''} filled {q} @{px}: adopted")
+                    return True
+        except Exception as e:
+            write_audit_log(f"[{self._sid}][EXIT][RECHK_ERR] gtt={gid} {e!r}")
+        return False
+
     def _exit_sell_leg(self, g: Dict, st: dict) -> bool:
         sym, qty = g["sell"]["symbol"], int(g["sell"]["qty"])
         settled = self._settle_leg_order(st, "SELL", sym, "BUY")
@@ -1455,6 +1538,14 @@ class TMA2TradeManager:
             st["sell_done"] = True
             st["sell_px"] = self._vwap(st["sell_fills"]) or st["model_sell_px"]
             return True
+        # ── BLIND_STOP_20261115 ── a retry while the stop GTT was never verified
+        # gone: it may have fired since the last attempt. Look (once per
+        # attempt) before buying back; anything it placed is adopted / counted.
+        if (st.get("attempts", 0) > 1 and g["sell"].get("gtt_id")
+                and not st["working"].get("SELL") and st.get("_gtt_rechk") != st["attempts"]):
+            st["_gtt_rechk"] = st["attempts"]
+            if self._recheck_sell_gtt(g, st, qty - got):
+                return self._exit_sell_leg(g, st)
         observed = self._net_qty(sym)
         # ── FLAT_NEEDS_PROOF_20261115 ── flat with no fill of ours: prove it
         if (observed is not None and observed >= 0 and not st["sell_fills"]

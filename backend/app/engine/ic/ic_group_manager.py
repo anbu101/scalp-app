@@ -396,6 +396,31 @@ class ICGroupManager:
     # ENTRY — called by ic_engine at entry_time on a dedicated thread
     # ==================================================================
 
+    def _entry_reservation(self, selection) -> Dict[str, int]:
+        """── RESERVE_SIGNED_20261115 ── the contracts this entry will hold,
+        signed (short negative) with their real quantity. It used to reserve
+        +1 for every leg: during the entry another strategy saw Icarus's
+        SHORTS as longs — opposite-side avoidance then let it BUY them and
+        stopped it selling them, and the quantities were wrong."""
+        out: Dict[str, int] = {}
+        picks = selection.picks or {}
+        try:
+            cfg = self._cfg()
+            lot = self._lot_size(cfg)
+            for lc in self._legs_cfg(cfg):
+                p = picks.get(lc.get("id"))
+                if p is None or not getattr(p, "symbol", None) or int(lc.get("lots", 0)) <= 0:
+                    continue
+                q = int(lc["lots"]) * lot
+                out[p.symbol] = out.get(p.symbol, 0) + (-q if str(lc.get("action")).upper() == "SELL" else q)
+        except Exception:
+            out = {}
+        for p in picks.values():                 # a leg the config does not describe: still shared
+            s = getattr(p, "symbol", None)
+            if s and s not in out:
+                out[s] = 1
+        return out
+
     def enter_day(self, selection: ICSelection, *, mode: str) -> bool:
         if not self._entry_lock.acquire(blocking=False):
             write_audit_log(f"[IC][{self.strategy_id}][ENTRY] re-entrant call blocked")
@@ -407,9 +432,7 @@ class ICGroupManager:
             # contracts as shared (their exits then use their own fills only).
             if str(mode).upper() == "LIVE":
                 try:
-                    _bt().LEDGER.reserve(self.strategy_id, {
-                        p.symbol: 1 for p in (selection.picks or {}).values()
-                        if getattr(p, "symbol", None)})
+                    _bt().LEDGER.reserve(self.strategy_id, self._entry_reservation(selection))
                 except Exception:
                     pass
             ok = self._enter_day_impl(selection, mode=mode)
@@ -1305,7 +1328,7 @@ class ICGroupManager:
         else:
             # LIVE: place + confirm synchronously (engine thread, house-OK)
             try:                                       # ── BROKER_TRUTH_20261114 ──
-                _bt().LEDGER.reserve(self.strategy_id, {leg.symbol: 1})
+                _bt().LEDGER.reserve(self.strategy_id, {leg.symbol: int(qty)})   # ── RESERVE_SIGNED_20261115 ── a long, real qty
             except Exception:
                 pass
             try:
@@ -2159,6 +2182,28 @@ class ICGroupManager:
                                 f"— deferring to GTT/backstop (no double-fire)")
                 rt["_exiting"] = False    # allow backstop to run the close
                 return ("DEFER", None)
+            # ── BLIND_STOP_20261115 ── O1: the GTT could not be read, so it may
+            # have fired already. What the stop placed (working or filled) is
+            # adopted / counted — the exit below buys only what is still open.
+            if status is None:
+                try:
+                    _tot = sum(int(c) for c in rt["slices"])
+                    _w, _q, _px = _bt().blind_stop_orders(
+                        self.executor, leg.symbol, leg.is_short,
+                        qtys=[int(c) for c in rt["slices"]] + [_tot],
+                        want_qty=_tot - sum(q for q, _ in rt.get("exit_fills") or []),
+                        stop_px=getattr(leg, "sl", None), not_before_ts=rt.get("entry_ts"))
+                    for _oid in _w:
+                        if _oid not in rt.setdefault("exit_working", []):
+                            rt["exit_working"].append(_oid)
+                    if _q and _px:
+                        rt.setdefault("exit_fills", []).append((_q, _px))
+                    if _w or _q:
+                        write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][BLIND_STOP] {leg.symbol} "
+                                        f"gtt={gid} unreadable — its stop already placed "
+                                        f"{len(_w)} working, filled {_q} @{_px}: adopted, not bought again")
+                except Exception as e:
+                    write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][BLIND_STOP_ERR] gtt={gid} {e!r}")
             try:
                 notify_critical({"message":
                     f"{self.strategy_id} {reason}: GTT {gid} on {leg.symbol} could not be cancelled "

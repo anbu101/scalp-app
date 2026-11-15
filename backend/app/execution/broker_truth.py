@@ -194,12 +194,51 @@ def note_app_order(order_id) -> None:
                 return
             _APP_ORDERS.add(oid)
             _day, f = _app_orders_file()
-            if f is not None:
-                f.parent.mkdir(parents=True, exist_ok=True)
-                with open(f, "a") as fh:
-                    fh.write(oid + "\n")
+        # ── EXIT_LATENCY_20261115 ── the day file is written by a background
+        # thread: nothing on the order path waits for the disk (this ran
+        # between two legs of an entry). Memory is updated at once, above.
+        if f is not None:
+            _app_orders_persist(f, oid)
     except Exception:
         pass
+
+
+_APP_ORDERS_Q: list = []
+_APP_ORDERS_WRITER: list = [None]
+
+
+def _app_orders_persist(f, oid: str) -> None:
+    with _APP_ORDERS_LOCK:
+        _APP_ORDERS_Q.append((f, oid))
+        t = _APP_ORDERS_WRITER[0]
+        if t is None or not t.is_alive():
+            t = threading.Thread(target=_app_orders_drain, daemon=True, name="AppOrdersWriter")
+            _APP_ORDERS_WRITER[0] = t
+            t.start()
+
+
+def _app_orders_drain() -> None:
+    import time as _t
+    idle = 0
+    while idle < 50:                                  # exits after ~5 s with nothing to write
+        with _APP_ORDERS_LOCK:
+            batch = list(_APP_ORDERS_Q)
+            del _APP_ORDERS_Q[:]
+        if not batch:
+            idle += 1
+            _t.sleep(0.1)
+            continue
+        idle = 0
+        try:
+            by_file: Dict[object, List[str]] = {}
+            for f, oid in batch:
+                by_file.setdefault(f, []).append(oid)
+            for f, oids in by_file.items():
+                f.parent.mkdir(parents=True, exist_ok=True)
+                with open(f, "a") as fh:
+                    fh.write("".join(o + "\n" for o in oids))
+        except Exception:
+            pass
 
 
 def claim_orders(order_ids) -> None:
@@ -542,6 +581,80 @@ def foreign_exit_fill(executor, symbol: str, short: bool, *, want_qty: int = 0,
             continue
     claim_orders(used)                        # counted once, for one strategy
     return (got_q, round(got_v / got_q, 4)) if got_q else (0, None)
+
+
+# ── BLIND_STOP_20261115 ── O1. The stop GTT can be neither read nor cancelled
+# and a forced exit is about to buy the leg back: had the stop already fired?
+# ONE order-book read. A match must be: exit side, on the contract, NOT placed
+# by this app (any strategy), exactly one of the leg's quantities, after the
+# leg opened, and priced like the stop: a working order within -10% .. +25%
+# of its trigger (mirrored for a sell); a filled one no worse than that. Working matches are adopted, filled ones
+# counted — so the exit buys only what is really still open.
+def blind_stop_orders(executor, symbol: str, short: bool, *, qtys, want_qty: int,
+                      stop_px=None, not_before_ts=None):
+    """(working order ids, filled qty, vwap). ([], 0, None) when nothing
+    matches or the order book cannot be read (the exit then goes as before)."""
+    side = "BUY" if short else "SELL"
+    want = {int(q) for q in (qtys or []) if q}
+    try:
+        orders = executor.get_orders() or []
+    except Exception:
+        return [], 0, None
+    try:
+        from app.execution import fill_pick as _fp
+        ts_of = _fp.order_ts
+    except Exception:
+        ts_of = None
+    lo = hi = None
+    try:
+        if stop_px and float(stop_px) > 0:
+            sp = float(stop_px)
+            lo, hi = (sp * 0.90, sp * 1.25) if short else (sp * 0.75, sp * 1.10)
+    except Exception:
+        lo = hi = None
+    ours = app_order_ids()
+    working, used, got_q, got_v = [], [], 0, 0.0
+    for o in orders:
+        try:
+            oid = str(o.get("order_id") or "")
+            st = str(o.get("status") or "").upper()
+            if (not oid or oid in ours
+                    or str(o.get("tradingsymbol") or "") != str(symbol)
+                    or str(o.get("transaction_type") or "").upper() != side
+                    or int(o.get("quantity") or 0) not in want
+                    or st in ("REJECTED", "CANCELLED", "LAPSED", "")):
+                continue
+            if not_before_ts and ts_of is not None:
+                t = ts_of(o)
+                if t is not None and t < int(not_before_ts) - 5:
+                    continue
+            if st == "COMPLETE":
+                px = float(o.get("average_price") or 0)
+                q = int(o.get("filled_quantity") or o.get("quantity") or 0)
+            else:
+                px = float(o.get("price") or 0)
+                q = 0
+            # a working stop order sits at the stop's limit; a filled one can
+            # be at any price up to that limit (a resting limit fills lower).
+            if lo is not None and px > 0:
+                if st != "COMPLETE" and not (lo <= px <= hi):
+                    continue
+                if st == "COMPLETE" and ((px > hi) if short else (px < lo)):
+                    continue
+            if q and got_q + q > int(want_qty):
+                continue
+            if st == "COMPLETE":
+                if q <= 0 or px <= 0:
+                    continue
+                got_q += q
+                got_v += q * px
+            else:
+                working.append(oid)
+            used.append(oid)
+        except Exception:
+            continue
+    claim_orders(used)                        # counted once, for one strategy
+    return working, got_q, (round(got_v / got_q, 4) if got_q else None)
 
 
 class GttKillList:

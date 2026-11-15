@@ -245,6 +245,78 @@ _RELAY_TRANSIENT_ERRORS = (
 )
 
 
+# ── ORDER_ONCE_20261115 ── helpers (see _relay_call_inner) ──────────────────
+_NOT_SENT_MARKS = ("NewConnectionError", "Connection refused", "Name or service not known",
+                   "nodename nor servname", "No route to host", "Network is unreachable",
+                   "getaddrinfo failed", "Failed to establish a new connection")
+_TAG_N = [0]
+
+
+def _tag_params(params: dict) -> Optional[str]:
+    """Give an order a unique tag (Kite: alphanumeric, max 20) and return it.
+    An order that already carries a caller's tag keeps it and returns None:
+    such a tag is not unique, so it cannot be used to look the order up."""
+    tag = params.get("tag")
+    if tag:
+        return None
+    if not tag:
+        _TAG_N[0] = (_TAG_N[0] + 1) % 1296
+        n = int(time.time() * 1000)
+        digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        out = ""
+        while n:
+            n, r = divmod(n, 36)
+            out = digits[r] + out
+        # ── INSTANCE_GUARD_20261115 ── "ST" + this machine's id: an order of a
+        # second Scalp Terminal on the same account is recognisable in the book.
+        try:
+            from app.execution import instance_guard as _IG
+            pre = _IG.tag_prefix()
+        except Exception:
+            pre = "ST"
+        tag = (pre + out + digits[_TAG_N[0] // 36] + digits[_TAG_N[0] % 36])[:20]
+        params["tag"] = tag
+    return tag
+
+
+def _maybe_sent(e, direct: bool = False) -> bool:
+    """Could the request have reached the broker? False only when it certainly
+    did not: the connection was never made, or the relay itself refused (4xx)."""
+    try:
+        if isinstance(e, requests.exceptions.ConnectTimeout):
+            return False
+        text = repr(e)
+        if any(m in text for m in _NOT_SENT_MARKS):
+            return False
+        if isinstance(e, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+            return True
+        if direct:
+            # kiteconnect: NetworkException / DataException = no usable answer;
+            # every other Kite exception is the broker saying no.
+            return type(e).__name__ in ("NetworkException", "DataException", "Timeout",
+                                        "ReadTimeout", "ConnectionError", "TimeoutError")
+        m = re.search(r"failed HTTP (\d{3})", str(e))
+        if m:
+            return int(m.group(1)) >= 500          # the relay answered: 4xx = refused, 5xx = unclear
+        return True                                # e.g. an unreadable answer body
+    except Exception:
+        return False
+
+
+def _once_kw(tag, find) -> dict:
+    """Only pass tag/find when set, so older 4-argument hooks keep working."""
+    kw = {}
+    if tag is not None:
+        kw["tag"] = tag
+    if find is not None:
+        kw["find"] = find
+    return kw
+
+
+def _start_bg(fn, name: str):
+    threading.Thread(target=fn, daemon=True, name=name).start()
+
+
 # ── RELAY_REJECT_PASSTHRU_20260915 BEGIN ─────────────────────────────────
 # 2026-09-15 09:16: an "Insufficient funds" rejection relayed back as HTTP
 # 500 was treated as "relay failed", retried on the second relay, then fell
@@ -326,12 +398,13 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     # reference price: the LTP the app held for the symbol just before sending.
     # The stamp is written AFTER the call returns, on its own thread (the
     # order is never delayed); any stamping error is swallowed.
-    def _relay_call(self, relay_fn, direct_fn, op_name: str, symbol: str = ""):
+    def _relay_call(self, relay_fn, direct_fn, op_name: str, symbol: str = "",
+                    tag: Optional[str] = None, find=None):
         # ── ORDER_LATENCY_20261111 ── one line per order: where the time went
         t_send = time.time()
         ok = False
         try:
-            out = self._relay_call_slip(relay_fn, direct_fn, op_name, symbol)
+            out = self._relay_call_slip(relay_fn, direct_fn, op_name, symbol, tag, find)
             ok = True
             return out
         finally:
@@ -350,20 +423,21 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 except Exception:
                     pass
 
-    def _relay_call_slip(self, relay_fn, direct_fn, op_name: str, symbol: str = ""):
+    def _relay_call_slip(self, relay_fn, direct_fn, op_name: str, symbol: str = "",
+                         tag: Optional[str] = None, find=None):
         try:
             from app.slippage.slip_store import SIDE_OF as _SLIP_SIDE
         except Exception:
             _SLIP_SIDE = {}
         if op_name not in _SLIP_SIDE:
-            return self._relay_call_inner(relay_fn, direct_fn, op_name, symbol)
+            return self._relay_call_inner(relay_fn, direct_fn, op_name, symbol, **_once_kw(tag, find))
         try:
             ref = LTPStore.get_with_timestamp(symbol)
         except Exception:
             ref = None
         t0, oid, err = time.time(), None, None
         try:
-            oid = self._relay_call_inner(relay_fn, direct_fn, op_name, symbol)
+            oid = self._relay_call_inner(relay_fn, direct_fn, op_name, symbol, **_once_kw(tag, find))
             return oid
         except Exception as e:
             err = f"{type(e).__name__}: {e}"[:200]
@@ -375,14 +449,157 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             except Exception:
                 pass
 
-    def _relay_call_inner(self, relay_fn, direct_fn, op_name: str, symbol: str = ""):
+    # ── ORDER_ONCE_20261115 BEGIN ──────────────────────────────────────────
+    # WHAT WAS WRONG (fleet assurance, 15 Nov 2026 — test_order_once.py):
+    # an order or GTT whose answer was LOST (read timeout, connection dropped
+    # after the request left, a 5xx from the relay) was treated as "relay
+    # failed": the same order was sent again through the next relay, or the
+    # call raised and the strategy placed it again a minute later. The first
+    # one was often already at the broker → two buy-backs (the account ends
+    # long), two short entries (one of them with no stop), two GTTs for one
+    # leg. Nothing could tell them apart: orders carried no identifier.
+    # NOW
+    #   * every order carries a unique tag (Kite `tag`; the relay forwards it);
+    #   * an UNCLEAR failure — the request may have left — is looked up at the
+    #     broker (by tag; a GTT by symbol/trigger/quantity) for ~2 s BEFORE
+    #     anything is sent again. Found → that order IS the result;
+    #   * not found → it goes on exactly as before (next relay / raise), and a
+    #     background watch keeps looking for 2 minutes: an order that shows up
+    #     late is cancelled if it is still working, and paged either way;
+    #   * a CLEAR failure (could not connect, relay refused with 4xx, the
+    #     broker rejected) behaves exactly as before.
+    # Cost: nothing on a normal order (the tag is a field). The lookups only
+    # run after a failure.
+    _AMBIG_GAPS = (0.3, 0.7, 1.0)       # lookups after an unclear failure (~2 s)
+    _LATE_TRIES, _LATE_GAP = 24, 5.0    # background watch: 2 minutes
+
+    def _find_orders_by_tag(self, tag: str) -> List[str]:
+        """Ids of orders in today's book carrying `tag`. [] if none / unreadable."""
+        try:
+            kite = self._kite()
+            if not kite or not tag:
+                return []
+            out = []
+            for o in kite.orders() or []:
+                if o.get("tag") == tag or tag in (o.get("tags") or []):
+                    out.append(str(o.get("order_id")))
+            return out
+        except Exception:
+            return []
+
+    def _find_gtts_like(self, gtt_params: dict) -> List[str]:
+        """Ids of ACTIVE GTTs with the same contract, trigger(s) and quantity."""
+        try:
+            want_q = [int(o.get("quantity") or 0) for o in gtt_params.get("orders") or []]
+            want_t = [round(float(t), 2) for t in gtt_params.get("trigger_values") or []]
+            out = []
+            for g in self.get_gtts_or_none() or []:
+                cond = g.get("condition") or {}
+                if str(g.get("status") or "").lower() != "active":
+                    continue
+                if cond.get("tradingsymbol") != gtt_params.get("tradingsymbol"):
+                    continue
+                if [round(float(t), 2) for t in cond.get("trigger_values") or []] != want_t:
+                    continue
+                if [int(o.get("quantity") or 0) for o in g.get("orders") or []] != want_q:
+                    continue
+                out.append(str(g.get("id")))
+            return out
+        except Exception:
+            return []
+
+    def _find_after_unclear(self, find, op_name: str, symbol: str, where: str, err) -> Optional[str]:
+        write_audit_log(f"[ORDER_ONCE][{op_name}] {symbol} via {where}: outcome UNCLEAR "
+                        f"({type(err).__name__}) — looking it up at the broker before resending")
+        for gap in self._AMBIG_GAPS:
+            time.sleep(gap)
+            try:
+                got = find() or []
+            except Exception:
+                got = []
+            if got:
+                write_audit_log(f"[ORDER_ONCE][{op_name}] {symbol}: it IS at the broker "
+                                f"(id={got[0]}) — not sent again")
+                return str(got[0])
+        write_audit_log(f"[ORDER_ONCE][{op_name}] {symbol}: not at the broker after "
+                        f"{sum(self._AMBIG_GAPS):.1f}s — treated as failed; watching for a late arrival")
+        return None
+
+    def _watch_late(self, find, op_name: str, symbol: str, resent_id: Optional[str]):
+        """Background: did the order we gave up on arrive after all?"""
+        def _run():
+            for _ in range(self._LATE_TRIES):
+                time.sleep(self._LATE_GAP)
+                try:
+                    late = [x for x in (find() or []) if str(x) != str(resent_id or "")]
+                except Exception:
+                    late = []
+                if late:
+                    self._settle_late(late[0], op_name, symbol, resent_id)
+                    return
+        try:
+            _start_bg(_run, "order-once-watch")
+        except Exception as e:
+            write_audit_log(f"[ORDER_ONCE][WATCH_ERR] {e!r}")
+
+    def _settle_late(self, late_id: str, op_name: str, symbol: str, resent_id: Optional[str]):
+        what = "GTT" if op_name.startswith("GTT") else "order"
+        why = (f"it was sent twice (the second is {resent_id})" if resent_id
+               else "the app treated it as failed and is not tracking it")
+        cancelled = False
+        try:
+            if what == "GTT":
+                self.cancel_gtt(late_id)
+                cancelled = True
+            else:
+                info = self.get_order_fill(late_id) or {}
+                st = str(info.get("status") or "").upper()
+                if st and st not in ("COMPLETE", "REJECTED", "CANCELLED", "LAPSED") \
+                        and not int(info.get("filled_qty") or 0):
+                    self.cancel_order(late_id)
+                    cancelled = True
+                elif st in ("REJECTED", "CANCELLED", "LAPSED") and not int(info.get("filled_qty") or 0):
+                    write_audit_log(f"[ORDER_ONCE][{op_name}] {symbol}: late order {late_id} is {st} — nothing to do")
+                    return
+        except Exception as e:
+            write_audit_log(f"[ORDER_ONCE][{op_name}] {symbol}: could not cancel late {what} {late_id}: {e!r}")
+        msg = (f"{op_name} {symbol}: a {what} arrived at Zerodha LATE (id {late_id}) — {why}. "
+               + (f"It has been CANCELLED. Verify in Kite." if cancelled else
+                  f"It could NOT be cancelled (it may have filled). CHECK KITE Positions / "
+                  f"Orders{' / GTT' if what == 'GTT' else ''} NOW."))
+        write_audit_log(f"[ORDER_ONCE][LATE] {msg}")
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({"message": msg, "severity": "warning" if cancelled else "error"})
+        except Exception:
+            pass
+
+    def _direct_once(self, direct_fn, find, op_name: str, symbol: str):
+        """The direct (no relay) call, with the same lookup after an unclear failure."""
+        try:
+            return direct_fn()
+        except Exception as e:
+            if find is None or not _maybe_sent(e, direct=True):
+                raise
+            got = self._find_after_unclear(find, op_name, symbol, "direct", e)
+            if got:
+                return got
+            self._watch_late(find, op_name, symbol, None)
+            raise
+    # ── ORDER_ONCE_20261115 END ────────────────────────────────────────────
+
+    def _relay_call_inner(self, relay_fn, direct_fn, op_name: str, symbol: str = "",
+                          tag: Optional[str] = None, find=None):
+        if find is None and tag:                       # ── ORDER_ONCE_20261115 ──
+            find = lambda: self._find_orders_by_tag(tag)   # noqa: E731
         cfg = _load_relay_config()
         if not cfg or not cfg.get("relays"):
-            return direct_fn()
+            return self._direct_once(direct_fn, find, op_name, symbol)
 
         kite = self._kite()
         if not kite:
             return direct_fn()
+        unclear = False                                # ── ORDER_ONCE_20261115 ──
 
         relays   = cfg["relays"]
         ordered  = [r for r in relays if r.get("is_primary")] + \
@@ -404,6 +621,8 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                                      access_token=kite.access_token)
                 result = relay_fn(relay)
                 write_audit_log(f"[RELAY][{op_name}] {symbol} - SUCCESS via {host}")
+                if unclear:                            # ── ORDER_ONCE_20261115 ── sent twice?
+                    self._watch_late(find, op_name, symbol, str(result))
                 return result
 
             except RelayBrokerRejection as e:
@@ -417,12 +636,23 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 )
                 raise
             except _RELAY_TRANSIENT_ERRORS as e:
+                # ── ORDER_ONCE_20261115 ── the request may have left: look first
+                if find is not None and _maybe_sent(e):
+                    got = self._find_after_unclear(find, op_name, symbol, host, e)
+                    if got:
+                        return got
+                    unclear = True
                 write_audit_log(
                     f"[RELAY][{op_name}] {host} unreachable ({type(e).__name__}) - next relay"
                 )
                 errors.append(f"[{host}] unreachable ({type(e).__name__})")
                 continue
             except Exception as e:
+                if find is not None and _maybe_sent(e):    # ── ORDER_ONCE_20261115 ──
+                    got = self._find_after_unclear(find, op_name, symbol, host, e)
+                    if got:
+                        return got
+                    unclear = True
                 write_audit_log(f"[RELAY][{op_name}] {host} error: {e} - next relay")
                 errors.append(f"[{host}] {_clean_broker_text(e, 160)}")
                 continue
@@ -431,6 +661,8 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         # IP-gated: a direct call from a desktop can only answer
         # PermissionException and would MASK the reasons collected above.
         if not cfg.get("allow_direct_fallback", False):
+            if unclear:                                # ── ORDER_ONCE_20261115 ──
+                self._watch_late(find, op_name, symbol, None)
             write_audit_log(
                 f"[RELAY][{op_name}][ALL_FAILED] {symbol} - NO direct fallback "
                 f"(writes are IP-gated); errors: {' | '.join(errors) or 'none'}"
@@ -444,8 +676,15 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             f"[RELAY][{op_name}][ALL_FAILED] {symbol} - direct fallback "
             f"(allow_direct_fallback=true)"
         )
-        result = direct_fn()
+        try:
+            result = direct_fn()
+        except Exception:
+            if unclear:                                # ── ORDER_ONCE_20261115 ──
+                self._watch_late(find, op_name, symbol, None)
+            raise
         write_audit_log(f"[RELAY][{op_name}][DIRECT_OK] {symbol}")
+        if unclear:                                    # ── ORDER_ONCE_20261115 ── sent twice?
+            self._watch_late(find, op_name, symbol, str(result))
         return result
 
     # ── internal helpers ──────────────────────────────
@@ -677,6 +916,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             relay_fn=lambda r: r.place_order(**order_params),
             direct_fn=lambda: kite.place_order(**order_params),
             op_name="BUY", symbol=symbol,
+            tag=_tag_params(order_params),   # ── ORDER_ONCE_20261115 ──
         )
         write_audit_log(
             f"[ZERODHA-BUY-PLACED] ORDER_ID={order_id} SYMBOL={symbol} "
@@ -763,7 +1003,8 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         oid = self._relay_call(
             relay_fn=lambda r: r.place_order(**kw),
             direct_fn=lambda: kite.place_order(**kw),
-            op_name="LIMIT_BUY", symbol=symbol)
+            op_name="LIMIT_BUY", symbol=symbol,
+            tag=_tag_params(kw))   # ── ORDER_ONCE_20261115 ──
         write_audit_log(f"[LIMIT-BUY] {symbol} x{qty} @{price} "
                         f"product={product} ORDER_ID={oid}")
         return oid
@@ -809,6 +1050,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             relay_fn=lambda r: r.place_order(**order_params),
             direct_fn=lambda: kite.place_order(**order_params),
             op_name="BUY", symbol=symbol,
+            tag=_tag_params(order_params),   # ── ORDER_ONCE_20261115 ──
         )
 
         write_audit_log(
@@ -827,6 +1069,16 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         Returns (order_id, limit_price, qty).
         """
         self._ensure_trading_enabled()
+        # ── INSTANCE_GUARD_20261115 ── a second Scalp Terminal is trading this
+        # account: no NEW shorts (the strategy unwinds the entry; exits go on).
+        try:
+            from app.execution import instance_guard as _IG
+            _why = _IG.blocked()
+        except Exception:
+            _why = None
+        if _why:
+            write_audit_log(f"[ZERODHA][SELL_ENTRY][BLOCKED] {symbol} {_why}")
+            raise RuntimeError(f"INSTANCE_GUARD: {_why}")
 
         if qty <= 0 or qty > MAX_QTY_PER_ORDER:
             raise RuntimeError(f"INVALID_QTY qty={qty} SYMBOL={symbol}")
@@ -871,6 +1123,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             relay_fn=lambda r: r.place_order(**order_params),
             direct_fn=lambda: kite.place_order(**order_params),
             op_name="SELL_ENTRY", symbol=symbol,
+            tag=_tag_params(order_params),   # ── ORDER_ONCE_20261115 ──
         )
 
         write_audit_log(
@@ -927,6 +1180,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             relay_fn=lambda r: r.place_order(**order_params),
             direct_fn=lambda: kite.place_order(**order_params),
             op_name="BUY_EXIT", symbol=symbol,
+            tag=_tag_params(order_params),   # ── ORDER_ONCE_20261115 ──
         )
 
         write_audit_log(
@@ -1282,6 +1536,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         gtt_id = self._relay_call(
             relay_fn=_relay_gtt, direct_fn=_direct_gtt,
             op_name="GTT_TP_ONLY", symbol=symbol,
+            find=lambda: self._find_gtts_like(gtt_params),   # ── ORDER_ONCE_20261115 ──
         )
 
         write_audit_log(
@@ -1387,6 +1642,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         gtt_id = self._relay_call(
             relay_fn=_relay_gtt, direct_fn=_direct_gtt,
             op_name="GTT_SL_ONLY_SHORT", symbol=symbol,
+            find=lambda: self._find_gtts_like(gtt_params),   # ── ORDER_ONCE_20261115 ──
         )
 
         write_audit_log(
@@ -1487,6 +1743,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         gtt_id = self._relay_call(
             relay_fn=_relay_gtt, direct_fn=_direct_gtt,
             op_name="GTT_SL_ONLY_LONG", symbol=symbol,
+            find=lambda: self._find_gtts_like(gtt_params),   # ── ORDER_ONCE_20261115 ──
         )
 
         write_audit_log(
@@ -1599,7 +1856,14 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         kite = self._kite()
         if not kite:
             return []
-        return kite.orders()
+        out = kite.orders()
+        try:                                      # ── INSTANCE_GUARD_20261115 ── in memory only
+            from app.execution import instance_guard as _IG
+            _IG.observe(out)
+            _IG.start_poll(self.get_orders)
+        except Exception:
+            pass
+        return out
 
     def get_open_positions(self) -> List[Dict]:
         kite = self._kite()
@@ -1628,6 +1892,17 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         except Exception as e:
             write_audit_log(f"[ZERODHA-GTT-CANCEL-WARN] GTT_ID={gtt_id} ERR={e}")
             raise
+
+    # ── EXIT_LATENCY_20261115 ──
+    _GTT_VERIFY_GAPS = (0.25, 0.35, 0.4, 0.5)      # checks at 0.25 / 0.6 / 1.0 / 1.5 s
+    _GTT_VERIFY_WINDOW_S = 1.5                     # the old single wait
+    _gtt_last_state: dict = {}                     # gtt id -> state seen by the last verify
+
+    def gtt_last_state(self, gtt_id) -> Optional[str]:
+        """The state cancel_gtt_verified last SAW for this GTT ("triggered",
+        "missing", "cancelled", …) — no broker call. Lets an exit learn that
+        its GTT had already fired without a second read of the GTT list."""
+        return self._gtt_last_state.get(str(gtt_id))
 
     def cancel_gtt_verified(self, gtt_id: str, retries: int = 4) -> bool:
             """
@@ -1679,13 +1954,29 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
                 # Give the broker time to reflect the delete before checking.
                 # Zerodha's GTT list is eventually consistent and can lag the
-                # cancel by a few seconds, so the first check waits a bit longer.
-                time.sleep(1.5)
-
-                last = _state()
+                # cancel by a few seconds.
+                # ── EXIT_LATENCY_20261115 ── this used to be ONE fixed
+                # time.sleep(1.5) before the single check — 1.5 s added to
+                # EVERY exit that has a GTT, before the exit order is placed
+                # (twice that for a condor's two shorts). The list is now
+                # checked after 0.25 s and then at growing gaps over the SAME
+                # 1.5 s: the cancel is confirmed as soon as the broker shows
+                # it, and never later than before. An unreadable list is not
+                # re-read inside the window (each such read can be slow).
+                waited = 0.0
+                for gap in self._GTT_VERIFY_GAPS:
+                    time.sleep(gap)
+                    waited += gap
+                    last = _state()
+                    if last == "unreadable":
+                        time.sleep(max(0.0, self._GTT_VERIFY_WINDOW_S - waited))
+                        break
+                    if last not in ("active", "unknown"):
+                        break
+                self._gtt_last_state[target] = last
                 if last not in ("active", "unreadable", "unknown"):
                     write_audit_log(f"[GTT_VERIFY] CONFIRMED_GONE GTT_ID={target} "
-                                    f"status={last} attempt={attempt}")
+                                    f"status={last} attempt={attempt} after {waited:.2f}s")
                     return True
                 if last == "active":
                     write_audit_log(f"[GTT_VERIFY] STILL_ARMED GTT_ID={target} attempt={attempt} — retrying")
@@ -1807,6 +2098,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             relay_fn=lambda r: r.place_order(**order_params),
             direct_fn=lambda: kite.place_order(**order_params),
             op_name="SELL", symbol=symbol,
+            tag=_tag_params(order_params),   # ── ORDER_ONCE_20261115 ──
         )
 
         write_audit_log(

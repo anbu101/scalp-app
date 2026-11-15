@@ -202,7 +202,11 @@ class FleetKite(FakeKite):
         if rows is None:
             return False
         st = next((r["status"] for r in rows if str(r["id"]) == str(gid)), "missing")
+        self.__dict__.setdefault("_last_gtt_state", {})[str(gid)] = st   # EXIT_LATENCY_20261115
         return st != "active"
+
+    def gtt_last_state(self, gid):                       # what the last verified cancel saw
+        return self.__dict__.get("_last_gtt_state", {}).get(str(gid))
 
     def place_gtt_oco(self, symbol, qty, sl_price, tp_price, last_price=None, direction="LONG"):
         """Two-leg GTT on a long: SELL at the stop (the target leg is not modelled)."""
