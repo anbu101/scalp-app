@@ -54,6 +54,7 @@ from app.event_bus.audit_logger import write_audit_log
 from app.execution.exit_order_driver import drive_exit_order   # ── TSG_EXIT_CONFIRM_20261026 ──
 from app.execution.wing_entry import place_wing   # ── WING_FAST_FILL_20261111 ──
 from app.execution import broker_truth as _BT     # ── BROKER_TRUTH_20261114 ──
+from app.execution import instance_guard as _IG   # ── EXIT_INTENT_20261115 ──
 from app.event_bus.inapp_events import record_alert
 from app.config.strategy_loader import load_strategy_config
 from app.risk.risk_mtm_guard import is_day_blocked
@@ -143,6 +144,9 @@ class TsgManager:
         self._exit_working: Dict[str, str] = {}
         self._exit_fills: Dict[str, list] = {}
         self._exit_alerted_at: Dict[str, float] = {}
+        self._intent_unknown: set = set()          # ── EXIT_INTENT_20261115 ──
+        self._exit_settled: set = set()            # exit order ids whose fills are counted
+        self._run_id = uuid.uuid4().hex[:8]         # notes of THIS run are never "recovered"
         self._sleep, self._clock = time.sleep, time.time   # test-injectable
         # ── BROKER_TRUTH_20261114 ── tell the other strategies what we hold
         try:
@@ -1041,6 +1045,8 @@ class TsgManager:
     def _book_exit(self, leg: TsgLeg, px: float, reason: str,
                    exit_order_id: Optional[str] = None) -> None:
         self._core.leg_exited(leg.leg_id, px, reason, ts=_ts())
+        if not self._paper:
+            _BT.exit_intent_done(STRATEGY_ID, leg.leg_id)   # ── EXIT_INTENT_20261115 ──
         try:
             pid = self._paper_row_ids.get(leg.leg_id)
             if self._paper and pid is not None:
@@ -1119,10 +1125,53 @@ class TsgManager:
                 return True
         return False
 
+    def _recover_exit_intents(self) -> None:
+        """── EXIT_INTENT_20261115 ── an exit noted (and maybe sent) before a
+        restart, whose order id never reached the session file: find it by
+        its tag. Found → driven like any working exit. Not found and older
+        than a minute → it never reached the broker. Unreadable → that leg
+        sends nothing until the book can be read."""
+        self._intent_unknown = set()
+        core = self._core
+        if core is None or self.executor is None:
+            return
+        try:
+            notes = _BT.exit_intents(STRATEGY_ID)
+        except Exception:
+            return
+        for lid, rec in notes.items():
+            leg = core.legs.get(lid)
+            if leg is None or leg.state != L_OPEN:
+                _BT.exit_intent_done(STRATEGY_ID, lid)
+                continue
+            if lid in self._exit_working or rec.get("run") == self._run_id:
+                continue                      # the session / this run already knows its order
+            o, readable = _BT.find_tagged(self.executor, rec.get("tag"))
+            if o is not None and str(o.get("order_id")) in self._exit_settled:
+                continue                      # already driven and counted before the restart
+            if o is not None:
+                self._exit_working[lid] = str(o.get("order_id"))
+                self._pending_exits.setdefault(lid, rec.get("reason") or "RESTART")
+                _BT.claim_orders([str(o.get("order_id"))])
+                write_audit_log(f"[TSG][EXIT][INTENT_FOUND] {lid} {leg.symbol} order "
+                                f"{o.get('order_id')} ({o.get('status')}) sent before the "
+                                f"restart — driving it, not sending another")
+                self._persist()
+            elif not readable or self._clock() - float(rec.get("ts") or 0) < 60:
+                self._intent_unknown.add(lid)
+                self._pending_exits.setdefault(lid, rec.get("reason") or "RESTART")
+            else:
+                self._pending_exits.setdefault(lid, rec.get("reason") or "RESTART")
+                _BT.exit_intent_done(STRATEGY_ID, lid)
+                write_audit_log(f"[TSG][EXIT][INTENT_NOT_SENT] {lid} {leg.symbol} — the "
+                                f"exit noted before the restart never reached the broker")
+
     def _drain_exits(self) -> None:
         core = self._core
         if core is None or self.executor is None:
             return
+        if not self._paper:
+            self._recover_exit_intents()   # ── EXIT_INTENT_20261115 ──
         for lid in list(self._pending_exits):
             if core.legs.get(lid) is None or core.legs[lid].state != L_OPEN:
                 self._pending_exits.pop(lid, None)
@@ -1153,9 +1202,13 @@ class TsgManager:
                     return self._exit_stuck(leg, reason, f"order {oid} could not be "
                                             f"confirmed filled OR cancelled — CANCEL "
                                             f"IT in Kite (Orders → Open)")
-                self._exit_working.pop(lid, None)
+                self._exit_settled.add(str(self._exit_working.pop(lid, None) or ""))   # ── EXIT_INTENT_20261115 ──
                 if r.avg_price > 0 and (r.filled_qty or r.filled):
                     fills.append((r.filled_qty or leg.qty, r.avg_price))
+            if lid in self._intent_unknown:            # ── EXIT_INTENT_20261115 ──
+                return self._exit_stuck(leg, reason, "an exit sent before the restart "
+                                        "cannot be checked yet (order book unreadable) — "
+                                        "nothing sent until it can")
             # ── BROKER_TRUTH_20261114 ── ORDER TRUTH FIRST: our own fills for
             # the whole leg are the exit, whatever the net position reads
             # (another strategy may hold the same contract).
@@ -1173,10 +1226,15 @@ class TsgManager:
                 # quantity minus our own fills so far
                 qty = (max(0, leg.qty - sum(f[0] for f in fills)) or leg.qty) \
                     if obs is None else min(leg.qty, abs(obs))
-                if leg.is_short:
-                    oid = self.executor.place_buy_exit(leg.symbol, qty, reason)
-                else:
-                    oid = self.executor.place_market_sell(leg.symbol, qty)
+                # ── EXIT_INTENT_20261115 ── write down "an exit is on its way"
+                # under the tag it will carry: if the app dies before the id
+                # below is saved, the restart finds this order, not a 2nd one.
+                with _IG.order_tag(_BT.exit_intent_note(STRATEGY_ID, lid, leg.symbol, txn, qty, reason,
+                                                         now=self._clock(), run=self._run_id)):
+                    if leg.is_short:
+                        oid = self.executor.place_buy_exit(leg.symbol, qty, reason)
+                    else:
+                        oid = self.executor.place_market_sell(leg.symbol, qty)
                 self._exit_working[lid] = str(oid)
                 self._persist()
                 r = self._drive(oid, leg)
@@ -1184,7 +1242,7 @@ class TsgManager:
                     return self._exit_stuck(leg, reason, f"order {oid} could not be "
                                             f"confirmed filled OR cancelled — CANCEL "
                                             f"IT in Kite (Orders → Open)")
-                self._exit_working.pop(lid, None)
+                self._exit_settled.add(str(self._exit_working.pop(lid, None) or ""))   # ── EXIT_INTENT_20261115 ──
                 if r.avg_price > 0 and (r.filled_qty or r.filled):
                     fills.append((r.filled_qty or qty, r.avg_price))
                 if sum(f[0] for f in fills) >= leg.qty:   # ── BROKER_TRUTH_20261114 ── our fills cover the leg
@@ -1317,6 +1375,7 @@ class TsgManager:
                        "pending_exits": self._pending_exits,
                        "exit_working": self._exit_working,
                        "exit_fills": self._exit_fills,
+                       "exit_settled": sorted(x for x in self._exit_settled if x),   # ── EXIT_INTENT_20261115 ──
                        # slim chain meta — _parity_spot() needs strike/type
                        # pairs AFTER a restart (LD6 gap caught by the
                        # restart-path integration smoke 2026-08-02)
@@ -1365,6 +1424,15 @@ class TsgManager:
             self._exit_working = dict(payload.get("exit_working") or {})
             self._exit_fills = {k: [tuple(x) for x in v] for k, v in
                                 (payload.get("exit_fills") or {}).items()}
+            self._exit_settled = set(payload.get("exit_settled") or [])   # ── EXIT_INTENT_20261115 ──
+            try:                                   # ── EXIT_INTENT_20261115 ──
+                for _lid, _rec in _BT.exit_intents(STRATEGY_ID).items():
+                    _lg = self._core.legs.get(_lid) if self._core else None
+                    if (_lg is not None and _lg.state == L_OPEN and not self._paper
+                            and _rec.get("run") != self._run_id):
+                        self._pending_exits.setdefault(_lid, _rec.get("reason") or "RESTART")
+            except Exception:
+                pass
             write_audit_log(f"[TSG][RESTORE] same-day session restored "
                             f"(state={self._core.state if self._core else '-'})")
         except Exception as e:

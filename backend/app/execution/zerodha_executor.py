@@ -259,23 +259,17 @@ def _tag_params(params: dict) -> Optional[str]:
     tag = params.get("tag")
     if tag:
         return None
-    if not tag:
+    # ── INSTANCE_GUARD_20261115 ── "ST" + this machine's id: an order of a
+    # second Scalp Terminal on the same account is recognisable in the book.
+    # ── EXIT_INTENT_20261115 ── a tag the strategy already wrote down (so it
+    # can find this order again after a restart) is used as is.
+    try:
+        from app.execution import instance_guard as _IG
+        tag = _IG.take_tag_hint() or _IG.new_order_tag()
+    except Exception:
         _TAG_N[0] = (_TAG_N[0] + 1) % 1296
-        n = int(time.time() * 1000)
-        digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        out = ""
-        while n:
-            n, r = divmod(n, 36)
-            out = digits[r] + out
-        # ── INSTANCE_GUARD_20261115 ── "ST" + this machine's id: an order of a
-        # second Scalp Terminal on the same account is recognisable in the book.
-        try:
-            from app.execution import instance_guard as _IG
-            pre = _IG.tag_prefix()
-        except Exception:
-            pre = "ST"
-        tag = (pre + out + digits[_TAG_N[0] // 36] + digits[_TAG_N[0] % 36])[:20]
-        params["tag"] = tag
+        tag = f"ST{int(time.time() * 1000) % 10**12}{_TAG_N[0]:04d}"[:20]
+    params["tag"] = tag
     return tag
 
 

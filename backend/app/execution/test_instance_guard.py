@@ -143,6 +143,17 @@ ex.place_buy_exit("NIFTY26N1725000CE", 130, "T")
 check("…an EXIT still goes out", len(k.book) == n + 1 and k.book[-1]["transaction_type"] == "BUY")
 check("…and the account owner was paged", any("ANOTHER SCALP TERMINAL" in p["message"] for p in PAGES), PAGES)
 
+# ── EXIT_INTENT_20261115: an order sent under a tag the strategy wrote down
+IG.reset_for_tests(); PAGES.clear()
+ex, k = executor()
+want = IG.new_order_tag()
+with IG.order_tag(want):
+    ex.place_buy_exit("NIFTY26N1725000CE", 130, "T")
+ex.place_buy_exit("NIFTY26N1725000CE", 130, "T")
+check("an order placed under a chosen tag carries exactly that tag; the next one gets a fresh tag",
+      k.book[0].get("tag") == want and k.book[1].get("tag") not in ("", None, want),
+      [o.get("tag") for o in k.book])
+
 # ── each live strategy: a refused short leaves nothing behind
 import test_fleet_live as F                                            # noqa: E402
 from app.execution import broker_truth as BT                            # noqa: E402

@@ -229,6 +229,11 @@ class Fleet:
         self.now = datetime(2026, 11, 13, 9, 20, tzinfo=IST)
         k = self.kite
         BT.LEDGER.clear()               # a new process starts with an empty ledger
+        if hasattr(BT, "_INTENTS"):     # ── EXIT_INTENT_20261115 ── notes live in tmp,
+            BT.INTENT_DIR = self.tmp    # and a new process re-reads them from disk
+            BT._INTENTS.clear()
+            if hasattr(BT, "INTENT_CLOCK"):
+                BT.INTENT_CLOCK = k.clock
         BT.session_open = lambda: k.market_open
         for s, p in k.px.items():
             LTPStore.update(s, p)

@@ -51,6 +51,14 @@ class SimClock:
             self.kite.tick()
 
 
+def _hint_tag() -> str:            # ── EXIT_INTENT_20261115 ── as the real executor does
+    try:
+        from app.execution import instance_guard as _IG
+        return _IG.take_tag_hint() or _IG.new_order_tag()
+    except Exception:
+        return ""
+
+
 class FakeKite:
     def __init__(self, prices: Dict[str, float], *, lot_size: int = 65,
                  clock: Optional[SimClock] = None):
@@ -108,10 +116,11 @@ class FakeKite:
             p = self.px.get(o["tradingsymbol"])
             buy = o["transaction_type"] == "BUY"
             if p is not None and ((buy and p <= o["price"]) or (not buy and p >= o["price"])):
+                add = int(o["quantity"]) - int(o.get("filled_quantity") or 0)   # ── EXIT_INTENT_20261115 ──
                 o.update(status="COMPLETE", filled_quantity=o["quantity"],
                          pending_quantity=0, average_price=p)
                 s = o["tradingsymbol"]
-                self.net[s] = self.net.get(s, 0) + (o["quantity"] if buy else -o["quantity"])
+                self.net[s] = self.net.get(s, 0) + (add if buy else -add)
 
     def _covers_short(self, sym: str) -> bool:
         return self.net.get(sym, 0) > 0 and any(
@@ -137,7 +146,8 @@ class FakeKite:
                                 quantity=int(qty), price=float(price), status=status,
                                 filled_quantity=0,
                                 pending_quantity=0 if status != WORKING else int(qty),
-                                average_price=0.0, status_message=msg, src=src))
+                                average_price=0.0, status_message=msg, src=src,
+                                tag=_hint_tag() if src == "APP" else ""))
         self.events.append((txn, sym, int(qty), oid))
         if match:
             self.tick()
@@ -310,6 +320,13 @@ def isolate() -> dict:
     from pathlib import Path
 
     sent = {"telegram": [], "alerts": [], "audit": []}
+    try:                                           # ── EXIT_INTENT_20261115 ──
+        from app.execution import broker_truth as _bt
+        if hasattr(_bt, "_INTENTS"):
+            _bt.INTENT_DIR = Path(tempfile.mkdtemp(prefix="intent_"))
+            _bt._INTENTS.clear()
+    except Exception:
+        pass
 
     def _tg(name):
         return lambda *a, **k: sent["telegram"].append((name, a, k))

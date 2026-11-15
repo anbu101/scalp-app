@@ -2297,23 +2297,34 @@ class ICGroupManager:
         # ── BROKER_TRUTH_20261114 ── no usable net position (unreadable /
         # shared) and an earlier attempt partly filled → close only what is
         # left of OUR quantity, never the full slices again.
+        _net_basis = qty_to_close is not None          # ── EXIT_ONCE_ALL_20261115 ── read from the position
         if qty_to_close is None and fills:
             _left = sum(int(c) for c in rt["slices"]) - sum(q for q, _ in fills)
             if _left > 0:
                 qty_to_close = _left
         remaining = qty_to_close
-        for chunk in self._rt[leg.leg_id]["slices"]:
+        if not getattr(self, "_run_id", None):           # ── EXIT_ONCE_ALL_20261115 ──
+            self._run_id = uuid.uuid4().hex[:8]
+        for _si, chunk in enumerate(self._rt[leg.leg_id]["slices"]):
             if remaining is not None:
                 if remaining <= 0:
                     break
                 chunk = min(int(chunk), remaining)
                 remaining -= chunk
             try:
+                # ── EXIT_ONCE_ALL_20261115 ── noted before it is sent; after a
+                # restart the order sent before it is driven, not sent again.
+                _c = int(chunk)
                 if leg.is_short:
-                    oid = self.executor.place_buy_exit(symbol=leg.symbol, qty=chunk,
-                                                       reason=reason)
+                    _place = (lambda _c=_c: self.executor.place_buy_exit(
+                        symbol=leg.symbol, qty=_c, reason=reason))
                 else:
-                    oid = self.executor.place_market_sell(leg.symbol, chunk)
+                    _place = (lambda _c=_c: self.executor.place_market_sell(leg.symbol, _c))
+                oid = _bt().send_exit_once(
+                    self.strategy_id, f"{self._group_id}:{leg.leg_id}:{_si}", self.executor,
+                    symbol=leg.symbol, txn=("BUY" if leg.is_short else "SELL"), qty=_c,
+                    reason=reason, place=_place, run=self._run_id, log=write_audit_log,
+                    net_based=_net_basis)
             except Exception as e:
                 write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][ORDER_FAIL] "
                                 f"{leg.symbol} {e} — leg stays OPEN for retry")

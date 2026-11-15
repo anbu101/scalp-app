@@ -82,6 +82,46 @@ def tag_prefix() -> str:
     return "ST" + iid()
 
 
+# ── EXIT_INTENT_20261115 ── the one maker of app order tags, and a per-thread
+# hint: a strategy that must find an order again after a restart picks its tag
+# first, writes it down, then places the order under it.
+_TAG_N = [0]
+_HINT = threading.local()
+
+
+def new_order_tag() -> str:
+    with _LOCK:
+        _TAG_N[0] = (_TAG_N[0] + 1) % 1296
+        c = _TAG_N[0]
+    n = int(time.time() * 1000)
+    out = ""
+    while n:
+        n, r = divmod(n, 36)
+        out = _DIGITS[r] + out
+    return (tag_prefix() + out + _DIGITS[c // 36] + _DIGITS[c % 36])[:20]
+
+
+def take_tag_hint() -> Optional[str]:
+    t = getattr(_HINT, "tag", None)
+    _HINT.tag = None
+    return t
+
+
+class order_tag:
+    """with order_tag(tag): executor.place_...()  — the order goes out under tag."""
+
+    def __init__(self, tag: Optional[str]):
+        self.tag = tag
+
+    def __enter__(self):
+        _HINT.tag = self.tag
+        return self.tag
+
+    def __exit__(self, *exc):
+        _HINT.tag = None
+        return False
+
+
 def _order_ts(o) -> Optional[float]:
     try:
         from app.execution import fill_pick as _fp

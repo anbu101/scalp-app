@@ -508,20 +508,36 @@ class VetManager:
             write_audit_log(f"[VET][EXEC] SELL {sym} FAILED: {e}")
             return None
 
-    def _close_long(self, sym: str, qty: Optional[int] = None) -> Optional[str]:   # ── VET_DTE_LIVE_20261005 ──
+    def _exit_once(self, ikey, sym, txn, q, reason, place, net_based=False):
+        """── EXIT_ONCE_ALL_20261115 ── live exits: noted first, found again after a restart."""
+        if not ikey:
+            return place()
+        if not getattr(self, "_run_id", None):
+            self._run_id = uuid.uuid4().hex[:8]
+        return _BT.send_exit_once("VET_V1", ikey, self.executor, symbol=sym, txn=txn, qty=q,
+                                  reason=reason, place=place, run=self._run_id,
+                                  log=write_audit_log, net_based=net_based)
+
+    def _close_long(self, sym: str, qty: Optional[int] = None,
+                    ikey: Optional[str] = None, net_based: bool = False) -> Optional[str]:   # ── VET_DTE_LIVE_20261005 ──
         if self.mode != "LIVE" or self.executor is None:
             return f"PAPER-{uuid.uuid4().hex[:8]}"
         try:
-            return _oid(self.executor.place_market_sell(sym, self.qty if qty is None else int(qty)))
+            q = self.qty if qty is None else int(qty)
+            return _oid(self._exit_once(ikey, sym, "SELL", q, "EXIT",
+                                        lambda: self.executor.place_market_sell(sym, q), net_based))
         except Exception as e:
             write_audit_log(f"[VET][EXEC] close-long {sym} FAILED: {e}")
             return None
 
-    def _close_short(self, sym: str, reason: str, qty: Optional[int] = None) -> Optional[str]:   # ── VET_DTE_LIVE_20261005 ──
+    def _close_short(self, sym: str, reason: str, qty: Optional[int] = None,
+                     ikey: Optional[str] = None, net_based: bool = False) -> Optional[str]:   # ── VET_DTE_LIVE_20261005 ──
         if self.mode != "LIVE" or self.executor is None:
             return f"PAPER-{uuid.uuid4().hex[:8]}"
         try:
-            return _oid(self.executor.place_buy_exit(sym, self.qty if qty is None else int(qty), reason))
+            q = self.qty if qty is None else int(qty)
+            return _oid(self._exit_once(ikey, sym, "BUY", q, reason,
+                                        lambda: self.executor.place_buy_exit(sym, q, reason), net_based))
         except Exception as e:
             write_audit_log(f"[VET][EXEC] close-short {sym} FAILED: {e}")
             return None
@@ -1169,8 +1185,9 @@ class VetManager:
                 left = max(0, qty - done_q) if obs is None else min(qty, abs(obs))
                 if left <= 0:
                     left = qty
-                oid = (self._close_short(sym, reason, left) if short
-                       else self._close_long(sym, left))
+                _ik = f"{(self.pos or {}).get('group_id')}:{key}"      # ── EXIT_ONCE_ALL_20261115 ──
+                oid = (self._close_short(sym, reason, left, ikey=_ik, net_based=obs is not None) if short
+                       else self._close_long(sym, left, ikey=_ik, net_based=obs is not None))
                 if oid is None:
                     st["why"] = "exit order was rejected at placement"
                     return False

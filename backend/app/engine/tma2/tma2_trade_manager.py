@@ -1477,6 +1477,15 @@ class TMA2TradeManager:
             fills.append((r.filled_qty, r.avg_price))
         return r.filled
 
+    def _exit_once(self, g, leg, sym, txn, q, reason, place, net_based=False):
+        """── EXIT_ONCE_ALL_20261115 ── live exits: noted first, found again after a restart."""
+        if not getattr(self, "_run_id", None):
+            self._run_id = uuid.uuid4().hex[:8]
+        return _BT.send_exit_once(self._sid, f"{g.get('group_id')}:{leg}", self.executor,
+                                  symbol=sym, txn=txn, qty=q, reason=reason, place=place,
+                                  run=self._run_id, now=self._clock(), log=write_audit_log,
+                                  net_based=net_based)
+
     def _recheck_sell_gtt(self, g: Dict, st: dict, want: int) -> bool:
         """BLIND_STOP_20261115 — True when the stop GTT turns out to have
         placed an order (now adopted in st["working"]) or a fill (counted)."""
@@ -1582,8 +1591,10 @@ class TMA2TradeManager:
             write_audit_log(f"[{self._sid}][EXIT][PARTIAL] {sym} open short "
                             f"{-observed} < {qty} — buying back only the open qty")
         try:
-            oid = self.executor.place_buy_exit(symbol=sym, qty=buy_qty,
-                                               reason=st["reason"])
+            oid = self._exit_once(g, "SELL", sym, "BUY", buy_qty, st["reason"],   # ── EXIT_ONCE_ALL_20261115 ──
+                                  lambda: self.executor.place_buy_exit(symbol=sym, qty=buy_qty,
+                                                                       reason=st["reason"]),
+                                  net_based=observed is not None)
         except Exception as e:
             write_audit_log(f"[{self._sid}][EXIT][BUYBACK_PLACE_FAIL] {sym} {e}")
             st["last_error"] = str(e)
@@ -1651,7 +1662,9 @@ class TMA2TradeManager:
             st["hedge_px"] = self._hedge_exit_price(g, st["exit_ts"])
             return True
         try:
-            oid = self.executor.place_market_sell(sym, sell_qty)
+            oid = self._exit_once(g, "HEDGE", sym, "SELL", sell_qty, st["reason"],   # ── EXIT_ONCE_ALL_20261115 ──
+                                  lambda: self.executor.place_market_sell(sym, sell_qty),
+                                  net_based=observed is not None)
         except Exception as e:
             write_audit_log(f"[{self._sid}][EXIT][HEDGE_PLACE_FAIL] {sym} {e}")
             st["last_error"] = str(e)

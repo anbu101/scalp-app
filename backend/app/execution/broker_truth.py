@@ -38,6 +38,11 @@ from __future__ import annotations
 
 import threading
 import weakref
+import json as json
+import os as os
+import time as time
+from datetime import datetime, timedelta as _td, timezone as _tz
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 FENCE = "BROKER_TRUTH_20261114"
@@ -655,6 +660,162 @@ def blind_stop_orders(executor, symbol: str, short: bool, *, qtys, want_qty: int
             continue
     claim_orders(used)                        # counted once, for one strategy
     return working, got_q, (round(got_v / got_q, 4) if got_q else None)
+
+
+# ── EXIT_INTENT_20261115 ── "an exit order may be on its way". Written just
+# before the order is sent, under the tag the order will carry; read back
+# after a restart. An app killed between sending an exit and saving its order
+# id used to send the exit AGAIN after the restart (on a shared strike that
+# buys another strategy's short back). A tiny file, no fsync: it must survive
+# the app being killed, not a power cut. Costs well under a millisecond.
+_IST = _tz(_td(hours=5, minutes=30))
+INTENT_DIR: Optional[Path] = None             # tests point this elsewhere
+INTENT_CLOCK = None                           # tests: a simulated clock; else time.time
+_INTENTS: Dict[str, dict] = {}
+_INTENT_LOCK = threading.RLock()
+
+
+def _intent_file(sid: str) -> Path:
+    d = INTENT_DIR
+    if d is None and os.environ.get("SCALP_TEST_MODE") == "1":    # tests never touch the real folder
+        import tempfile
+        d = Path(tempfile.gettempdir()) / f"scalp_intent_{os.getpid()}"
+    d = d or (Path.home() / ".scalp-app" / "state")
+    return Path(d) / f"{sid}_exit_intent.json"
+
+
+def _intent_load(sid: str) -> dict:
+    with _INTENT_LOCK:
+        if sid not in _INTENTS:
+            try:
+                _INTENTS[sid] = json.loads(_intent_file(sid).read_text())
+            except Exception:
+                _INTENTS[sid] = {}
+        return _INTENTS[sid]
+
+
+def _intent_save(sid: str) -> None:
+    try:
+        f = _intent_file(sid)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_INTENTS.get(sid) or {}))
+        os.replace(tmp, f)
+    except Exception:
+        pass
+
+
+def exit_intent_note(sid: str, key: str, symbol: str, txn: str, qty: int,
+                     reason: str = "", now: Optional[float] = None,
+                     run: str = "") -> Optional[str]:
+    """Write the note and return the tag to send the order under."""
+    try:
+        from app.execution import instance_guard as _IG
+        tag = _IG.new_order_tag()
+        with _INTENT_LOCK:
+            d = _intent_load(sid)
+            d[str(key)] = {"tag": tag, "symbol": symbol, "txn": txn, "qty": int(qty),
+                           "reason": reason, "ts": float(now if now is not None else time.time()),
+                           "run": run,
+                           "day": datetime.now(_IST).date().isoformat()}
+            _intent_save(sid)
+        return tag
+    except Exception:
+        return None
+
+
+def exit_intents(sid: str) -> Dict[str, dict]:
+    try:
+        today = datetime.now(_IST).date().isoformat()
+        with _INTENT_LOCK:
+            return {k: dict(v) for k, v in _intent_load(sid).items() if v.get("day") == today}
+    except Exception:
+        return {}
+
+
+def exit_intent_done(sid: str, key: str) -> None:
+    try:
+        with _INTENT_LOCK:
+            d = _intent_load(sid)
+            if d.pop(str(key), None) is not None:
+                _intent_save(sid)
+    except Exception:
+        pass
+
+
+def find_tagged(executor, tag: str):
+    """(order or None, readable). Never raises."""
+    try:
+        orders = executor.get_orders()
+    except Exception:
+        return None, False
+    if orders is None:
+        return None, False
+    for o in orders or []:
+        if str(o.get("tag") or "") == str(tag):
+            return dict(o), True
+    return None, True
+
+
+# ── EXIT_ONCE_ALL_20261115 ── the same write-ahead note, as one call for any
+# strategy: send_exit_once(...) returns the id of the order to drive.
+class ExitCheckPending(Exception):
+    """An exit noted by an EARLIER run of the app cannot be checked yet (order
+    book unreadable, or noted under a minute ago): send nothing this time."""
+
+
+def send_exit_once(sid: str, key: str, executor, *, symbol: str, txn: str, qty: int,
+                   reason: str, place, run: str, now: Optional[float] = None,
+                   log=None, net_based: bool = False) -> str:
+    """Before an exit order for `key` (stable across restarts: group + leg [+ slice]):
+      * a note from an EARLIER run for this key whose order is in today's book
+        → that order's id is returned (nothing sent; the caller drives it);
+      * such a note that cannot be checked yet → ExitCheckPending;
+      * otherwise a new note is written and the order sent under its tag.
+    Cost on a normal exit: one small file write."""
+    try:
+        now = float(now if now is not None else (INTENT_CLOCK or time.time)())
+        rec = exit_intents(sid).get(str(key))
+    except Exception:
+        return place()
+    if rec and rec.get("run") != run:
+        o, readable = find_tagged(executor, rec.get("tag"))
+        _st = str((o or {}).get("status") or "").upper()
+        if o is not None and net_based and _st in ("COMPLETE", "CANCELLED", "REJECTED", "LAPSED"):
+            # the quantity to close was read from the net position, which
+            # already shows that order's fill: adopting it would count it twice
+            if log:
+                log(f"[{sid}][EXIT][INTENT_SETTLED] {key} {symbol}: order {o.get('order_id')} "
+                    f"({_st}) from before the restart is already in the position")
+            o = None
+            readable, rec = True, dict(rec, ts=0)
+        if o is not None:
+            with _INTENT_LOCK:
+                d = _intent_load(sid)
+                if str(key) in d:
+                    d[str(key)]["run"] = run           # this run owns it now
+                    _intent_save(sid)
+            claim_orders([str(o.get("order_id"))])
+            if log:
+                log(f"[{sid}][EXIT][INTENT_FOUND] {key} {symbol}: order {o.get('order_id')} "
+                    f"({o.get('status')}) was sent before the restart — driving it, not "
+                    f"sending another")
+            return str(o.get("order_id"))
+        if not readable or now - float(rec.get("ts") or 0) < 60:
+            if log:
+                log(f"[{sid}][EXIT][INTENT_PENDING] {key} {symbol}: an exit sent before "
+                    f"the restart cannot be checked yet — nothing sent")
+            raise ExitCheckPending(f"exit for {key} sent before the restart not checked yet")
+    try:
+        from app.execution import instance_guard as _IG
+        tag = exit_intent_note(sid, key, symbol, txn, qty, reason, now=now, run=run)
+        ctx = _IG.order_tag(tag) if tag else None
+    except Exception:
+        ctx = None
+    if ctx is None:
+        return place()
+    with ctx:
+        return place()
 
 
 class GttKillList:
