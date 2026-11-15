@@ -1,0 +1,14 @@
+{
+  "name": "scalp-promo",
+  "private": true,
+  "description": "Promo/trailer video toolkit for Scalp Terminal — renders the real app components with demo data",
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.2.5",
+    "@fontsource-variable/jetbrains-mono": "^5.2.5",
+    "@fontsource/bebas-neue": "^5.2.5",
+    "@fontsource/cinzel": "^5.2.5",
+    "esbuild": "^0.25.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}
