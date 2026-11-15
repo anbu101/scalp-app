@@ -26,6 +26,11 @@ import { colors } from "../tokens";
 const FAST_RETRY_MS = 3000;
 const SLOW_POLL_MS = 30 * 60 * 1000;
 const ARM_TIMEOUT_MS = 6000;
+// >>> UPDATE_CONFIRM_FIX_20261116 BEGIN (constants) <<<
+// Upper bound on the pre-install backend stop. The update goes ahead
+// even if the native call never answers.
+const STOP_BACKEND_TIMEOUT_MS = 10000;
+// >>> UPDATE_CONFIRM_FIX_20261116 END <<<
 // >>> NATIVE_GAP_RETRY_20260827 BEGIN (D7 constants) <<<
 // When the license server says an update exists but the native check found
 // nothing (typically the release-publish window, or min bumped just before
@@ -56,6 +61,38 @@ function nativeRelaunch() {
   }
 }
 
+// >>> UPDATE_CONFIRM_FIX_20261116 BEGIN (stopBackendForUpdate) <<<
+// Stops the backend so the installer can replace locked files (Windows
+// DLLs). Never throws and never waits longer than
+// STOP_BACKEND_TIMEOUT_MS. Returns true if a stop was attempted.
+async function stopBackendForUpdate() {
+  let invoke = null;
+  try {
+    invoke = window.__TAURI__ && window.__TAURI__.core ? window.__TAURI__.core.invoke : null;
+  } catch (e) {
+    invoke = null;
+  }
+  if (!invoke) return false;
+  let timer = null;
+  try {
+    await Promise.race([
+      invoke("stop_backend_for_update"),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("timed out after " + STOP_BACKEND_TIMEOUT_MS + " ms")),
+          STOP_BACKEND_TIMEOUT_MS
+        );
+      }),
+    ]);
+  } catch (e) {
+    console.warn("[UpdateBanner] stop_backend_for_update:", e);
+  } finally {
+    clearTimeout(timer);
+  }
+  return true;
+}
+// >>> UPDATE_CONFIRM_FIX_20261116 END <<<
+
 // Mon–Fri 09:00–15:30 IST (UTC+5:30 fixed, no DST).
 function isMarketHoursIST() {
   const now = new Date();
@@ -80,6 +117,7 @@ export default function UpdateBanner() {
   const armTimerRef = useRef(null);
   const gotFirstRef = useRef(false);
   const gapRetryRef = useRef(0); // NATIVE_GAP_RETRY_20260827
+  const confirmBusyRef = useRef(false); // UPDATE_CONFIRM_FIX_20261116
 
   // phase mirror for the polling closure (stale-closure guard)
   const phaseRef = useRef(phase);
@@ -175,50 +213,56 @@ export default function UpdateBanner() {
     }, ARM_TIMEOUT_MS);
   };
 
+  // >>> UPDATE_CONFIRM_FIX_20261116 BEGIN (onConfirm) <<<
+  // Order: download -> stop backend -> install -> relaunch. The backend
+  // and strategies keep running through the download. The UI leaves
+  // 'armed' at once, and repeat clicks are ignored.
   const onConfirm = async () => {
     clearTimeout(armTimerRef.current);
+    if (confirmBusyRef.current) return;
     const updateObj = updateObjRef.current;
     if (!updateObj) {
       setPhase("idle");
       return;
     }
-    try {
-      // Kill the backend before the NSIS installer runs, so it can
-      // overwrite locked DLLs (VCRUNTIME140.dll, python3*.dll, etc.).
-      try {
-        const invoke = window.__TAURI__ && window.__TAURI__.core
-          ? window.__TAURI__.core.invoke
-          : null;
-        if (invoke) {
-          await invoke("stop_backend_for_update");
-        }
-      } catch (e) {
-        // Best-effort; if the command isn't registered (e.g. macOS path
-        // through lib.rs), the installer will still work because macOS
-        // doesn't lock open files the same way Windows does.
-        console.warn("[UpdateBanner] stop_backend_for_update failed:", e);
-      }
+    confirmBusyRef.current = true;
+    setErrorMsg("");
+    setProgressPct(null);
+    setPhase("downloading");
 
-      setPhase("downloading");
-      setProgressPct(0);
-      let total = 0;
-      let received = 0;
-      await updateObj.downloadAndInstall((ev) => {
-        if (!ev) return;
-        if (ev.event === "Started") {
-          total = (ev.data && ev.data.contentLength) || 0;
-          received = 0;
-          setProgressPct(0);
-        } else if (ev.event === "Progress") {
-          received += (ev.data && ev.data.chunkLength) || 0;
-          if (total > 0) {
-            setProgressPct(Math.min(99, Math.round((received / total) * 100)));
-          }
-        } else if (ev.event === "Finished") {
-          setProgressPct(100);
+    let backendStopped = false;
+    let total = 0;
+    let received = 0;
+    const onEvent = (ev) => {
+      if (!ev) return;
+      if (ev.event === "Started") {
+        total = (ev.data && ev.data.contentLength) || 0;
+        received = 0;
+        setProgressPct(0);
+      } else if (ev.event === "Progress") {
+        received += (ev.data && ev.data.chunkLength) || 0;
+        if (total > 0) {
+          setProgressPct(Math.min(99, Math.round((received / total) * 100)));
         }
-      });
-      setPhase("installing");
+      } else if (ev.event === "Finished") {
+        setProgressPct(100);
+      }
+    };
+
+    try {
+      const canSplit =
+        typeof updateObj.download === "function" && typeof updateObj.install === "function";
+      if (canSplit) {
+        await updateObj.download(onEvent);
+        setPhase("installing");
+        backendStopped = await stopBackendForUpdate();
+        await updateObj.install();
+      } else {
+        // Older updater JS without split download/install.
+        backendStopped = await stopBackendForUpdate();
+        await updateObj.downloadAndInstall(onEvent);
+        setPhase("installing");
+      }
       const relaunch = nativeRelaunch();
       if (relaunch) {
         await relaunch();
@@ -227,14 +271,20 @@ export default function UpdateBanner() {
         setPhase("error");
       }
     } catch (e) {
+      confirmBusyRef.current = false;
       setPhase("error");
       setErrorMsg(
         "Auto-update failed (" +
           String((e && e.message) || e) +
-          "). You can install manually from the releases page."
+          ")." +
+          (backendStopped
+            ? " The trading backend was stopped for the install. Quit and reopen Scalp before trading."
+            : "") +
+          " You can install manually from the releases page."
       );
     }
   };
+  // >>> UPDATE_CONFIRM_FIX_20261116 END <<<
 
   if (dismissed) return null;
 

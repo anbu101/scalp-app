@@ -27,16 +27,32 @@ mod commands;
 /// Tauri command: stop the backend and kill any process on port 47321.
 /// Called from UpdateBanner.jsx right before downloadAndInstall() so the
 /// NSIS installer can overwrite locked DLLs (e.g. VCRUNTIME140.dll).
+// >>> UPDATE_CONFIRM_FIX_20261116 BEGIN (async command) <<<
+// Was a sync command, so Tauri v2 ran it on the MAIN thread (window frozen
+// for lsof + kills + 2 s settle). Now async, with the blocking work in
+// spawn_blocking.
 #[tauri::command]
-fn stop_backend_for_update() -> String {
+async fn stop_backend_for_update() -> String {
     eprintln!("[MAIN] stop_backend_for_update invoked (pre-update cleanup)");
-    runtime::stop_backend();
-    kill_process_on_port(47321);
-    // Extra settle time so the OS releases file locks
-    std::thread::sleep(Duration::from_millis(2000));
-    eprintln!("[MAIN] stop_backend_for_update done");
-    "ok".to_string()
+    let res = tauri::async_runtime::spawn_blocking(|| {
+        runtime::stop_backend();
+        kill_process_on_port(47321);
+        // Extra settle time so the OS releases file locks
+        std::thread::sleep(Duration::from_millis(2000));
+    })
+    .await;
+    match res {
+        Ok(_) => {
+            eprintln!("[MAIN] stop_backend_for_update done");
+            "ok".to_string()
+        }
+        Err(e) => {
+            eprintln!("[MAIN] stop_backend_for_update failed: {}", e);
+            "error".to_string()
+        }
+    }
 }
+// >>> UPDATE_CONFIRM_FIX_20261116 END <<<
 
 fn main() {
     eprintln!("[MAIN] ========== MAIN FUNCTION STARTED ==========");
@@ -178,14 +194,26 @@ fn kill_process_on_port(port: u16) {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         eprintln!("[MAIN] Checking for processes on port {}", port);
+        // >>> UPDATE_CONFIRM_FIX_20261116 BEGIN (listeners only) <<<
+        // `lsof -ti tcp:PORT` also returns CLIENTS of the port (the
+        // webview's own network process, browser tabs on the UI), which
+        // then got kill -9. Only the LISTENING process is the backend.
         let output = quiet_command("lsof")
-            .args(&["-ti", &format!("tcp:{}", port)])
+            .args(&["-nP", "-t", &format!("-iTCP:{}", port), "-sTCP:LISTEN"])
             .output();
+        // >>> UPDATE_CONFIRM_FIX_20261116 END <<<
 
         if let Ok(output) = output {
             let pids = String::from_utf8_lossy(&output.stdout);
-            let pid_list: Vec<&str> =
-                pids.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            // UPDATE_CONFIRM_FIX_20261116: never this process, each pid once
+            let self_pid = std::process::id().to_string();
+            let mut pid_list: Vec<&str> = pids
+                .lines()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty() && *s != self_pid)
+                .collect();
+            pid_list.sort();
+            pid_list.dedup();
 
             if pid_list.is_empty() {
                 eprintln!("[MAIN] No processes found on port {}", port);
@@ -220,10 +248,17 @@ fn kill_process_on_port(port: u16) {
         if let Ok(output) = output {
             let output_str = String::from_utf8_lossy(&output.stdout);
             let mut found = false;
+            // UPDATE_CONFIRM_FIX_20261116: never this process, each pid once (IPv4 + IPv6 rows)
+            let self_pid = std::process::id().to_string();
+            let mut killed: Vec<String> = Vec::new();
 
             for line in output_str.lines() {
                 if line.contains(&format!(":{}", port)) && line.contains("LISTENING") {
                     if let Some(pid) = line.split_whitespace().last() {
+                        if pid == self_pid || killed.iter().any(|k| k == pid) {
+                            continue;
+                        }
+                        killed.push(pid.to_string());
                         found = true;
                         eprintln!("[MAIN] Killing process {} on port {}", pid, port);
                         let kill_result = quiet_command("taskkill")
