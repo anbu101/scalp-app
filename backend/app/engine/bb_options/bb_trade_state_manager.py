@@ -154,7 +154,8 @@ class BBTradeStateManager:
             time.sleep(0.2)
 
         try:
-            positions = self.executor.get_open_positions()
+            from app.execution import broker_truth as _bt_all   # STRICT_READS_ALL_20261115
+            positions = _bt_all.positions_strict(self.executor)
         except Exception as e:
             write_audit_log(f"[BB][RECON] Position fetch failed ERR={e}")
             return

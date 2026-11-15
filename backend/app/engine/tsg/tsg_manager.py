@@ -1094,6 +1094,11 @@ class TsgManager:
         return _BT.own_net_qty(self.executor, symbol, STRATEGY_ID,
                                log=write_audit_log)
 
+    def _flat_proven(self, leg: TsgLeg) -> bool:
+        """── FLAT_NEEDS_PROOF_20261115 ── see broker_truth.flat_proven."""
+        return _BT.flat_proven(self.executor, leg.symbol, STRATEGY_ID, leg.is_short,
+                               clock=self._clock, log=write_audit_log)
+
     def _last_fill(self, symbol: str, txn: str) -> Optional[float]:
         try:
             for o in reversed(self.executor.get_orders() or []):
@@ -1159,6 +1164,10 @@ class TsgManager:
             else:
                 obs = self._observed_qty(leg.symbol)
                 flat = obs is not None and ((obs >= 0) if leg.is_short else (obs <= 0))
+                # ── FLAT_NEEDS_PROOF_20261115 ── flat with no fill of ours:
+                # one reading books nothing and sends nothing until proven.
+                if flat and not fills and not self._flat_proven(leg):
+                    return self._exit_stuck(leg, reason, _BT.FLAT_UNPROVEN_WHY)
             if not flat and not (obs is None and sum(f[0] for f in fills) >= leg.qty):
                 # ── BROKER_TRUTH_20261114 ── no usable net position → our own
                 # quantity minus our own fills so far
@@ -1184,6 +1193,9 @@ class TsgManager:
                     obs = self._observed_qty(leg.symbol)
                     flat = (obs is not None and ((obs >= 0) if leg.is_short else (obs <= 0))) \
                         or (obs is None and r.filled)
+                    if (flat and obs is not None and not fills
+                            and not self._flat_proven(leg)):         # ── FLAT_NEEDS_PROOF_20261115 ──
+                        return self._exit_stuck(leg, reason, _BT.FLAT_UNPROVEN_WHY)
                 why = f"exit did not fill ({r.status} {r.message})".strip()
             else:
                 flat = True

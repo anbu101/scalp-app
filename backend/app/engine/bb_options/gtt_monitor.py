@@ -157,6 +157,9 @@ class GTTMonitor:
 
         # STEP 1: Fetch GTT list
         try:
+            from app.execution import broker_truth as _bt_all   # STRICT_READS_ALL_20261115
+            if not _bt_all.infer_allowed(self.executor):
+                return                      # outside the session nothing is inferred
             kite = self.executor._kite()
             if not kite:
                 return
@@ -259,7 +262,8 @@ class GTTMonitor:
         symbol = trade_obj.symbol
 
         try:
-            positions = self.executor.get_open_positions()
+            from app.execution import broker_truth as _bt_all   # STRICT_READS_ALL_20261115
+            positions = _bt_all.positions_strict(self.executor, in_session_only=True)
 
             broker_qty = sum(
                 abs(p.get("quantity", 0))

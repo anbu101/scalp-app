@@ -3,6 +3,19 @@
 from app.execution.base_executor import BaseOrderExecutor
 
 
+# ── GTT_MONITOR_PROOF_20261115 ── every order placed through the router is
+# noted as "placed by this app" (broker_truth.note_app_order), so a GTT fill
+# or a manual exit can be told apart from another strategy's order on the
+# same contract. Pure bookkeeping: the return value is passed through.
+def _noted(ret):
+    try:
+        from app.execution import broker_truth as _bt
+        _bt.note_app_order(ret)
+    except Exception:
+        pass
+    return ret
+
+
 class ExecutionRouter(BaseOrderExecutor):
     """
     Broker-agnostic execution router.
@@ -34,13 +47,13 @@ class ExecutionRouter(BaseOrderExecutor):
     # --------------------------------------------------
 
     def place_buy(self, symbol, token, qty):
-        return self._executor.place_buy(symbol, token, qty)
+        return _noted(self._executor.place_buy(symbol, token, qty))
 
     # ── ACC2_PST ── LIMIT BUY forward (PST resting TP). Pure passthrough,
     # same shape as the other forwards above.
     def place_limit_buy(self, symbol, qty, price, product="MIS", tag=""):
-        return self._executor.place_limit_buy(symbol, qty, price,
-                                              product=product, tag=tag)
+        return _noted(self._executor.place_limit_buy(symbol, qty, price,
+                                                     product=product, tag=tag))
 
     def get_last_avg_price(self, order_id):
         return self._executor.get_last_avg_price(order_id)
@@ -196,16 +209,16 @@ class ExecutionRouter(BaseOrderExecutor):
     # --------------------------------------------------
 
     def place_exit(self, symbol, qty, reason):
-        return self._executor.place_exit(
+        return _noted(self._executor.place_exit(
             symbol=symbol,
             qty=qty,
             reason=reason,
-        )
+        ))
 
     def place_market_sell(self, symbol, qty):
         # [V3-REQUIRED] exit a LONG hedge (sell the bought option). Reuses the
         # same protected-limit sell the BB/HA EOD square-off path uses.
-        return self._executor.place_market_sell(symbol=symbol, qty=qty)
+        return _noted(self._executor.place_market_sell(symbol=symbol, qty=qty))
 
     # --------------------------------------------------
     # SHORT side (completeness — SCALP_V1 short entry/exit)
@@ -213,11 +226,11 @@ class ExecutionRouter(BaseOrderExecutor):
 
     def place_sell_entry(self, symbol, token, qty):
         # [completeness] not used by SCALP_V3 (V3 is option-buying).
-        return self._executor.place_sell_entry(symbol=symbol, token=token, qty=qty)
+        return _noted(self._executor.place_sell_entry(symbol=symbol, token=token, qty=qty))
 
     def place_buy_exit(self, symbol, qty, reason):
         # [completeness] not used by SCALP_V3.
-        return self._executor.place_buy_exit(symbol=symbol, qty=qty, reason=reason)
+        return _noted(self._executor.place_buy_exit(symbol=symbol, qty=qty, reason=reason))
 
     # --------------------------------------------------
     # POSITIONS / ORDERS
@@ -264,8 +277,8 @@ class ExecutionRouter(BaseOrderExecutor):
     def place_wing_buy(self, symbol, token, qty):
         fn = getattr(self._executor, "place_wing_buy", None)
         if callable(fn):
-            return fn(symbol=symbol, token=token, qty=qty)
-        return self._executor.place_buy(symbol=symbol, token=token, qty=qty)
+            return _noted(fn(symbol=symbol, token=token, qty=qty))
+        return _noted(self._executor.place_buy(symbol=symbol, token=token, qty=qty))
 
     def fresh_wing_buy_limit(self, symbol: str):
         fn = getattr(self._executor, "fresh_wing_buy_limit", None)

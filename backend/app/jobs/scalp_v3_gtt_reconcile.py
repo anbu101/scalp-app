@@ -76,7 +76,8 @@ def _hedge_flat_at_broker(manager, hedge_symbol: str) -> bool:
     fill will still be caught on a later cycle once the position reads cleanly.
     """
     try:
-        positions = manager.executor.get_open_positions() or []
+        from app.execution import broker_truth as _bt_all   # STRICT_READS_ALL_20261115
+        positions = _bt_all.positions_strict(manager.executor, in_session_only=True)
     except Exception as e:
         write_audit_log(
             f"[V3_RECON][POS_CHECK_ERR] {hedge_symbol} ERR={e} — treating as still open"
@@ -116,7 +117,8 @@ def _reconcile_once() -> None:
 
     # Has the hedge SL-only GTT fired at the broker?
     try:
-        gtts = manager.executor.get_gtts() or []
+        from app.execution import broker_truth as _bt_all   # STRICT_READS_ALL_20261115
+        gtts = _bt_all.gtts_strict(manager.executor, in_session_only=True)
     except Exception as e:
         # Cardinal rule: a fetch error must NEVER close a trade. Retry next cycle.
         write_audit_log(

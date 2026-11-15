@@ -234,6 +234,12 @@ class TMA2TradeManager:
             _BT.LEDGER.register(self._sid, self._ledger_view)
         except Exception as _e:
             write_audit_log(f"[{self._sid}][LEDGER] register failed {_e!r}")
+        # ── GTT_KILL_LIST_20261115 ── GTTs of closed groups still to cancel
+        try:
+            self._gtt_kill = _BT.GttKillList(self._sid)
+        except Exception as _e:
+            self._gtt_kill = None
+            write_audit_log(f"[{self._sid}][GTT_KILL] init failed {_e!r}")
         self._recon_last_ts = 0
         self._recon_suspect: Dict[str, int] = {}
         self._recon_alerted: set = set()
@@ -933,6 +939,7 @@ class TMA2TradeManager:
         if self.disabled:
             return
         self._roll_day(ts)
+        self._gtt_kill_retry()          # ── GTT_KILL_LIST_20261115 ── any minute, any hour
 
         # ── SESSION_GATE BEGIN ── (2026-07-21 incident — FIRST statement
         # after the disabled check, deliberately: nothing in this method may
@@ -1246,6 +1253,37 @@ class TMA2TradeManager:
             # cancel-verified first (engine-driven exits). Non-forced
             # (TP/XOVER): unverified cancel → DO NOT exit (double-buy risk).
             gid = g["sell"].get("gtt_id")
+            # ── GTT_KILL_LIST_20261115 ── a GTT that has ALREADY triggered may
+            # have its limit still resting (gap). Adopt that order for the
+            # buy-back instead of placing a second one beside it.
+            if gid and not sell_already_flat and "SELL" not in seed_working:
+                try:
+                    if self.executor.get_gtt_status(gid) == "triggered":
+                        _fired = _BT.fired_gtt_orders(
+                            self.executor, gid, symbol=g["sell"]["symbol"], short=True,
+                            qtys=[int(g["sell"]["qty"])])
+                        if _fired:
+                            _BT.claim_orders(_fired)
+                            seed_working = dict(seed_working, SELL=_fired[0])
+                            write_audit_log(f"[{self._sid}][EXIT][ADOPT] GTT {gid} already "
+                                            f"triggered — its order {_fired[0]} adopted")
+                        else:
+                            # not listed yet: a broker-placed (non-app) buy that
+                            # already filled on this contract is this stop's fill
+                            _q, _px = _BT.foreign_exit_fill(
+                                self.executor, g["sell"]["symbol"], True,
+                                want_qty=int(g["sell"]["qty"]), not_before_ts=g.get("sig_ts"))
+                            if _q and _px:
+                                g["_gtt_prefill"] = (_q, _px)
+                                write_audit_log(f"[{self._sid}][EXIT][GTT_FILL] the fired GTT "
+                                                f"already filled {_q} @{_px}")
+                            if getattr(self, "_gtt_kill", None) is not None:
+                                # its order is not listed yet: make sure it
+                                # leaves nothing resting once it is
+                                self._gtt_kill.add(gid, g["sell"]["symbol"],
+                                                   "forced exit over a fired stop", spent=True)
+                except Exception as e:
+                    write_audit_log(f"[{self._sid}][EXIT][ADOPT_ERR] gtt={gid} {e!r}")
             if gid and not sell_already_flat:
                 gone = False
                 try:
@@ -1279,7 +1317,8 @@ class TMA2TradeManager:
                 "sell_done": bool(sell_already_flat),
                 "sell_px": (float(res["exit_price"]) if sell_already_flat
                             else None),
-                "sell_fills": [], "hedge_done": False, "hedge_px": None,
+                "sell_fills": ([g.pop("_gtt_prefill")] if g.get("_gtt_prefill") else []),
+                "hedge_done": False, "hedge_px": None,
                 "hedge_fills": [], "working": dict(seed_working),
                 "attempts": 0, "alerted": set(), "started": time.time(),
             }
@@ -1311,9 +1350,53 @@ class TMA2TradeManager:
         self._finish_group(g, st["exit_ts"])
 
     def _finish_group(self, g: Dict, exit_ts: int) -> None:
+        self._gtt_leftover_to_kill(g)           # ── GTT_KILL_LIST_20261115 ──
         self.busy_until = exit_ts + 60          # run-day parity
         self.group = None
         self._defer_to_gtt = False
+
+    # ── GTT_KILL_LIST_20261115 BEGIN ── a forced exit (EOD / kill / stop with
+    # no verifiable cancel) flattens the short even when its SL GTT could not
+    # be cancelled — and the group, with the GTT id, was then dropped. That
+    # GTT stayed armed with nothing tracking it (reproduced: it fired later
+    # and left the account long). The id is now kept on a persisted list and
+    # cancelled BY ID, verified, every minute until the broker confirms.
+    def _gtt_leftover_to_kill(self, g: Dict) -> None:
+        kl = getattr(self, "_gtt_kill", None)
+        try:
+            gid = (g.get("sell") or {}).get("gtt_id")
+            if kl is None or not gid or g.get("mode") != "LIVE" or self.executor is None:
+                return
+            status = None
+            try:
+                status = self.executor.get_gtt_status(gid)
+            except Exception:
+                status = None
+            if status in (None, "active"):
+                kl.add(gid, g["sell"]["symbol"], "group closed, SL GTT not confirmed cancelled")
+                write_audit_log(f"[{self._sid}][GTT_KILL] gtt={gid} on {g['sell']['symbol']} "
+                                f"not confirmed cancelled at close — kept for retry")
+            g["sell"]["gtt_id"] = None
+        except Exception as e:
+            write_audit_log(f"[{self._sid}][GTT_KILL][ERR] {e!r}")
+
+    def _gtt_kill_retry(self) -> None:
+        kl = getattr(self, "_gtt_kill", None)
+        if kl is None or not len(kl) or self.executor is None:
+            return
+
+        def _page(msg, sev="error"):
+            record_alert("TMA_ORPHAN_GTT", msg, severity=sev,
+                         strategy_id=self._sid, mode="live")
+            try:
+                notify_critical({"message": msg, "severity": sev})
+            except Exception:
+                pass
+        try:
+            kl.retry(self.executor, log=write_audit_log, page=_page)
+        except Exception as e:
+            write_audit_log(f"[{self._sid}][GTT_KILL][ERR] {e!r}")
+    # ── GTT_KILL_LIST_20261115 END ──
 
     # ── broker truth helpers ─────────────────────────────────────────
     def _net_qty(self, symbol: str) -> Optional[int]:
@@ -1322,6 +1405,12 @@ class TMA2TradeManager:
         same contract — every caller then places exactly our own quantity
         and treats our own COMPLETE fill as the truth."""
         return _BT.own_net_qty(self.executor, symbol, self._sid,
+                               log=write_audit_log)
+
+    def _flat_proven(self, g: Dict, symbol: str, short: bool) -> bool:
+        """── FLAT_NEEDS_PROOF_20261115 ── see broker_truth.flat_proven."""
+        return _BT.flat_proven(self.executor, symbol, self._sid, short,
+                               not_before_ts=g.get("sig_ts"), clock=self._clock,
                                log=write_audit_log)
 
     @staticmethod
@@ -1367,6 +1456,11 @@ class TMA2TradeManager:
             st["sell_px"] = self._vwap(st["sell_fills"]) or st["model_sell_px"]
             return True
         observed = self._net_qty(sym)
+        # ── FLAT_NEEDS_PROOF_20261115 ── flat with no fill of ours: prove it
+        if (observed is not None and observed >= 0 and not st["sell_fills"]
+                and not self._flat_proven(g, sym, True)):
+            st["last_error"] = _BT.FLAT_UNPROVEN_WHY
+            return False
         if observed is not None and observed >= 0:
             # Flat at the broker: our fill, a GTT fill, or a manual exit.
             px = self._vwap(st["sell_fills"])
@@ -1414,6 +1508,10 @@ class TMA2TradeManager:
             return True
         # dead / partial / unreadable earlier — let broker truth decide
         after = self._net_qty(sym)
+        if (after is not None and after >= 0 and not st["sell_fills"]
+                and not self._flat_proven(g, sym, True)):      # ── FLAT_NEEDS_PROOF_20261115 ──
+            st["last_error"] = _BT.FLAT_UNPROVEN_WHY
+            return False
         if after is not None and after >= 0:
             st["sell_done"] = True
             st["sell_px"] = (self._vwap(st["sell_fills"])
@@ -1437,6 +1535,10 @@ class TMA2TradeManager:
                               or self._hedge_exit_price(g, st["exit_ts"]))
             return True
         observed = self._net_qty(sym)
+        if (qty > 0 and observed is not None and observed <= 0 and not st["hedge_fills"]
+                and not self._flat_proven(g, sym, False)):     # ── FLAT_NEEDS_PROOF_20261115 ──
+            st["last_error"] = _BT.FLAT_UNPROVEN_WHY
+            return False
         if observed is not None and observed <= 0:
             px = self._vwap(st["hedge_fills"])
             if px is None:
@@ -1468,6 +1570,10 @@ class TMA2TradeManager:
         if filled is None:
             return False
         after = self._net_qty(sym)
+        if (after is not None and after <= 0 and not st["hedge_fills"]
+                and not self._flat_proven(g, sym, False)):     # ── FLAT_NEEDS_PROOF_20261115 ──
+            st["last_error"] = _BT.FLAT_UNPROVEN_WHY
+            return False
         if (sum(q for q, _ in st["hedge_fills"]) >= qty
                 or (after is not None and after <= 0) or (filled and after is None)):
             st["hedge_done"] = True

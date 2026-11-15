@@ -280,8 +280,20 @@ def test_mt3_gtt_race_retries_then_broker_exit():
     mon = MON.ICGTTMonitor(ex, gm)
     mon._sweep(); mon._sweep()
     assert gm.handoffs == []                       # still confirming
+    crit = []
+    sys.modules["app.api.telegram_api"].notify_critical = lambda d: crit.append(d)
     mon._sweep()                                   # retry cap hit
-    assert gm.handoffs == [("L1", 121.0, "BROKER_EXIT")]
+    # ── GTT_MONITOR_PROOF_20261115 ── was: booked BROKER_EXIT at the LTP
+    # (121.0) with no exit order. "No exit order, no booking" now holds on
+    # the triggered branch too: nothing is booked, one page is sent.
+    assert gm.handoffs == []
+    mon._sweep(); mon._sweep()
+    assert gm.handoffs == [] and len(crit) == 1
+    # the exit order appears in the book → booked at the broker fill
+    ex.orders = [{"order_id": "X9", "tradingsymbol": "N24150CE", "transaction_type": "BUY",
+                  "status": "COMPLETE", "average_price": 119.5, "filled_quantity": 1560}]
+    mon._sweep()
+    assert gm.handoffs == [("L1", 119.5, "SL")]            # found by the GTT fill lookup
 
 
 def test_mt4_missing_but_position_open_alerts_naked_no_close():

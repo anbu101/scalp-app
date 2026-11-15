@@ -101,6 +101,12 @@ class TMA2GTTMonitor:
     FILL_CONFIRM_RETRIES = 3
     MISSING_THRESHOLD = 3
     LTP_STALENESS_SEC = 30
+    # ── GTT_MONITOR_PROOF_20261115 ── see ic_gtt_monitor.py: a listed-but-dead
+    # GTT is not protection; the order book is searched for a fill only when
+    # the position is certainly ours and flat; no exit order, no booking on
+    # the triggered branch too; an unattributable leg is paged once.
+    DEAD_GTT = ("cancelled", "rejected", "expired", "deleted")
+    UNATTRIB_PAGE_SWEEPS = 6
 
     def __init__(self, executor, manager):
         self.executor = executor
@@ -109,6 +115,8 @@ class TMA2GTTMonitor:
         self._missing = 0
         self._pending = {}        # gtt_id -> fill-confirm retry count
         self._unproven = set()    # ── BROKER_TRUTH_20261114 ──
+        self._unattrib = {}       # ── GTT_MONITOR_PROOF_20261115 ──
+        self._unattrib_paged = set()
         self._unread_logged = 0.0
         self._sid = getattr(manager, "_sid", "TMA_V2")
 
@@ -146,6 +154,8 @@ class TMA2GTTMonitor:
             self._missing = 0
             self._pending.clear()
             self._unproven.clear()        # a new session pages afresh
+            self._unattrib.clear()
+            self._unattrib_paged.clear()
             return
         gtts = _BT.read_gtts(self.executor)
         if gtts is None:
@@ -158,12 +168,17 @@ class TMA2GTTMonitor:
         by_id = {str(x.get("id")): x for x in gtts}
         gtt = by_id.get(str(gid))
         sell = g["sell"]
+        # ── GTT_MONITOR_PROOF_20261115 ── listed but not armed = not there
+        if gtt is not None and str(gtt.get("status", "")).lower() in self.DEAD_GTT:
+            self._pending.pop(gid, None)
+            gtt = None
 
         if gtt is not None:
             self._missing = 0
             status = gtt.get("status", "")
             if status not in ("triggered", "disabled"):
                 self._pending.pop(gid, None)
+                self._unattrib.pop(gid, None)
                 return
             # ── GTT_UNFILLED_ESCALATION_20261026 BEGIN ── (IC_V2 layer-2
             # doctrine, ported.) A triggered GTT places a LIMIT order. On a
@@ -188,6 +203,7 @@ class TMA2GTTMonitor:
                     write_audit_log(f"[TMA2_GTT_MONITOR] CONFIRMED {sell['symbol']} "
                                     f"reason=SL price={px} order={oid}")
                     self._pending.pop(gid, None)
+                    _BT.claim_orders(oid)       # ── GTT_MONITOR_PROOF_20261115 ──
                     self.manager.on_backstop_sell_exit(exit_price=px, reason="SL")
                     return
                 if st in _DEAD:
@@ -213,22 +229,37 @@ class TMA2GTTMonitor:
                 own = self._own_qty(sell)                 # ── BROKER_TRUTH_20261114 ──
                 if own is None:
                     self._pending[gid] = self.FILL_CONFIRM_RETRIES - 1
+                    n = self._unattrib.get(gid, 0) + 1          # ── GTT_MONITOR_PROOF_20261115 ──
+                    self._unattrib[gid] = n
                     write_audit_log(f"[TMA2_GTT_MONITOR] gtt={gid} triggered, fill "
                                     f"unconfirmed and {sell['symbol']} position not "
-                                    f"attributable — no action, retrying")
+                                    f"attributable — no action, retrying ({n})")
+                    if n >= self.UNATTRIB_PAGE_SWEEPS and gid not in self._unattrib_paged:
+                        self._unattrib_paged.add(gid)
+                        self._page(f"{self._sid}: SL GTT on {sell['symbol']} has TRIGGERED "
+                                   f"but its fill cannot be confirmed (order not listed; "
+                                   f"position unreadable or shared with another strategy). "
+                                   f"The app has NOT acted. Check Kite Orders and Positions now.")
                     return
                 if own < 0:
                     self._escalate(gid, sell, self._find_working_buy(sell),
                                    "GTT triggered, no fill after retries, "
                                    "position still open")
                     return
-                price = price or self._price_fallback(sell)
+                # ── GTT_MONITOR_PROOF_20261115 ── no exit order, no booking —
+                # on this branch too (it used to book at a fallback price).
+                price, oid = self._fill_from_orders(sell)
+                if not oid or not price:
+                    self._pending[gid] = self.FILL_CONFIRM_RETRIES - 1
+                    self._page_unproven(gid, sell, "its GTT reads triggered")
+                    return
                 reason = "BROKER_EXIT"
             else:
                 reason = "SL"
             write_audit_log(f"[TMA2_GTT_MONITOR] CONFIRMED {sell['symbol']} "
                             f"reason={reason} price={price}")
             self._pending.pop(gid, None)
+            _BT.claim_orders(oid)               # ── GTT_MONITOR_PROOF_20261115 ──
             self.manager.on_backstop_sell_exit(exit_price=price, reason=reason)
             return
 
@@ -262,24 +293,12 @@ class TMA2GTTMonitor:
         # ── BROKER_TRUTH_20261114 ── no order, no booking (see IC monitor)
         if not oid or not price:
             self._missing = 0
-            if gid not in self._unproven:
-                self._unproven.add(gid)
-                write_audit_log(f"[TMA2_GTT_MONITOR][UNPROVEN] {sell['symbol']} GTT and "
-                                f"position read as gone but NO exit order found — "
-                                f"NOT booked")
-                try:
-                    from app.api.telegram_api import notify_critical
-                    notify_critical({"message":
-                        f"{self._sid}: {sell['symbol']} reads as gone at the broker "
-                        f"(no GTT, no position) but there is NO exit order for it "
-                        f"today. The app has NOT booked a close. Check Kite "
-                        f"Positions and GTT now.", "severity": "error"})
-                except Exception:
-                    pass
+            self._page_unproven(gid, sell, "no GTT")
             return
         write_audit_log(f"[TMA2_GTT_MONITOR] GTT gone AND position gone "
                         f"→ BROKER_EXIT @{price} order={oid}")
         self._missing = 0
+        _BT.claim_orders(oid)                   # ── GTT_MONITOR_PROOF_20261115 ──
         self.manager.on_backstop_sell_exit(exit_price=price,
                                            reason="BROKER_EXIT")
 
@@ -325,6 +344,27 @@ class TMA2GTTMonitor:
                 return str(o.get("order_id"))
         return None
 
+    # ── GTT_MONITOR_PROOF_20261115 BEGIN ──
+    def _page(self, msg: str, severity: str = "error") -> None:
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({"message": msg, "severity": severity})
+        except Exception:
+            pass
+
+    def _page_unproven(self, gid, sell, what: str) -> None:
+        if gid in self._unproven:
+            return
+        self._unproven.add(gid)
+        write_audit_log(f"[TMA2_GTT_MONITOR][UNPROVEN] {sell['symbol']} GTT and "
+                        f"position read as gone but NO exit order found — "
+                        f"NOT booked")
+        self._page(f"{self._sid}: {sell['symbol']} reads as gone at the broker "
+                   f"({what}, no position) but there is NO exit order for it "
+                   f"today. The app has NOT booked a close. Check Kite "
+                   f"Positions and GTT now.")
+    # ── GTT_MONITOR_PROOF_20261115 END ──
+
     # ── FILL_TRUTH_TMA_20261102 BEGIN ──
     def _resolve_fill(self, gtt: dict, sell: dict):
         """(price, order_id) of THIS sell leg's GTT buy-back, or (None, None)."""
@@ -338,16 +378,39 @@ class TMA2GTTMonitor:
                         return px, oid
             except Exception as e:
                 write_audit_log(f"[TMA2_GTT_MONITOR][FILL_READ_ERR] {oid} {e}")
-        return self._fill_from_orders(sell, only_ids=gids or None)
+        if gids:
+            return self._fill_from_orders(sell, only_ids=gids)
+        # ── GTT_MONITOR_PROOF_20261115 ── order not listed yet: search the
+        # whole book only when the position is certainly ours and flat.
+        # Orders this app placed are never eligible (_fill_from_orders).
+        # Shared contract → additionally only a fill at or inside the GTT's
+        # own limit can be ours, when the list shows it; ours alone → the book
+        # once the position is flat (or when it cannot be read, as before).
+        if _BT.LEDGER.shared(sell["symbol"], self._sid):
+            px = [float(o.get("price") or 0) for o in (gtt.get("orders") or [])]
+            cap = max([p for p in px if p > 0] or [0.0])
+            return self._fill_from_orders(sell, px_cap=cap or None)
+        pos = _BT.read_positions(self.executor)
+        if pos is not None and int(pos.get(sell["symbol"], 0)) < 0:
+            return None, None
+        return self._fill_from_orders(sell)
 
-    def _fill_from_orders(self, sell: dict, only_ids=None):
+    def _fill_from_orders(self, sell: dict, only_ids=None, px_cap=None):
         try:
             orders = self.executor.get_orders() or []
         except Exception:
             return None, None
+        if px_cap:                      # ── GTT_MONITOR_PROOF_20261115 ──
+            orders = [o for o in orders
+                      if 0 < float(o.get("average_price") or 0) <= px_cap + 0.05]
         g = getattr(self.manager, "group", None) or {}
         hedge = g.get("hedge") or {}
         excl = [x for x in (sell.get("order_id"), hedge.get("order_id")) if x]
+        if only_ids is None:            # ── GTT_MONITOR_PROOF_20261115 ── a GTT's or a
+            try:                        # human's order is never one this app placed
+                excl = list(set(excl) | _BT.app_order_ids())
+            except Exception:
+                pass
         floor = _entry_floor(orders, sell.get("order_id"), g.get("sig_ts"))
         px, ids = _fill_pick().pick_exit_fill(
             orders, symbol=sell["symbol"], exit_side="BUY", not_before_ts=floor,

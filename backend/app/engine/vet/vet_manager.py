@@ -1095,6 +1095,12 @@ class VetManager:
         None when unreadable OR another strategy holds the same contract."""
         return _BT.own_net_qty(self.executor, sym, "VET_V1", log=write_audit_log)
 
+    def _flat_proven(self, sym: str, short: bool, leg: Dict) -> bool:
+        """── FLAT_NEEDS_PROOF_20261115 ── see broker_truth.flat_proven."""
+        return _BT.flat_proven(self.executor, sym, "VET_V1", short,
+                               not_before_ts=leg.get("entry_ts"), clock=self._clock,
+                               log=write_audit_log)
+
     def _last_fill(self, sym: str, txn: str) -> Optional[float]:
         try:
             for o in reversed(self.executor.get_orders() or []):
@@ -1147,6 +1153,11 @@ class VetManager:
         else:
             obs = self._net_qty(sym)
             flat = obs is not None and ((obs >= 0) if short else (obs <= 0))
+            # ── FLAT_NEEDS_PROOF_20261115 ── flat with no fill of ours: one
+            # reading books nothing and sends nothing until it is proven.
+            if flat and not fills and not self._flat_proven(sym, short, leg):
+                st["why"] = _BT.FLAT_UNPROVEN_WHY
+                return False
         if not flat:
             if obs is None and fills and sum(f[0] for f in fills) >= qty:
                 flat = True
@@ -1177,6 +1188,10 @@ class VetManager:
                     obs = self._net_qty(sym)
                     flat = (obs is not None and ((obs >= 0) if short else (obs <= 0))) \
                         or (obs is None and r.filled)
+                    if (flat and obs is not None and not fills
+                            and not self._flat_proven(sym, short, leg)):   # ── FLAT_NEEDS_PROOF_20261115 ──
+                        st["why"] = _BT.FLAT_UNPROVEN_WHY
+                        return False
                 if not flat:
                     st["why"] = f"exit did not fill ({r.status})"
                     return False

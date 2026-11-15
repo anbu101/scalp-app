@@ -117,7 +117,8 @@ class TMAGTTMonitor:
             return   # unprotected leg: candle monitor is the sole guard
 
         try:
-            gtts = self.executor.get_gtts()
+            from app.execution import broker_truth as _bt_all   # STRICT_READS_ALL_20261115
+            gtts = _bt_all.gtts_strict(self.executor, in_session_only=True)
         except Exception as e:
             write_audit_log(f"[TMA_GTT_MONITOR][FETCH_FAIL] no action ERR={e}")
             return
@@ -305,7 +306,8 @@ class TMAGTTMonitor:
 
     def _position_open(self, sell) -> bool:
         try:
-            positions = self.executor.get_open_positions() or []
+            from app.execution import broker_truth as _bt_all   # STRICT_READS_ALL_20261115
+            positions = _bt_all.positions_strict(self.executor)
         except Exception:
             return True    # can't verify → assume open (never close blind)
         for p in positions:

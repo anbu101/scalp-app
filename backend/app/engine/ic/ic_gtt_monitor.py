@@ -129,6 +129,26 @@ class ICGTTMonitor:
     MISSING_THRESHOLD    = 3
     LTP_STALENESS_SEC    = 30
 
+    # ── GTT_MONITOR_PROOF_20261115 ── WHAT CHANGED AND WHY (fleet assurance,
+    # 15 Nov 2026 — every case reproduced in test_adv_gtt_monitor.py):
+    #   * a GTT that is LISTED but no longer armed (cancelled / rejected /
+    #     expired / deleted) is NOT protection: it goes down the "missing"
+    #     path (naked alert), it does not count as "present";
+    #   * a triggered GTT that has not listed its order yet: the order book is
+    #     scanned ONLY when the position is certainly ours and reads flat. On
+    #     a contract another strategy trades, "a COMPLETE buy on the symbol"
+    #     can be THEIR buy-back (Icarus L1 was booked closed at Tigris's fill
+    #     while Icarus's own limit rested unfilled);
+    #   * a triggered GTT whose OWN order is visible and not filled is an open,
+    #     unprotected leg whoever else holds the contract: escalate (before,
+    #     on a shared strike the tick stop deferred to this monitor and this
+    #     monitor waited for a position it could not attribute — nobody acted,
+    #     nobody paged);
+    #   * "no exit order, no booking" now also holds on the triggered branch;
+    #   * a leg that stays unattributable is paged once.
+    DEAD_GTT             = ("cancelled", "rejected", "expired", "deleted")
+    UNATTRIB_PAGE_SWEEPS = 6
+
     def __init__(self, executor, group_manager):
         self.executor = executor
         self.gm = group_manager
@@ -138,6 +158,8 @@ class ICGTTMonitor:
         self._missing = {}        # leg_id -> consecutive all-missing sweeps
         self._pending = {}        # gtt_id -> fill-confirm retry count
         self._unproven = set()    # ── BROKER_TRUTH_20261114 ── legs alerted "gone, no order"
+        self._unattrib = {}       # ── GTT_MONITOR_PROOF_20261115 ── gtt_id -> unattributable sweeps
+        self._unattrib_paged = set()
         self._unread_logged = 0.0
 
     def start(self):
@@ -175,6 +197,8 @@ class ICGTTMonitor:
             self._missing.clear()
             self._pending.clear()
             self._unproven.clear()        # a new session pages afresh
+            self._unattrib.clear()
+            self._unattrib_paged.clear()
             return
 
         # one broker fetch per sweep. STRICT: unreadable → touch NOTHING.
@@ -203,10 +227,15 @@ class ICGTTMonitor:
             gtt = by_id.get(str(gid))
             if gtt is None:
                 continue
-            found_any = True
             status = gtt.get("status", "")
+            # ── GTT_MONITOR_PROOF_20261115 ── listed but not armed = not there
+            if str(status).lower() in self.DEAD_GTT:
+                self._pending.pop(gid, None)
+                continue
+            found_any = True
             if status not in ("triggered", "disabled"):
                 self._pending.pop(gid, None)
+                self._unattrib.pop(gid, None)
                 continue
 
             # triggered → confirm a real fill before handing off
@@ -225,16 +254,52 @@ class ICGTTMonitor:
                 # single close path. Only when the position is genuinely gone
                 # do we fall back to the old BROKER_EXIT stamp.
                 own = self._own_qty(leg)          # ── BROKER_TRUTH_20261114 ──
-                if own is None:
+                # ── GTT_MONITOR_PROOF_20261115 ── the GTT's OWN order decides
+                # when the position cannot: visible and not filled = this leg
+                # is open and unprotected, whoever else holds the contract.
+                own_unfilled = own is None and self._own_orders_unfilled(gtt)
+                if own is None and not own_unfilled:
                     # positions unreadable, or the contract is shared with
-                    # another strategy: cannot tell "filled" from "resting".
-                    # Keep the count at the threshold and look again.
+                    # another strategy, and the GTT's order is not readable:
+                    # cannot tell "filled" from "resting". Look again; page
+                    # once if it stays that way.
                     self._pending[gid] = self.FILL_CONFIRM_RETRIES - 1
+                    n = self._unattrib.get(gid, 0) + 1
+                    self._unattrib[gid] = n
                     write_audit_log(f"[IC_GTT_MONITOR] gtt={gid} triggered, fill "
                                     f"unconfirmed and {leg.symbol} position not "
-                                    f"attributable — no action, retrying")
+                                    f"attributable — no action, retrying ({n})")
+                    if n >= self.UNATTRIB_PAGE_SWEEPS and gid not in self._unattrib_paged:
+                        self._unattrib_paged.add(gid)
+                        self._page(f"{self.sid}: SL GTT on {leg.symbol} ({leg.leg_id}) has "
+                                   f"TRIGGERED but its fill cannot be confirmed (order not "
+                                   f"listed; position unreadable or shared with another "
+                                   f"strategy). The app has NOT acted. Check Kite Orders and "
+                                   f"Positions now.")
                     continue
-                if self._is_open(leg, own):
+                if own_unfilled:
+                    # cancel the resting limit(s) first; if one is still working
+                    # the market-out would double it — page and look again.
+                    for gid2 in gids:
+                        g2 = by_id.get(str(gid2))
+                        if g2 is not None and g2.get("status", "") in ("triggered", "disabled"):
+                            self._cancel_stale_gtt_order(g2)
+                    still, part = self._own_orders_after_cancel(gids, by_id)
+                    if still:
+                        self._pending[gid] = self.FILL_CONFIRM_RETRIES - 1
+                        write_audit_log(f"[IC_GTT_MONITOR][ESCALATE_HELD] {leg.leg_id} "
+                                        f"{leg.symbol} GTT order(s) {still} could not be "
+                                        f"cancelled — market-out NOT sent this sweep")
+                        if gid not in self._unattrib_paged:
+                            self._unattrib_paged.add(gid)
+                            self._page(f"{self.sid}: SL GTT on {leg.symbol} ({leg.leg_id}) "
+                                       f"triggered but did NOT fill, and its resting order "
+                                       f"{', '.join(still)} could not be cancelled. Cancel it "
+                                       f"in Kite (Orders → Open); the app then closes the leg.")
+                        continue
+                    # (what the cancelled order had already filled is counted
+                    # by the manager, which adopts the GTT's order on escalation)
+                if own_unfilled or self._is_open(leg, own):
                     # sliced legs: sibling GTTs share the trigger and fired
                     # together — their resting limits are the same double-
                     # fill hazard. Sweep them ALL before the market-out.
@@ -257,7 +322,13 @@ class ICGTTMonitor:
                         pass
                     self.gm.escalate_unfilled_gtt(leg_id=leg.leg_id)
                     return
-                price = price or self._price_fallback(leg)
+                # ── GTT_MONITOR_PROOF_20261115 ── no exit order, no booking —
+                # on this branch too (it used to book at a fallback price).
+                price, oid = self._fill_from_orders(leg)
+                if not oid or not price:
+                    self._pending[gid] = self.FILL_CONFIRM_RETRIES - 1
+                    self._page_unproven(leg, "its GTT reads triggered")
+                    continue
                 reason = "BROKER_EXIT"
             else:
                 reason = self._infer_reason(leg, price)
@@ -312,20 +383,7 @@ class ICGTTMonitor:
         # read we cannot trust (or a prior-day exit a human must confirm).
         if not oid or not price:
             self._missing.pop(leg.leg_id, None)
-            if leg.leg_id not in self._unproven:
-                self._unproven.add(leg.leg_id)
-                write_audit_log(f"[IC_GTT_MONITOR][UNPROVEN] {leg.leg_id} {leg.symbol} "
-                                f"GTTs and position read as gone but NO exit order "
-                                f"found — NOT booked")
-                try:
-                    from app.api.telegram_api import notify_critical
-                    notify_critical({"message":
-                        f"{self.sid}: {leg.symbol} ({leg.leg_id}) reads as gone at the "
-                        f"broker (no GTT, no position) but there is NO exit order for "
-                        f"it today. The app has NOT booked a close. Check Kite "
-                        f"Positions and GTT now.", "severity": "error"})
-                except Exception:
-                    pass
+            self._page_unproven(leg, "no GTT")
             return
         write_audit_log(f"[IC_GTT_MONITOR] {leg.leg_id} GTTs gone AND position "
                         f"gone → BROKER_EXIT @{price} order={oid}")
@@ -347,6 +405,78 @@ class ICGTTMonitor:
                 out.append(str(oid))
         return out
 
+    # ── GTT_MONITOR_PROOF_20261115 BEGIN ──
+    def _page(self, msg: str, severity: str = "error") -> None:
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({"message": msg, "severity": severity})
+        except Exception:
+            pass
+
+    def _page_unproven(self, leg, what: str) -> None:
+        """Once per leg and session: reads as gone, but nothing proves it."""
+        if leg.leg_id in self._unproven:
+            return
+        self._unproven.add(leg.leg_id)
+        write_audit_log(f"[IC_GTT_MONITOR][UNPROVEN] {leg.leg_id} {leg.symbol} "
+                        f"GTTs and position read as gone but NO exit order "
+                        f"found — NOT booked")
+        self._page(f"{self.sid}: {leg.symbol} ({leg.leg_id}) reads as gone at the "
+                   f"broker ({what}, no position) but there is NO exit order for "
+                   f"it today. The app has NOT booked a close. Check Kite "
+                   f"Positions and GTT now.")
+
+    _WORKING = ("OPEN", "TRIGGER PENDING", "PENDING", "AMO REQ RECEIVED",
+                "OPEN PENDING", "MODIFY PENDING", "VALIDATION PENDING",
+                "PUT ORDER REQ RECEIVED", "MODIFIED", "UPDATE")
+    _DEAD_ORDER = ("REJECTED", "CANCELLED", "LAPSED")
+
+    def _own_order_states(self, gtt: dict):
+        """[(order_id, STATUS, filled_qty, avg_price)] of the GTT's own
+        order(s); None when it lists none or one cannot be read."""
+        gids = self._gtt_order_ids(gtt)
+        if not gids:
+            return None
+        out = []
+        for oid in gids:
+            try:
+                info = self.executor.get_order_fill(oid) or {}
+            except Exception:
+                return None
+            st = (info.get("status") or "").upper()
+            if not st:
+                return None
+            out.append((oid, st, int(info.get("filled_qty") or 0),
+                        float(info.get("avg_price") or 0.0)))
+        return out
+
+    def _own_orders_unfilled(self, gtt: dict) -> bool:
+        """True when the GTT's own order(s) are all readable and none is
+        COMPLETE: the exit did not happen (resting, rejected or cancelled)."""
+        sts = self._own_order_states(gtt)
+        return bool(sts) and all(st != "COMPLETE" for _, st, _, _ in sts)
+
+    def _own_orders_after_cancel(self, gids, by_id):
+        """After the stale-order cancel: (ids still working, [(qty, px)] of
+        what they filled before dying)."""
+        still, part = [], []
+        for gid in gids:
+            g = by_id.get(str(gid))
+            if g is None or g.get("status", "") not in ("triggered", "disabled"):
+                continue
+            sts = self._own_order_states(g)
+            if sts is None:
+                if self._gtt_order_ids(g):
+                    still.append("?")            # listed but unreadable: assume working
+                continue
+            for oid, st, fq, px in sts:
+                if st not in self._DEAD_ORDER and st != "COMPLETE":
+                    still.append(oid)
+                elif fq > 0 and px > 0:
+                    part.append((fq, px))
+        return still, part
+    # ── GTT_MONITOR_PROOF_20261115 END ──
+
     def _resolve_fill(self, gtt: dict, leg):
         """(price, order_id) of THIS leg's GTT exit, or (None, None) to retry."""
         gids = self._gtt_order_ids(gtt)
@@ -361,15 +491,53 @@ class ICGTTMonitor:
                 write_audit_log(f"[IC_GTT_MONITOR][FILL_READ_ERR] {oid} {e}")
         # The GTT named its order(s): only THEY can be this exit. Not complete
         # yet → retry (the escalation path handles a resting limit).
-        return self._fill_from_orders(leg, only_ids=gids or None)
+        if gids:
+            return self._fill_from_orders(leg, only_ids=gids)
+        # ── GTT_MONITOR_PROOF_20261115 ── the GTT has not listed its order
+        # yet, so "a COMPLETE exit-side order on this symbol" is only a guess:
+        #   * orders this app placed (any strategy) are never eligible — a
+        #     GTT's order is placed by the broker (see _fill_from_orders);
+        #   * contract shared with another strategy → additionally, only a
+        #     fill at or inside the GTT's own limit price can be ours (a limit
+        #     order cannot fill beyond its limit), when the list shows it;
+        #   * ours alone, position readable → search the book only once the
+        #     position is flat (open = the limit is still resting → retry);
+        #   * ours alone, position unreadable → the book as before.
+        bt = _bt()
+        if bt.LEDGER.shared(leg.symbol, self.sid):
+            return self._fill_from_orders(leg, px_cap=self._gtt_limit(gtt))
+        pos = bt.read_positions(self.executor)
+        if pos is not None and self._is_open(leg, int(pos.get(leg.symbol, 0))):
+            return None, None
+        return self._fill_from_orders(leg)
 
-    def _fill_from_orders(self, leg, only_ids=None):
+    @staticmethod
+    def _gtt_limit(gtt: dict) -> Optional[float]:
+        """The limit price of the GTT's order leg(s), when the list shows it."""
+        px = [float(o.get("price") or 0) for o in (gtt.get("orders") or [])]
+        px = [p for p in px if p > 0]
+        return max(px) if px else None
+
+    def _fill_from_orders(self, leg, only_ids=None, px_cap=None):
         try:
             orders = self.executor.get_orders() or []
         except Exception:
             return None, None
+        if px_cap:                      # ── GTT_MONITOR_PROOF_20261115 ──
+            def _inside(o):
+                try:
+                    p = float(o.get("average_price") or 0)
+                except (TypeError, ValueError):
+                    return False
+                return p <= px_cap + 0.05 if leg.is_short else p >= px_cap - 0.05
+            orders = [o for o in orders if _inside(o)]
         fp = _fill_pick()
         meta = self._leg_meta(leg)
+        if only_ids is None:            # ── GTT_MONITOR_PROOF_20261115 ── a GTT's or a
+            try:                        # human's order is never one this app placed
+                meta["exclude"] = set(meta["exclude"]) | _bt().app_order_ids()
+            except Exception:
+                pass
         px, ids = fp.pick_exit_fill(
             orders, symbol=leg.symbol, exit_side=fp.exit_side_for(leg.is_short),
             not_before_ts=meta["entry_ts"], exclude_ids=meta["exclude"],
@@ -393,6 +561,10 @@ class ICGTTMonitor:
         return {"entry_ts": rt.get("entry_ts"), "exclude": excl}
 
     def _handoff(self, leg, price, reason, oid):
+        try:                            # ── GTT_MONITOR_PROOF_20261115 ── this fill is
+            _bt().claim_orders(oid)     # now this leg's: no other strategy may use it
+        except Exception:
+            pass
         try:
             self.gm.on_backstop_leg_exit(leg_id=leg.leg_id, exit_price=price,
                                          reason=reason, exit_order_id=oid)

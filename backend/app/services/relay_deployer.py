@@ -40,7 +40,7 @@ _last_recovery_ts  = 0
 _RECOVERY_LOCK     = threading.Lock()
 
 _MAX_FAIL_BEFORE_RECOVERY = 3
-_RECOVERY_COOLDOWN_S      = 120
+# (_RECOVERY_COOLDOWN_S: see RELAY_RECOVERY_SAFE_20261115 below — it is now used)
 
 RELAY_CONFIG_PATH = Path.home() / ".scalp-app" / "relay_config.json"
 
@@ -698,12 +698,13 @@ def _run_one_relay_check():
         write_audit_log("[RELAY_MONITOR] Triggering recovery for ALL relays")
 
         for relay in relays:
-            _attempt_relay_recovery(
+            outcome = _attempt_relay_recovery(
                 host=relay.get("host"),
                 ssh_username=relay.get("ssh_username"),
                 ssh_private_key_text=relay.get("ssh_key"),
                 instance_id=relay.get("instance_id"),
             )
+            write_audit_log(f"[RELAY_MONITOR] recovery {relay.get('host')} → {outcome}")
 
         _relay_fail_count = 0
 
@@ -1207,99 +1208,142 @@ def deploy_relay(
 # AUTO RECOVERY
 # --------------------------------------------------
 
+# ── RELAY_RECOVERY_SAFE_20261115 BEGIN ──
+# WHAT WAS WRONG (fleet assurance, 15 Nov 2026 — test_relay_recovery.py):
+#   * The health check runs from THIS computer. Three failed checks (90 s)
+#     restarted the relay service on the server — even when the server was
+#     perfectly healthy and only this computer's network was broken (the
+#     transparent-proxy / poor Wi-Fi days). A healthy relay was restarted
+#     again and again, in market hours.
+#   * A restart that needed more than 5 s to answer escalated straight to a
+#     REBOOT (2-3 minutes without a relay).
+#   * There was no cooldown at all (_RECOVERY_COOLDOWN_S was defined, never
+#     used): every 90 s another restart or reboot.
+# NOW
+#   1. cooldown: at most one recovery attempt per host every
+#      _RECOVERY_COOLDOWN_S, at most one reboot every _REBOOT_COOLDOWN_S;
+#   2. look before touching: over SSH, ask the relay on the server itself
+#      (localhost). Healthy there → the fault is the path from this computer
+#      → NOTHING is restarted; the user is told to check this computer's
+#      network (bell + Telegram, once per 30 minutes);
+#   3. unhealthy there → restart the service and give it up to 20 s;
+#   4. still unhealthy → reboot, cooldown permitting.
+# Returns a short outcome word (tests and the audit log use it).
+_RECOVERY_COOLDOWN_S = 300
+_REBOOT_COOLDOWN_S = 1800
+_NET_ALERT_EVERY_S = 1800
+_RESTART_WAIT_TRIES = 4
+_RESTART_WAIT_S = 5
+_recovery_last = {}     # host -> time of the last recovery attempt
+_reboot_last = {}       # host -> time a reboot was last issued
+_net_alert_last = {}    # host -> time the "check your network" alert last went out
+
+
+def _server_health_ok(client) -> bool:
+    ok, out, _ = _run(client, "curl -s --max-time 4 http://localhost:8001/health", timeout=10)
+    return bool(ok and "scalp-terminal" in (out or ""))
+
+
 def _attempt_relay_recovery(host, ssh_username, ssh_private_key_text, instance_id=None):
-    """
-    Recovery ladder (fastest to most disruptive):
-      1. systemctl restart scalp-relay  — ~5s downtime, preferred
-      2. graceful OS reboot             — ~2-3 min, last resort
-      3. sysrq force reboot             — emergency fallback
-    """
-    write_audit_log("[RELAY_RECOVERY] Attempting recovery...")
-
-
+    now = time.time()
+    if now - _recovery_last.get(host, 0) < _RECOVERY_COOLDOWN_S:
+        write_audit_log(f"[RELAY_RECOVERY] {host}: last attempt "
+                        f"{int(now - _recovery_last.get(host, 0))}s ago — cooling down, nothing done")
+        return "COOLDOWN"
     if not ssh_username or not ssh_private_key_text:
         write_audit_log("[RELAY_RECOVERY] No SSH credentials in config — cannot recover")
-        return
-
+        return "NO_CREDENTIALS"
+    if not _RECOVERY_LOCK.acquire(blocking=False):
+        return "BUSY"
+    client = None
     try:
-        import paramiko
+        _recovery_last[host] = now
+        write_audit_log(f"[RELAY_RECOVERY] {host}: checking the relay on the server itself...")
+        try:
+            import paramiko
+            pkey = _load_private_key(ssh_private_key_text)
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(hostname=host, username=ssh_username, pkey=pkey, timeout=20,
+                           banner_timeout=20, auth_timeout=10, look_for_keys=False,
+                           allow_agent=False)
+        except Exception as e:
+            write_audit_log(f"[RELAY_RECOVERY] {host}: SSH connection failed: {e} — "
+                            f"server down or this computer offline; nothing done")
+            return "SSH_FAILED"
 
-        pkey = _load_private_key(ssh_private_key_text)
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # 2. look before touching
+        if _server_health_ok(client):
+            write_audit_log(f"[RELAY_RECOVERY] {host}: relay is HEALTHY on the server — the "
+                            f"fault is the network path from this computer. NOT restarted.")
+            if now - _net_alert_last.get(host, 0) >= _NET_ALERT_EVERY_S:
+                _net_alert_last[host] = now
+                msg = (f"Order relay {host} is healthy on the server but cannot be reached "
+                       f"from this computer. Check this computer's network (Wi-Fi, VPN, "
+                       f"antivirus web protection / proxy). The relay was NOT restarted.")
+                try:
+                    record_alert("RELAY_NETWORK", msg, severity="error")
+                except Exception:
+                    pass
+                _send_relay_telegram("🟠 <b>Relay healthy, this computer cannot reach it</b>\n\n" + msg)
+            return "HEALTHY_ON_SERVER"
 
-        write_audit_log("[RELAY_RECOVERY] Connecting via SSH...")
-        client.connect(
-            hostname=host,
-            username=ssh_username,
-            pkey=pkey,
-            timeout=20,
-            banner_timeout=20,
-            auth_timeout=10,
-            look_for_keys=False,
-            allow_agent=False,
-        )
-
-        # Step 1: service restart (fast, preferred)
-        write_audit_log("[RELAY_RECOVERY] Trying systemctl restart scalp-relay...")
+        # 3. restart the service, and give it time
+        write_audit_log(f"[RELAY_RECOVERY] {host}: relay unhealthy on the server — "
+                        f"systemctl restart scalp-relay")
         ok, _, err = _run(client, "sudo systemctl restart scalp-relay", timeout=15)
         if ok:
-            time.sleep(5)
-            ok2, out, _ = _run(
-                client, "curl -s --max-time 4 http://localhost:8001/health", timeout=10
-            )
-            if ok2 and "scalp-terminal" in out:
-                write_audit_log("[RELAY_RECOVERY] Service restart successful")
-                client.close()
-                return
-            write_audit_log("[RELAY_RECOVERY] Still unhealthy after restart — escalating to reboot")
+            for _ in range(_RESTART_WAIT_TRIES):
+                time.sleep(_RESTART_WAIT_S)
+                if _server_health_ok(client):
+                    write_audit_log(f"[RELAY_RECOVERY] {host}: service restart successful")
+                    return "RESTARTED"
+            write_audit_log(f"[RELAY_RECOVERY] {host}: still unhealthy "
+                            f"{_RESTART_WAIT_TRIES * _RESTART_WAIT_S}s after the restart")
         else:
-            write_audit_log(f"[RELAY_RECOVERY] systemctl restart failed: {err}")
+            write_audit_log(f"[RELAY_RECOVERY] {host}: systemctl restart failed: {err}")
 
-        # Step 2: OCI reboot (fast trigger)
+        # 4. reboot — cooldown permitting
+        if now - _reboot_last.get(host, 0) < _REBOOT_COOLDOWN_S:
+            write_audit_log(f"[RELAY_RECOVERY] {host}: a reboot was issued "
+                            f"{int(now - _reboot_last.get(host, 0))}s ago — NOT rebooting again")
+            _send_relay_telegram(
+                f"🚨 <b>Order relay still down</b>\n\nHost: <code>{host}</code>\n"
+                f"A restart did not help and it was rebooted less than "
+                f"{_REBOOT_COOLDOWN_S // 60} minutes ago. Check the server by hand.")
+            return "REBOOT_COOLDOWN"
+        _reboot_last[host] = now
         if instance_id:
             try:
                 import subprocess
-                subprocess.run(
-                    [
-                        "oci", "compute", "instance", "action",
-                        "--instance-id", instance_id,
-                        "--action", "RESET",
-                        "--force"
-                    ],
-                    timeout=10,
-                )
+                subprocess.run(["oci", "compute", "instance", "action", "--instance-id",
+                                instance_id, "--action", "RESET", "--force"], timeout=10)
                 write_audit_log(f"[RELAY_RECOVERY] OCI reboot triggered for {host}")
-                return
+                return "REBOOTED"
             except Exception as e:
                 write_audit_log(f"[RELAY_RECOVERY] OCI reboot failed: {e}")
-
-        # Step 3: graceful OS reboot
-        write_audit_log("[RELAY_RECOVERY] Trying graceful reboot...")
         try:
             _run(client, "sudo shutdown -r now", timeout=5)
-            client.close()
-            write_audit_log("[RELAY_RECOVERY] Graceful reboot issued — instance back in ~2 min")
-            return
+            write_audit_log(f"[RELAY_RECOVERY] {host}: graceful reboot issued — back in ~2 min")
+            return "REBOOTED"
         except Exception as e:
             write_audit_log(f"[RELAY_RECOVERY] Graceful reboot failed: {e}")
-
-        # Step 4: sysrq force reboot
-        write_audit_log("[RELAY_RECOVERY] Trying force reboot (sysrq)...")
         try:
             _run(client, "echo b | sudo tee /proc/sysrq-trigger", timeout=5)
-            client.close()
-            write_audit_log("[RELAY_RECOVERY] Force reboot issued")
-            return
+            write_audit_log(f"[RELAY_RECOVERY] {host}: force reboot issued")
+            return "REBOOTED"
         except Exception as e:
             write_audit_log(f"[RELAY_RECOVERY] Force reboot failed: {e}")
-
-        client.close()
-
-    except Exception as e:
-        write_audit_log(f"[RELAY_RECOVERY] SSH connection failed: {e}")
-
-    write_audit_log("[RELAY_RECOVERY] All recovery methods failed")
+        write_audit_log("[RELAY_RECOVERY] All recovery methods failed")
+        return "FAILED"
+    finally:
+        try:
+            if client is not None:
+                client.close()
+        except Exception:
+            pass
+        _RECOVERY_LOCK.release()
+# ── RELAY_RECOVERY_SAFE_20261115 END ──
 
 
 def _get_instance_ocid_from_config() -> str:

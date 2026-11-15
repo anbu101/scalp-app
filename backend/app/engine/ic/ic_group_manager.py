@@ -272,6 +272,8 @@ class ICGroupManager:
         # ── BROKER_TRUTH_20261114 ── tell the other strategies what we hold
         try:
             _bt().LEDGER.register(self.strategy_id, self._ledger_view)
+            # ── GTT_KILL_LIST_20261115 ── GTTs of closed legs still to cancel
+            self._gtt_kill = _bt().GttKillList(self.strategy_id)
         except Exception as _e:
             write_audit_log(f"[IC][{self.strategy_id}][LEDGER] register failed {_e!r}")
         # ── IC_V2 ── phantom condor (ADJ_ONLY)
@@ -1059,6 +1061,7 @@ class ICGroupManager:
         """Execute due MTC activations and adjustment placements. Engine
         thread only. Poll cadence (4–5s) bounds activation slack; documented
         as +60s (+poll) — the 'next minute' in a tick world."""
+        self._gtt_kill_retry()          # ── GTT_KILL_LIST_20261115 ── also with no group
         if self._core is None:
             return
         now_ts = int(now_ts if now_ts is not None else time.time())
@@ -1311,7 +1314,7 @@ class ICGroupManager:
                     core.add_adjust_leg(leg)           # our own state now shows the leg
             finally:
                 try:
-                    _bt().LEDGER.release(self.strategy_id)
+                    _bt().LEDGER.release(self.strategy_id, {leg.symbol: 1})   # ── LEDGER_BOOT_20261115 ── only the adjustment's
                 except Exception:
                     pass
             if not ok:
@@ -1912,6 +1915,7 @@ class ICGroupManager:
         core = self._core
         if core is None:
             return
+        self._gtt_leftovers_to_kill()   # ── GTT_KILL_LIST_20261115 ──
         if core.state in (G_CLOSED, G_ABORTED):
             if ic_carry_store.carry_exists(self.strategy_id):
                 ic_carry_store.clear_carry(self.strategy_id)
@@ -1919,6 +1923,62 @@ class ICGroupManager:
             self._sweep_orphan_gtts()   # ── GTT_VERIFY_STRICT_20261112 ──
         else:
             self._persist_session()
+
+    # ── GTT_KILL_LIST_20261115 BEGIN ── a CLOSED leg must leave nothing armed.
+    # A forced close flattens even when the leg's GTT could not be cancelled
+    # or verified. Such an id used to stay on the closed leg: the closing
+    # sweep below finds leftovers by symbol and only on a FLAT, unshared
+    # contract, so on a strike another strategy still held it was never
+    # retried (reproduced: it fired, closed Tigris's short and left +65).
+    # Every GTT id still recorded on a closed leg now goes to the kill list
+    # and is retried BY ID until the broker confirms it gone.
+    def _gtt_leftovers_to_kill(self):
+        core = self._core
+        kl = getattr(self, "_gtt_kill", None)
+        if core is None or kl is None or self._paper or self.executor is None:
+            return
+        for leg in list(core.legs.values()):
+            if leg.state == L_OPEN:
+                continue
+            rt = self._rt.get(leg.leg_id) or {}
+            if rt.get("phantom") or not rt.get("gtt_ids"):
+                continue
+            for gid in list(rt["gtt_ids"]):
+                status = "unread"
+                try:
+                    status = self.executor.get_gtt_status(gid)
+                except Exception:
+                    status = None
+                # active, or state unknown → must be killed; anything else
+                # (triggered / missing / cancelled …) is already spent or gone
+                if status in (None, "active", "unread"):
+                    kl.add(gid, leg.symbol, f"{leg.leg_id} closed, GTT not confirmed cancelled")
+                    write_audit_log(f"[IC][{self.strategy_id}][GTT_KILL] gtt={gid} on {leg.symbol} "
+                                    f"({leg.leg_id} closed) not confirmed cancelled — kept for retry")
+                elif status == "triggered":
+                    # the leg's own fired stop: make sure it left nothing resting
+                    kl.add(gid, leg.symbol, f"{leg.leg_id} closed over a fired stop", spent=True)
+            rt["gtt_ids"] = []
+        self._gtt_kill_retry()
+
+    def _gtt_kill_retry(self):
+        kl = getattr(self, "_gtt_kill", None)
+        if kl is None or not len(kl) or self.executor is None:
+            return
+
+        def _page(msg, sev="error"):
+            record_alert("IC_ORPHAN_GTT", msg, severity=sev,
+                         strategy_id=self.strategy_id, mode="live")
+            try:
+                notify_critical({"message": msg, "severity": sev,
+                                 "strategy_id": self.strategy_id, "mode": "live"})
+            except Exception:
+                pass
+        try:
+            kl.retry(self.executor, log=write_audit_log, page=_page)
+        except Exception as e:
+            write_audit_log(f"[IC][{self.strategy_id}][GTT_KILL][ERR] {e!r}")
+    # ── GTT_KILL_LIST_20261115 END ──
 
     # ── GTT_VERIFY_STRICT_20261112 BEGIN ── closing safety net.
     # 12 Nov 2026: the carried condor was squared off at 09:16 but two of
@@ -2054,6 +2114,36 @@ class ICGroupManager:
                 write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][SPENT_GTT] "
                                 f"{leg.symbol} gtt={gid} triggered — skipping cancel; "
                                 f"position guard decides the order")
+                # ── GTT_KILL_LIST_20261115 ── the triggered GTT's own order may
+                # still REST (gap past its limit). Placing our exit next to it
+                # leaves that limit working after the leg is booked closed —
+                # nothing watches a closed leg, and it fills later into a flat
+                # contract. ADOPT it: the driver below re-pegs / cancels it and
+                # counts what it filled, before any new order is placed.
+                try:
+                    _ids = _bt().fired_gtt_orders(
+                        self.executor, gid, symbol=leg.symbol, short=leg.is_short,
+                        qtys=[int(c) for c in rt["slices"]]) or []
+                    for _oid in _ids:
+                        if _oid not in rt.setdefault("exit_working", []):
+                            rt["exit_working"].append(_oid)
+                            _bt().claim_orders([_oid])
+                            write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][ADOPT] {leg.symbol} "
+                                            f"GTT order {_oid} adopted for the exit")
+                    # The GTT has not listed its order yet: what a broker-placed
+                    # (non-app) exit order on this contract already FILLED is
+                    # this stop's fill — count it, so it is not bought again.
+                    if not _ids and not rt.get("exit_fills") and not rt.get("exit_working"):
+                        _q, _px = _bt().foreign_exit_fill(
+                            self.executor, leg.symbol, leg.is_short,
+                            want_qty=sum(int(c) for c in rt["slices"]),
+                            not_before_ts=rt.get("entry_ts"))
+                        if _q and _px:
+                            rt.setdefault("exit_fills", []).append((_q, _px))
+                            write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][GTT_FILL] {leg.symbol} "
+                                            f"the fired GTT already filled {_q} @{_px}")
+                except Exception as e:
+                    write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][ADOPT_ERR] gtt={gid} {e!r}")
                 continue
             # ── IC_GTT_RACE_20260814 END ──
             gone = False
@@ -2118,6 +2208,10 @@ class ICGroupManager:
         observed = self._observed_qty(leg)
         if observed is not None:
             already_flat = (observed >= 0) if leg.is_short else (observed <= 0)
+            # ── FLAT_NEEDS_PROOF_20261115 ── one flat reading with no fill of
+            # ours books nothing and sends nothing until it is proven.
+            if already_flat and not rt.get("exit_fills") and not self._flat_proven(leg):
+                return self._exit_fail(leg, reason, _bt().FLAT_UNPROVEN_WHY)
             if already_flat:
                 write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][ALREADY_FLAT] "
                                 f"{leg.symbol} net_qty={observed} at the broker — "
@@ -2205,7 +2299,11 @@ class ICGroupManager:
         obs = self._observed_qty(leg)
         if obs is not None:
             if (obs >= 0) if leg.is_short else (obs <= 0):
-                return self._exit_done(leg, fills)
+                # ── FLAT_NEEDS_PROOF_20261115 ── our order died unfilled and
+                # the leg reads flat: prove it before booking.
+                if fills or self._flat_proven(leg):
+                    return self._exit_done(leg, fills)
+                return self._exit_fail(leg, reason, _bt().FLAT_UNPROVEN_WHY)
         elif filled_all:
             return self._exit_done(leg, fills)
         return self._exit_fail(leg, reason, "exit did not fill — position STILL OPEN")
@@ -2223,6 +2321,13 @@ class ICGroupManager:
         None when the positions are unreadable OR another strategy holds the
         same contract (then our own orders' fills are the only truth)."""
         return _bt().own_net_qty(self.executor, leg.symbol, self.strategy_id,
+                                 log=write_audit_log)
+
+    def _flat_proven(self, leg: LegCore) -> bool:
+        """── FLAT_NEEDS_PROOF_20261115 ── see broker_truth.flat_proven."""
+        rt = self._rt.get(leg.leg_id) or {}
+        return _bt().flat_proven(self.executor, leg.symbol, self.strategy_id, leg.is_short,
+                                 not_before_ts=rt.get("entry_ts"), clock=self._clock,
                                  log=write_audit_log)
 
     def _exit_done(self, leg: LegCore, fills):
@@ -2685,6 +2790,7 @@ class ICGroupManager:
 
     def leg_runtime(self, leg_id: str) -> dict:
         return dict(self._rt.get(leg_id) or {})
+
 
     def is_paper(self) -> bool:
         return self._paper

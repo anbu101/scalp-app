@@ -12,6 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.engine.tma import tma_trade_manager as TM               # noqa: E402
 from app.engine.tma import tma_gtt_monitor as GM                 # noqa: E402
+# ── STRICT_READS_ALL_20261115 ── the monitor infers nothing outside the
+# derivatives session; these scenarios are in-session ones whatever the
+# wall clock says when the suite runs.
+from app.execution import broker_truth as _BT_SESSION            # noqa: E402
+_BT_SESSION.session_open = lambda: True
 from app.engine.tma.tma_common import TMARepo                    # noqa: E402
 from app.engine.tma2 import test_tma2_exit_paths as T            # noqa: E402
 

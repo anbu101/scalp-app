@@ -111,7 +111,8 @@ class BrokerReconciliationJob:
     # -------------------------------------------------
 
     def _get_broker_positions(self) -> Dict[str, Dict]:
-        positions = self.executor.get_open_positions()
+        from app.execution import broker_truth as _bt_all   # STRICT_READS_ALL_20261115
+        positions = _bt_all.positions_strict(self.executor, in_session_only=True)
         out = {}
 
         for p in positions:

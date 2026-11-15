@@ -54,6 +54,11 @@ class SimClock:
 class FakeKite:
     def __init__(self, prices: Dict[str, float], *, lot_size: int = 65,
                  clock: Optional[SimClock] = None):
+        try:                            # ── GTT_MONITOR_PROOF_20261115 ── a new fake
+            from app.execution import broker_truth as _bt     # broker reuses order ids:
+            _bt.reset_app_orders()      # start its "placed by this app" record afresh
+        except Exception:
+            pass
         self.px: Dict[str, float] = dict(prices)
         self.lot = lot_size
         self.clock = clock or SimClock()
