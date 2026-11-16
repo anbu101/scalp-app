@@ -151,6 +151,39 @@ def update_gtt(
         raise
 
 
+# ── CLOSE_CONFLICT_ALERT_20261116 ── DEF-032. A close that changes no row
+# because the row is ALREADY closed with a different exit (16 Nov: Icarus
+# L2 bought back at 19.30, row still holding the false 14 Nov close at
+# 96.90) used to leave only a [DB][SKIP] log line. Now it is a CRITICAL
+# alert naming both exits. A repeat close at the same price stays quiet.
+# Never raises: the caller's close path is unchanged.
+def _close_conflict(conn, trade_id, exit_price, exit_reason):
+    try:
+        row = conn.execute(
+            "SELECT strategy_id, symbol, qty, exit_price, exit_reason, exit_time "
+            "FROM trades WHERE trade_id = ?", (trade_id,)).fetchone()
+        if not row or row[5] is None:
+            return
+        old_px, new_px = row[3], exit_price
+        same_px = (old_px is not None and new_px is not None
+                   and abs(float(old_px) - float(new_px)) <= max(0.05, 0.005 * abs(float(new_px))))
+        if same_px or new_px is None:
+            return
+        when = time.strftime("%d %b %H:%M", time.localtime(int(row[5])))
+        msg = (f"{row[0]}: DB NOT UPDATED — {row[1]} x{row[2]} was closed now at "
+               f"{new_px} ({exit_reason}) but its row was already closed at {old_px} "
+               f"({row[4]}, {when}). P&L in the app's records is wrong; fix the row. "
+               f"trade_id={trade_id}")
+        write_audit_log(f"[DB][CLOSE_CONFLICT] {msg}")
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({"message": msg, "severity": "error", "strategy_id": row[0]})
+        except Exception as e:
+            write_audit_log(f"[DB][CLOSE_CONFLICT] alert failed: {e!r}")
+    except Exception as e:
+        write_audit_log(f"[DB][CLOSE_CONFLICT] check failed trade_id={trade_id}: {e!r}")
+
+
 # ==================================================
 # CLOSE TRADE
 # ==================================================
@@ -191,6 +224,8 @@ def close_trade(
             write_audit_log(
                 f"[DB][SKIP] CLOSE IGNORED trade_id={trade_id}"
             )
+            _close_conflict(conn, trade_id, exit_price, exit_reason)
+            return False
         else:
             write_audit_log(
                 f"[DB] TRADE CLOSED trade_id={trade_id} reason={exit_reason}"
@@ -198,6 +233,7 @@ def close_trade(
             if _shadow is not None:   # ── FLEET_MODES_20260923 ──
                 _shadow.mirror_close(live_ref=trade_id, exit_price=exit_price,
                                      exit_reason=exit_reason)
+            return True
 
     except Exception as e:
         conn.rollback()

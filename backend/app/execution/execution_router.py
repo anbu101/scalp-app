@@ -63,11 +63,19 @@ class ExecutionRouter(BaseOrderExecutor):
     # --------------------------------------------------
 
     def place_gtt_oco(self, symbol, qty, sl_price, tp_price,
-                      last_price=None, direction="LONG"):
+                      last_price=None, direction="LONG", limit_buffer=None):
         # BACK-COMPAT: existing callers pass 4 args; last_price/direction then
         # take the defaults the underlying executor already applied, so behaviour
         # is identical for BB / HA / SCALP_V1. SCALP_V3 passes direction="LONG"
         # with tp_price=None (SL-only) and a fresh last_price.
+        if limit_buffer:      # ── OCO_STOP_BUFFER_20261116 ── Zerodha only; others as before
+            try:
+                return self._executor.place_gtt_oco(
+                    symbol=symbol, qty=qty, sl_price=sl_price, tp_price=tp_price,
+                    last_price=last_price, direction=direction, limit_buffer=limit_buffer)
+            except TypeError as e:
+                if "limit_buffer" not in str(e):
+                    raise
         return self._executor.place_gtt_oco(
             symbol=symbol,
             qty=qty,
@@ -299,6 +307,18 @@ class ExecutionRouter(BaseOrderExecutor):
     def fresh_buy_entry_limit(self, symbol: str):
         # Re-peg price for a working BUY entry. None = "no fresh quote".
         fn = getattr(self._executor, "fresh_buy_entry_limit", None)
+        return fn(symbol) if callable(fn) else None
+
+    # ── EXIT_REPEG_FAST_20261116 ── exit re-peg quotes (time-capped on
+    # Zerodha); other executors degrade to the entry quote.
+    def fresh_sell_exit_limit(self, symbol: str):
+        fn = getattr(self._executor, "fresh_sell_exit_limit", None) or \
+            getattr(self._executor, "fresh_sell_entry_limit", None)
+        return fn(symbol) if callable(fn) else None
+
+    def fresh_buy_exit_limit(self, symbol: str):
+        fn = getattr(self._executor, "fresh_buy_exit_limit", None) or \
+            getattr(self._executor, "fresh_buy_entry_limit", None)
         return fn(symbol) if callable(fn) else None
     # ── TSG_ROUTER_CONTRACT_20260825 END ──
 

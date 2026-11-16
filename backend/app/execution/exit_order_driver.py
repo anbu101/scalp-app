@@ -39,6 +39,7 @@ from typing import Callable, Optional
 
 DEAD_STATUSES = {"REJECTED", "CANCELLED", "LAPSED"}
 TICK = 0.05
+SLOW_QUOTE_S = 1.0     # ── EXIT_REPEG_FAST_20261116 ── quote this slow → re-read the order first
 
 
 @dataclass
@@ -85,9 +86,12 @@ def drive_exit_order(executor, order_id: str, *, symbol: str, side: str,
     the book offers."""
     side = side.upper()
     oid = str(order_id)
-    fresh = fresh_fn if callable(fresh_fn) else getattr(
-        executor, ("fresh_buy_entry_limit" if side == "BUY"
-                   else "fresh_sell_entry_limit"), None)
+    # ── EXIT_REPEG_FAST_20261116 ── exit quotes first (time-capped)
+    fresh = fresh_fn if callable(fresh_fn) else (
+        getattr(executor, ("fresh_buy_exit_limit" if side == "BUY"
+                           else "fresh_sell_exit_limit"), None)
+        or getattr(executor, ("fresh_buy_entry_limit" if side == "BUY"
+                              else "fresh_sell_entry_limit"), None))
     modify = getattr(executor, "modify_order", None)
     if not repeg:                       # confirm-only (entries): wait, cancel, settle
         fresh = modify = None
@@ -114,10 +118,23 @@ def drive_exit_order(executor, order_id: str, *, symbol: str, side: str,
             last_repeg = clock()
             k += 1
             q = None
+            _tq = clock()
             try:
                 q = fresh(symbol)
             except Exception as e:
                 log(f"[EXIT_DRIVER][QUOTE_ERR] {symbol} {e}")
+            if clock() - _tq >= SLOW_QUOTE_S:
+                # ── EXIT_REPEG_FAST_20261116 ── a slow quote: the order may
+                # have filled meanwhile — read it before modifying it.
+                info = _read(executor, oid)
+                status = (info.get("status") or "").upper() or None
+                if status == "COMPLETE":
+                    return DriveResult("FILLED", oid, float(info.get("avg_price") or 0.0),
+                                       int(info.get("filled_qty") or 0), status)
+                if status in DEAD_STATUSES:
+                    return DriveResult("DEAD", oid, float(info.get("avg_price") or 0.0),
+                                       int(info.get("filled_qty") or 0), status,
+                                       str(info.get("status_message") or ""))
             if q:
                 base = float(q[0])
                 extra = min(step_pct * k, max_extra_pct)

@@ -104,6 +104,16 @@ CARRY_COMMIT_HM_S = (15, 40, 30)
 
 # Morning-close stuck-alert cadence (DA2)
 MORNING_ALERT_EVERY_S = 120
+# ── MORNING_ALERT_GRACE_20261116 ── the square-off sends shorts first, then
+# the wings, over several 2 s passes; "NOT complete" is only raised once it
+# has stayed incomplete this long (16 Nov: CRITICAL at 09:16:07, all three
+# legs flat by 09:16:15). Alert only — orders and their timing are unchanged.
+MORNING_ALERT_GRACE_S = 30
+# ── PREMARKET_0914_20261116 ── carried legs keep their stop GTTs at Kite
+# overnight; the pre-market teardown (first-candle rule) starts at 09:14,
+# not at the first poll after midnight. If the app or the machine is down
+# overnight the stops stay armed. Same value as ic_live_eod.PREMARKET_TEARDOWN_HM.
+PREMARKET_TEARDOWN_HM = "09:14"
 
 # Carry age policy (DA1)
 CARRY_ALARM_GAP_DAYS  = 3    # > this → extra CRITICAL (more than one night)
@@ -144,6 +154,7 @@ class ICEngine:
         # ── IC_V2 ── carry-morning bookkeeping
         self._premarket_clear_date: Optional[str] = None  # date GTTs verified gone
         self._last_morning_alert_ts: float = 0.0
+        self._morning_incomplete_since: Optional[datetime] = None  # MORNING_ALERT_GRACE_20261116
         self._entry_wait_logged_ts: float = 0.0
         self._retry_alert_date: Optional[str] = None   # entry-retry alert 1/day
         # ── IC_CARRY_FLAG_20260814 BEGIN ── session-rollover reconcile +
@@ -474,8 +485,10 @@ class ICEngine:
 
             if now < open_0915_dt:
                 # 1a. pre-market GTT teardown (retry until clear; idempotent)
+                #     from 09:14 only (PREMARKET_0914_20261116)
                 self.gm.set_carry_hold(True)
-                if self._premarket_clear_date != today:
+                if (now >= hm_to_dt(PREMARKET_TEARDOWN_HM, now)
+                        and self._premarket_clear_date != today):
                     try:
                         if self.gm.premarket_cancel_gtts():
                             self._premarket_clear_date = today
@@ -502,7 +515,11 @@ class ICEngine:
             self.gm.set_carry_hold(False)
             remaining = self.gm.morning_square_off()
             if remaining > 0:
-                if time.time() - self._last_morning_alert_ts >= MORNING_ALERT_EVERY_S:
+                if self._morning_incomplete_since is None:
+                    self._morning_incomplete_since = now
+                stuck_s = (now - self._morning_incomplete_since).total_seconds()
+                if (stuck_s >= MORNING_ALERT_GRACE_S and
+                        time.time() - self._last_morning_alert_ts >= MORNING_ALERT_EVERY_S):
                     self._last_morning_alert_ts = time.time()
                     record_alert("IC_MORNING_STUCK",
                                  f"{self.sid}: morning square-off retrying — "
@@ -519,6 +536,7 @@ class ICEngine:
                         pass
                 return MORNING_POLL_S
             # carry fully closed → normal day continues next iteration
+            self._morning_incomplete_since = None
             return MORNING_POLL_S
 
     # ── IC_CARRY_FLAG_20260814 BEGIN ──────────────────────────────────

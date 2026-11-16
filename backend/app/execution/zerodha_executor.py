@@ -939,6 +939,64 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 "ask" if q["ask"] > 0 else "ltp")
     # ── TSG_ENTRY_REPEG END (pricing helpers) ─────────
 
+    # ── EXIT_REPEG_FAST_20261116 ── DEF-033. The re-price of a resting EXIT
+    # order asked Kite for market depth with no time limit of its own; when
+    # the call hung (7 s client timeout) the exit driver stopped for 7 s and
+    # then modified an order that had already filled (16 Nov 09:16, Icarus
+    # 26350 CE wing). Exits now wait at most EXIT_QUOTE_CAP_S for depth, then
+    # re-price from a fresh live tick (no tick → this re-peg is skipped and
+    # the order keeps its limit). A depth answer inside the cap prices
+    # exactly as before. Entries keep fresh_*_entry_limit unchanged.
+    EXIT_QUOTE_CAP_S = 1.5
+
+    def _exit_quote(self, symbol: str) -> dict:
+        box: dict = {}
+        done = threading.Event()
+
+        def _run():
+            try:
+                box["q"] = self._resolve_entry_quote(symbol)
+            except Exception as e:                       # never raises to the exit path
+                box["err"] = e
+            finally:
+                done.set()
+
+        threading.Thread(target=_run, name=f"exit-quote-{symbol}", daemon=True).start()
+        if done.wait(self.EXIT_QUOTE_CAP_S) and box.get("q"):
+            return box["q"]
+        out = {"ltp": 0.0, "bid": 0.0, "ask": 0.0}
+        try:
+            r = LTPStore.get_with_timestamp(symbol)
+            if r and r[0] and float(r[0]) > 0 and (time.time() - float(r[1])) <= self.EXIT_TICK_FRESH_S:
+                out["ltp"] = float(r[0])
+        except Exception:
+            pass
+        write_audit_log(f"[ZERODHA][EXIT_QUOTE] {symbol}: depth call over "
+                        f"{self.EXIT_QUOTE_CAP_S:.1f}s — "
+                        + (f"re-priced from the live tick {out['ltp']}" if out["ltp"] > 0
+                           else "no fresh tick, limit kept this round"))
+        return out
+
+    def fresh_sell_exit_limit(self, symbol: str):
+        """Re-peg price for a working SELL exit: as fresh_sell_entry_limit,
+        never waiting on a hung depth call."""
+        q = self._exit_quote(symbol)
+        ref = q["bid"] if q["bid"] > 0 else q["ltp"]
+        if ref <= 0:
+            return None
+        return (self._entry_limit_price(ref, "SELL"), ref,
+                "bid" if q["bid"] > 0 else "ltp")
+
+    def fresh_buy_exit_limit(self, symbol: str):
+        """Re-peg price for a working BUY exit (short buy-back)."""
+        q = self._exit_quote(symbol)
+        ref = q["ask"] if q["ask"] > 0 else q["ltp"]
+        if ref <= 0:
+            return None
+        return (self._entry_limit_price(ref, "BUY"), ref,
+                "ask" if q["ask"] > 0 else "ltp")
+    # ── EXIT_REPEG_FAST_20261116 END ──
+
     # ── EXIT_PRICE_FAST_20261115 ── exits are priced off a FRESH live tick when
     # there is one (no REST round trip at all), else REST as before. A REST
     # call that HANGS (Kite's client times out after 7 s) is not retried for
@@ -1292,8 +1350,13 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         tp_price: float,
         last_price: float = None,
         direction: str = "LONG",   # "LONG" (BB/HA) or "SHORT" (SCALP_V1)
+        limit_buffer: Optional[float] = None,   # ── OCO_STOP_BUFFER_20261116 ──
     ) -> str:
         """
+        limit_buffer (DEF-035): stop-leg limit multiplier as in
+        place_gtt_sl_only_short/long (1.05 = 5%). None = the historical 0.5%
+        (every caller except Icarus). The target leg is never changed.
+
         LONG  (default - BB/HA unchanged):
           trigger_values = [sl_lower, tp_upper]
           orders = SELL at sl_limit + SELL at tp_limit
@@ -1335,6 +1398,8 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 raise RuntimeError(f"GTT_INVALID_SL SL={sl_trigger}")
 
             sl_limit = r(sl_price * 0.995)
+            if limit_buffer:                      # ── OCO_STOP_BUFFER_20261116 ──
+                sl_limit = r(max(0.05, sl_trigger / max(1.0, float(limit_buffer))))
 
             if tp_trigger:
                 if not (sl_trigger < safe_last_price < tp_trigger):
@@ -1406,6 +1471,8 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             #             SL limit slightly above trigger (must fill fast on stop)
             tp_limit = r(tp_trigger * 1.003)
             sl_limit = r(sl_trigger * 1.005)
+            if limit_buffer:                      # ── OCO_STOP_BUFFER_20261116 ──
+                sl_limit = r(sl_trigger * max(1.0, float(limit_buffer)))
 
             gtt_params = dict(
                 trigger_type=kite.GTT_TYPE_OCO,

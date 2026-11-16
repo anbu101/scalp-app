@@ -40,6 +40,9 @@ from app.event_bus.inapp_events import record_alert
 _IST = timezone(timedelta(minutes=330))
 _WAIT_POLL_S = 5
 _MAX_WAIT_S  = 15 * 60      # sanity cap: never block a scheduler thread longer
+# ── PREMARKET_0914_20261116 ── overnight stop GTTs stay armed until 09:14
+# (same value as ic_engine.PREMARKET_TEARDOWN_HM).
+PREMARKET_TEARDOWN_HM = "09:14"
 
 
 def _now():
@@ -170,7 +173,7 @@ def ic_morning_job(*, sleep_fn=time.sleep, now_fn=_now):
     if not is_trading_day():
         write_audit_log("[IC_MORNING] non-trading day — no-op")
         return
-    """09:08 IST cron. Carry-morning scheduled primary (engine = backstop).
+    """09:08 IST cron (teardown from 09:14). Carry-morning scheduled primary (engine = backstop).
     Structurally a no-op for EOD-mode instances (they never carry)."""
     try:
         carriers = [(sid, gm, cfg) for sid, gm, cfg in _instances()
@@ -183,6 +186,13 @@ def ic_morning_job(*, sleep_fn=time.sleep, now_fn=_now):
         for sid, gm, cfg in carriers:
             try:
                 next_open_hm = cfg.get("next_open_time", "09:16")
+
+                # 0) overnight stops stay armed until 09:14 (PREMARKET_0914)
+                start = _hm_deadline(PREMARKET_TEARDOWN_HM, now_fn)
+                waited = 0
+                while now_fn() < start and waited < _MAX_WAIT_S:
+                    sleep_fn(_WAIT_POLL_S)
+                    waited += _WAIT_POLL_S
 
                 # 1) pre-market GTT teardown (retry to the 09:15 boundary)
                 boundary = _hm_deadline("09:15", now_fn)

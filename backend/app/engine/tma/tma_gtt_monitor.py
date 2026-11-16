@@ -166,7 +166,8 @@ class TMAGTTMonitor:
                     continue
                 if st:                                # working
                     self._escalate(gid, sell, oid,
-                                   f"GTT triggered, order {oid} {st} unfilled")
+                                   f"GTT triggered, order {oid} {st} unfilled",
+                                   working=True)     # ── GTT_WORKING_WARN_20261116 ──
                     return
             # ── GTT_UNFILLED_ESCALATION_20261026 END ──
             price, oid = self._resolve_fill(gtt, sell)   # ── FILL_TRUTH_TMA_20261102 ──
@@ -220,16 +221,27 @@ class TMAGTTMonitor:
                                            reason="BROKER_EXIT")
 
     # ------------------------------------------------------------------
-    def _escalate(self, gid, sell, stale_oid, why: str) -> None:
+    def _escalate(self, gid, sell, stale_oid, why: str, working: bool = False) -> None:
         self._pending.pop(gid, None)
         write_audit_log(f"[TMA_GTT_MONITOR][ESCALATE] {sell['symbol']} gtt={gid} "
                         f"{why} → manager drives the exit (order={stale_oid})")
+        # ── GTT_WORKING_WARN_20261116 ── DEF-036. The stop's own order is still
+        # WORKING (16 Nov 09:15:01, 1 s after a gap-up open triggered it; it
+        # filled at 09:15:07): the app takes it over at once, as before, but
+        # that is a WARNING. The exit state machine sends the CRITICAL if the
+        # buy-back cannot complete. A dead order / no order stays CRITICAL.
+        if working:
+            msg = (f"TMA_V1: SL GTT on {sell['symbol']} triggered; its buy-back order "
+                   f"{stale_oid} has not filled yet (price past its limit). The app has "
+                   f"taken it over and is re-pricing it. A CRITICAL alert follows only if "
+                   f"the buy-back cannot complete.")
+        else:
+            msg = (f"TMA_V1: SL GTT on {sell['symbol']} triggered but did NOT "
+                   f"fill ({why}). App is now driving the buy-back.")
         try:
             from app.api.telegram_api import notify_critical
-            notify_critical({"message":
-                f"TMA_V1: SL GTT on {sell['symbol']} triggered but did NOT "
-                f"fill ({why}). App is now driving the buy-back.",
-                "severity": "error"})
+            notify_critical({"message": msg,
+                "severity": "warning" if working else "error"})
         except Exception:
             pass
         fn = getattr(self.manager, "escalate_unfilled_gtt", None)

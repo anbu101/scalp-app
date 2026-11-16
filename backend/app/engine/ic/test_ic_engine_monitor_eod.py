@@ -394,7 +394,9 @@ def test_et6_carry_morning_premarket_and_hold():
     _Cfg.strategy = _v2cfg()
     gm = SpyGM(); gm.opened = True; gm.carried = True
     e = ENG.ICEngine(gm, SpyBroker())
-    e._step(T("09:00"))                       # pre-market → teardown attempted
+    e._step(T("09:00"))                       # PREMARKET_0914: stops stay armed
+    assert gm.premarket_calls == 0
+    e._step(T("09:14"))                       # 09:14 → teardown attempted
     assert gm.premarket_calls == 1
     assert e._premarket_clear_date is not None
     e._step(T("09:15", 30))                   # first candle → HOLD, no exits
@@ -481,6 +483,55 @@ def test_mo1_morning_job_full_cycle():
     assert clock["now"] >= T("09:16")
 
 
+# ── PREMARKET_0914_20261116 ── overnight stops stay armed until 09:14 ───────
+def test_et6d_no_teardown_before_0914():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True; gm.carried = True
+    e = ENG.ICEngine(gm, SpyBroker())
+    for hm, s in (("00:01", 0), ("04:30", 0), ("09:08", 0), ("09:13", 59)):
+        e._step(T(hm, s))
+    assert gm.premarket_calls == 0            # midnight → 09:13:59: GTTs kept
+    assert gm.morning_calls == 0 and gm.squared == 0
+    e._step(T("09:14", 3))
+    assert gm.premarket_calls == 1
+
+
+def test_et6e_late_boot_in_first_candle_tears_down_no_exit():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True; gm.carried = True
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._step(T("09:15", 30))                   # app (or Kite login) at 09:15:30
+    assert gm.premarket_calls == 1            # teardown still attempted
+    assert gm.morning_calls == 0 and gm.squared == 0   # nothing exits before 09:16
+    e._step(T("09:16", 1))
+    assert gm.morning_calls == 1
+
+
+def test_et6f_late_boot_after_open_squares_off_at_once():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True; gm.carried = True
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._step(T("09:25"))                       # app starts 09:25
+    assert gm.morning_calls == 1 and not gm.carried   # square-off handles the GTTs
+
+
+def test_mo1b_morning_job_teardown_not_before_0914():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True; gm.carried = True
+    _install_gm(gm)
+    clock = {"now": T("09:08")}
+    seen = []
+    real = gm.premarket_cancel_gtts
+    def spy():
+        seen.append(clock["now"]); return real()
+    gm.premarket_cancel_gtts = spy
+    def now_fn(): return clock["now"]
+    def sleep_fn(s): clock["now"] = clock["now"] + timedelta(seconds=s)
+    EOD.ic_morning_job(sleep_fn=sleep_fn, now_fn=now_fn)
+    assert seen and min(seen) >= T("09:14") and min(seen) < T("09:15")
+    assert gm.morning_calls == 1 and clock["now"] >= T("09:16")
+
+
 def test_mo2_morning_job_noop_without_carry():
     _Cfg.strategy = _v2cfg()
     gm = SpyGM()
@@ -545,7 +596,9 @@ def test_et10b_next_day_machine_fires():
     gm = SpyGM(); gm.opened = True; gm.carried = True; gm.committed = True
     gm.carry_ed = "2026-07-05"                        # entered a PRIOR day
     e = ENG.ICEngine(gm, SpyBroker())
-    e._step(T("09:00"))                               # pre-market teardown
+    e._step(T("09:00"))                               # PREMARKET_0914: not yet
+    assert gm.premarket_calls == 0
+    e._step(T("09:14"))                               # pre-market teardown
     assert gm.premarket_calls == 1
     e._step(T("09:16", 10))                           # sole exit executor
     assert gm.morning_calls == 1 and not gm.carried
@@ -605,6 +658,36 @@ def test_et12c_carry_file_wins_over_session():
     assert getattr(gm, "session_restores", []) == []        # never consulted
     assert not ic_carry_store.session_exists(TEST_SID)              # superseded+cleared
     ic_carry_store.clear_carry(TEST_SID)
+
+
+# ── MORNING_ALERT_GRACE_20261116 ── 16 Nov live: "09:16 square-off NOT
+# complete" fired at 09:16:07 while the last wing was still being closed
+# (all flat by 09:16:15). The CRITICAL waits until the close has stayed
+# incomplete for MORNING_ALERT_GRACE_S; the retry cadence is unchanged.
+def test_et7b_morning_alert_waits_for_grace():
+    _Cfg.strategy = _v2cfg()
+    ALERTS.clear()
+    gm = SpyGM(); gm.opened = True; gm.carried = True
+    gm.morning_remaining = 1
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._step(T("09:16", 2)); e._step(T("09:16", 7)); e._step(T("09:16", 15))
+    assert gm.morning_calls == 3                 # every pass still retries
+    assert "IC_MORNING_STUCK" not in ALERTS      # 13 s in: no alarm yet
+    e._step(T("09:16", 32))
+    assert ALERTS.count("IC_MORNING_STUCK") == 1  # stuck 30 s → loud
+
+
+def test_et7c_morning_close_done_inside_grace_is_silent():
+    _Cfg.strategy = _v2cfg()
+    ALERTS.clear()
+    gm = SpyGM(); gm.opened = True; gm.carried = True
+    gm.morning_remaining = 1
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._step(T("09:16", 2)); e._step(T("09:16", 7))
+    gm.morning_remaining = 0
+    e._step(T("09:16", 15))                       # the 16 Nov sequence
+    assert "IC_MORNING_STUCK" not in ALERTS
+    assert e._morning_incomplete_since is None
 
 
 if __name__ == "__main__":

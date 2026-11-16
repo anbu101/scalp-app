@@ -342,12 +342,57 @@ def test_gtt_triggered_unfilled_escalates():
     br.gtts = [{"id": "G1", "status": "triggered",
                 "orders": [{"result": {"order_result": {"order_id": "GTTORD"}}}]}]
     mon = V["Monitor"](br, m)
+    sent = _tg_capture()
     mon._sweep()
     buys = [o for o in br.orders if o["tradingsymbol"] == SHORT]
     check("D: monitor did NOT hand off as flat; adopted the GTT order",
           len(buys) == 1 and buys[0]["status"] == "COMPLETE", str(buys))
     check("D: hedge sold only after the short filled; group closed",
           br.net.get(SHORT) == 0 and br.net.get(HEDGE) == 0 and m.group is None)
+    # ── GTT_WORKING_WARN_20261116 ── DEF-036: the stop's order still working →
+    # taken over at once (as before) but announced as a WARNING, not CRITICAL.
+    esc = [d for d in sent if "SL GTT on" in str(d.get("message"))]
+    check("D: working stop order → one WARNING ('has not filled yet'), no CRITICAL",
+          len(esc) == 1 and esc[0].get("severity") == "warning"
+          and "has not filled yet" in esc[0]["message"] and "GTTORD" in esc[0]["message"]
+          and not [c for c in CRIT if "NOT FILLED" in c], f"{sent} {CRIT}")
+
+
+def test_gtt_triggered_dead_order_stays_critical():
+    # ── GTT_WORKING_WARN_20261116 ── the stop's order was REJECTED, short open:
+    # nothing protects it — still a CRITICAL, and the app still buys back.
+    m, br, clock, db = _setup(lambda s, e: 209.0 if s == SHORT else 5.1)
+    m.group["sell"]["gtt_id"] = "G1"
+    br.orders.append(dict(order_id="GTTORD", tradingsymbol=SHORT,
+                          transaction_type="BUY", quantity=65, price=179.55,
+                          status="REJECTED", filled_quantity=0, pending_quantity=0,
+                          average_price=0.0, status_message="RMS: margin"))
+    br.gtts = [{"id": "G1", "status": "triggered",
+                "orders": [{"result": {"order_result": {"order_id": "GTTORD"}}}]}]
+    mon = V["Monitor"](br, m)
+    sent = _tg_capture()
+    mon._sweep()
+    esc = [d for d in sent if "SL GTT on" in str(d.get("message"))]
+    check("D2: rejected stop order → CRITICAL (severity error, 'did NOT fill')",
+          len(esc) == 1 and esc[0].get("severity") == "error" and "did NOT" in esc[0]["message"],
+          str(sent))
+    check("D2: the app bought the short back once; group closed",
+          br.net.get(SHORT) == 0 and m.group is None
+          and len([o for o in br.orders if o["tradingsymbol"] == SHORT and o["status"] == "COMPLETE"]) == 1,
+          str([o for o in br.orders if o["tradingsymbol"] == SHORT]))
+
+
+def _tg_capture():
+    import importlib
+    try:
+        tg = importlib.import_module("app.api.telegram_api")
+    except Exception:
+        import types
+        tg = types.ModuleType("app.api.telegram_api")
+        sys.modules["app.api.telegram_api"] = tg
+    sent = []
+    tg.notify_critical = lambda d: sent.append(dict(d))
+    return sent
 
 
 def test_recon_flags_stray_fill():
@@ -395,6 +440,7 @@ ALL_TESTS = (test_repeg_fills_then_hedge,
              test_stuck_keeps_hedge_then_manual_flatten,
              test_unconfirmed_cancel_never_doubles,
              test_gtt_triggered_unfilled_escalates,
+             test_gtt_triggered_dead_order_stays_critical,
              test_recon_flags_stray_fill, test_router_forwards)
 
 

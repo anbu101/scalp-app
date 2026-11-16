@@ -329,6 +329,18 @@ class ICGroupManager:
     def _freeze_qty(self, cfg) -> int:
         return int(cfg.get("freeze_qty", 1800))
 
+    def _place_oco(self, **kw):
+        """── OCO_STOP_BUFFER_20261116 ── DEF-035: the stop leg of a stop+target
+        GTT uses the configured buffer. An executor that does not take
+        limit_buffer (other brokers, older fakes) places it as before."""
+        try:
+            return self.executor.place_gtt_oco(**kw)
+        except TypeError as e:
+            if "limit_buffer" not in str(e) or "limit_buffer" not in kw:
+                raise
+            kw.pop("limit_buffer")
+            return self.executor.place_gtt_oco(**kw)
+
     def _gtt_buffer(self, cfg) -> float:
         """SL-GTT limit buffer multiplier (gap defence layer 1). Default 5%
         — the pre-amendment 0.3% factor fails on any fast move."""
@@ -913,10 +925,11 @@ class ICGroupManager:
             gid = None
             try:
                 if leg.tp and leg.tp > 0:
-                    gid = self.executor.place_gtt_oco(
+                    gid = self._place_oco(
                         symbol=leg.symbol, qty=chunk,
                         sl_price=leg.sl, tp_price=leg.tp,
                         direction="SHORT",
+                        limit_buffer=buf,          # ── OCO_STOP_BUFFER_20261116 ── DEF-035
                     )
                 else:
                     gid = self.executor.place_gtt_sl_only_short(
@@ -942,9 +955,10 @@ class ICGroupManager:
             gid = None
             try:
                 if leg.sl and leg.tp:
-                    gid = self.executor.place_gtt_oco(
+                    gid = self._place_oco(
                         symbol=leg.symbol, qty=chunk,
                         sl_price=leg.sl, tp_price=leg.tp,
+                        limit_buffer=buf,          # ── OCO_STOP_BUFFER_20261116 ── DEF-035
                     )
                 elif leg.sl:
                     gid = self.executor.place_gtt_sl_only_long(
@@ -1872,12 +1886,37 @@ class ICGroupManager:
                 rt["gtt_ids"] = []
                 continue
             for gid in list(rt.get("gtt_ids") or []):
+                # ── PREMARKET_FIRED_KEEP_20261116 ── from 09:15 (late boot,
+                # late Kite login, a retry after a failed 09:14 teardown) the
+                # stop may already have FIRED. A verified "cancel" reports a
+                # triggered GTT as gone; forgetting its id made the 09:16
+                # square-off buy the short back a second time — on a shared
+                # strike from the other strategy's short. A fired GTT is
+                # kept on the leg: nothing is armed, and the square-off's
+                # flatten adopts its order / books its fill.
+                try:
+                    st0 = self.executor.get_gtt_status(gid)
+                except Exception:
+                    st0 = None
+                if st0 == "triggered":
+                    write_audit_log(f"[IC][{self.strategy_id}][PREMARKET][FIRED] gtt={gid} on "
+                                    f"{leg.symbol} already triggered — kept for the square-off")
+                    continue
                 gone = False
                 try:
                     gone = self.executor.cancel_gtt_verified(gid)
                 except Exception as e:
                     write_audit_log(f"[IC][{self.strategy_id}][PREMARKET][CANCEL_ERR] gtt={gid} {e}")
                 if gone:
+                    last = None
+                    try:
+                        last = getattr(self.executor, "gtt_last_state", lambda _g: None)(gid)
+                    except Exception:
+                        last = None
+                    if last == "triggered":      # fired between the read and the cancel
+                        write_audit_log(f"[IC][{self.strategy_id}][PREMARKET][FIRED] gtt={gid} on "
+                                        f"{leg.symbol} triggered during the cancel — kept for the square-off")
+                        continue
                     rt["gtt_ids"].remove(gid)
                 else:
                     all_clear = False
@@ -2226,6 +2265,7 @@ class ICGroupManager:
             rt["exit_working"].remove(oid)
             if r.filled_qty > 0 and r.avg_price > 0:
                 rt.setdefault("exit_fills", []).append((r.filled_qty, r.avg_price))
+                rt.setdefault("exit_fill_oids", []).append(str(oid))   # EXIT_OID_SAVE_20261116
         if rt.get("exit_fills"):
             # ── BROKER_TRUTH_20261114 ── our own fills for the whole leg ARE
             # the exit, whatever the net position reads (another strategy
@@ -2340,8 +2380,10 @@ class ICGroupManager:
             working.remove(str(oid))
             if r.filled and r.avg_price > 0:          # COMPLETE ⇒ whole slice
                 fills.append((r.filled_qty or int(chunk), r.avg_price))
+                rt.setdefault("exit_fill_oids", []).append(str(oid))   # EXIT_OID_SAVE_20261116
             elif r.filled_qty > 0 and r.avg_price > 0:
                 fills.append((r.filled_qty, r.avg_price))
+                rt.setdefault("exit_fill_oids", []).append(str(oid))   # EXIT_OID_SAVE_20261116
             if not r.filled:
                 break                      # stop placing; broker truth decides
         filled_all = sum(q for q, _ in fills) >= sum(int(c) for c in rt["slices"]) \
@@ -2391,6 +2433,12 @@ class ICGroupManager:
         q = sum(f[0] for f in fills)
         px = (sum(f[0] * f[1] for f in fills) / q) if q > 0 else \
             self._last_fill_px(leg.symbol, "BUY" if leg.is_short else "SELL", leg=leg)
+        # ── EXIT_OID_SAVE_20261116 ── DEF-034: the orders that filled this
+        # exit are saved with the close (the 16 Nov 09:16 square-off rows had
+        # no exit order id). Our own filled orders win over a looked-up one.
+        _oids = list(dict.fromkeys(rt.pop("exit_fill_oids", None) or []))
+        if _oids:
+            rt["exit_order_id"] = ",".join(_oids)
         rt["exit_fills"], rt["exit_working"] = [], []
         rt.pop("exit_retry_at", None)
         if rt.pop("exit_alerted_at", None):
