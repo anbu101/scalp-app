@@ -46,7 +46,7 @@ def wait_for(fn, timeout=12.0):
     return False
 
 
-def open_dash(browser, width=1470, height=1400, theme="dark"):
+def open_dash(browser, width=1470, height=1400, theme="dark", fleet=None):
     SET.parent.mkdir(parents=True, exist_ok=True)
     SET.write_text(json.dumps({"dashboard_layout": "modern", "theme": theme}))
     ctx = browser.new_context(viewport={"width": width, "height": height}, timezone_id="Asia/Kolkata")
@@ -55,11 +55,11 @@ def open_dash(browser, width=1470, height=1400, theme="dark"):
     pg.on("pageerror", lambda e: pg._errors.append(str(e)[:300]))
     pg.clock.set_fixed_time("2026-11-17T13:05:00+05:30")
     pg.add_init_script("localStorage.clear();localStorage.setItem('scalp.strategyHost.focusId','IC_V2')")
-    pg.route("**/api/fleet/today", lambda r: r.fulfill(json=FLEET))
+    pg.route("**/api/fleet/today", lambda r: r.fulfill(json=fleet or FLEET))
     pg.route("**/system/license", lambda r: r.fulfill(json=dict(U.LICENSE, status="VALID")))
     pg.route("**/api/replay/**", lambda r: r.fulfill(status=404, json={"detail": "no trade"}))
     pg.goto(BASE, wait_until="domcontentloaded")
-    wait_for(lambda: pg.locator(".flb-row, .flm-card").count() >= 6, 30)
+    wait_for(lambda: pg.locator(".flb-row, .flm-card").count() >= len((fleet or FLEET)["strategies"]), 30)
     time.sleep(1.5)
     return ctx, pg
 
@@ -80,7 +80,8 @@ AUDIT = """
     if (cs.backgroundImage !== 'none') bad.push('gradient/image: ' + el.tagName);
     if (cs.boxShadow !== 'none' && !cs.boxShadow.includes('inset')) bad.push('shadow: ' + el.tagName + ' ' + cs.boxShadow);
     const bg = cs.backgroundColor;
-    if (bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent' && el.getAttribute('role') !== 'switch') bad.push('fill: ' + el.tagName + ' ' + bg + ' ' + (el.textContent||'').trim().slice(0,20));
+    // the strategy colour tick beside a name (NAME_ACCENT_20261117) is the one allowed fill: identity, not decoration
+    if (bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent' && el.getAttribute('role') !== 'switch' && !el.hasAttribute('data-accent')) bad.push('fill: ' + el.tagName + ' ' + bg + ' ' + (el.textContent||'').trim().slice(0,20));
     [...el.children].forEach(walk);
   };
   parts.forEach(walk);
@@ -184,6 +185,51 @@ with sync_playwright() as p:
         ctx.close()
     check("TC-DSYS-0014", all(v[1] and v[2] for v in seen.values()) and len({v[0] for v in seen.values()}) >= 3,
           f"every theme: text stays inside its own 4 text tokens, no fills; ink differs by theme ({ {k: v[0] for k, v in seen.items()} })")
+
+    # ── BOOK_STRIP_20261117 ── a Paper-only day: one book → hero | facts | Traded today on one row
+    import copy
+    paper = copy.deepcopy(FLEET)
+    paper["strategies"] = [r for r in paper["strategies"] if r["book"] != "LIVE"]
+    paper["totals"]["LIVE"] = dict(paper["totals"]["LIVE"], rows=0)
+    paper["paths"] = {"PAPER": paper["paths"]["PAPER"]}
+    GEO = """(() => { const c = document.querySelector('[data-dash-part=books]'), r = c.getBoundingClientRect();
+      const hero = c.querySelector('[data-book] > div'), facts = c.querySelector('[data-dash-part=facts]');
+      const tt = [...c.querySelectorAll('div')].find(d => d.textContent.trim().toLowerCase() === 'traded today');
+      const box = (e) => e ? e.getBoundingClientRect() : null, [h, f, t] = [box(hero), box(facts), box(tt)];
+      return { layout: c.dataset.layout || null, height: Math.round(r.height), right: Math.round(r.right),
+        tops: [h, f, t].map(b => b && Math.round(b.top + b.height / 2)), ttRight: t && Math.round(t.right),
+        factsW: f && Math.round(f.width), doc: document.documentElement.scrollWidth, vw: innerWidth }; })()"""
+    strip = {}
+    for w in (1210, 1470, 1920):
+        ctx, pg = open_dash(browser, width=w, fleet=paper)
+        strip[w] = pg.evaluate(GEO)
+        errs += pg._errors
+        ctx.close()
+    ok = all(g["layout"] == "strip" and g["height"] <= 180 and g["doc"] <= g["vw"] for g in strip.values())
+    check("TC-DSYS-0016", ok, f"Paper only: one strip card ≤180px tall at 1210/1470/1920, no sideways scroll ({ {w: g['height'] for w, g in strip.items()} }; was 187)")
+    one_row = all(None not in g["tops"] and max(g["tops"]) - min(g["tops"]) <= 24 for g in strip.values())
+    check("TC-DSYS-0017", one_row and all(g["right"] - g["ttRight"] <= 48 for g in strip.values()) and all(g["factsW"] <= 760 for g in strip.values()),
+          f"hero, facts and Traded today share one row; Traded today keeps the right edge; facts ≤720px wide ({ {w: g['tops'] for w, g in strip.items()} })")
+    ctx, pg = open_dash(browser, width=1470)
+    two = pg.evaluate(GEO)
+    ctx.close()
+    check("TC-DSYS-0018", two["layout"] is None and two["height"] > strip[1470]["height"] + 30, f"Live + Paper: the two side-by-side blocks stay ({two['height']}px)")
+    # ── NAME_ACCENT_20261117 ── each name in Traded today carries its strategy colour (and only the name)
+    ctx, pg = open_dash(browser, width=1470)
+    ticks = pg.evaluate("""[...document.querySelectorAll('.flb-row')].map(r => { const i = r.querySelector('td:first-child [data-accent]');
+      return { c: i && getComputedStyle(i).backgroundColor, n: r.querySelectorAll('[data-accent]').length,
+               spark: [...r.querySelectorAll('svg path')].map(p => getComputedStyle(p).stroke) }; })""")
+    line = pg.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--c-border-light').trim()")
+    ctx.close()
+    cols = [t["c"] for t in ticks]
+    check("TC-DSYS-0019", len(ticks) == 6 and all(t["n"] == 1 for t in ticks) and len(set(cols)) >= 4
+          and not any(t["c"] in t["spark"] for t in ticks),
+          f"desktop: one colour tick per strategy name, {len(set(cols))} distinct colours; sparks keep their sign colour")
+    ctx, pg = open_dash(browser, width=390, height=844)
+    ph = pg.evaluate("[...document.querySelectorAll('.flm-card')].map(c => c.querySelectorAll('[data-accent]').length)")
+    errs += pg._errors
+    ctx.close()
+    check("TC-DSYS-0020", len(ph) == 6 and all(n == 1 for n in ph), f"phone: each Traded today card names its strategy with its colour ({ph})")
 
     check("TC-DSYS-0015", not errs, f"no page errors ({errs[:2]})")
     browser.close()

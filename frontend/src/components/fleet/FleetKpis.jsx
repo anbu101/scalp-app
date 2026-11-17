@@ -22,10 +22,15 @@ function Fact({ label, title, children }) {
   );
 }
 
-function Book({ book, label, t, compact }) {
+// ── BOOK_STRIP_20261117 ── one book on a desktop (Paper only, or Live only): the hero, the
+// facts and Traded today read left to right as ONE strip at their natural widths, each part
+// after a hairline, instead of the hero alone over a 5-column facts row stretched across the
+// card (a half-empty card, ~300 px tall). Two books keep the side-by-side blocks.
+function Book({ book, label, t, compact, strip = false }) {
   const peakTitle = t.peak != null ? `peak ${fmtInr(t.peak)}${t.peak_min != null ? ` at ${hhmm(t.peak_min)}` : ""}` : undefined;
   return (
-    <div data-book={book} style={{ minWidth: 0 }}>
+    <div data-book={book} style={strip ? { minWidth: 0, display: "contents" } : { minWidth: 0 }}>
+      <div style={{ minWidth: 0 }}>   {/* ── BOOK_STRIP_20261117 ── hero block */}
       <div style={{ display: "flex", alignItems: "center", gap: SPACE.sm, height: 20 }}>   {/* fixed: LIVE's box must not shift the row */}
         {book === "LIVE" ? <span style={liveTag}>LIVE</span> : <span style={CAPS}>{label}</span>}
         <span style={{ ...TYPE.meta, color: COLOR.muted }}>MTM today</span>
@@ -38,8 +43,13 @@ function Book({ book, label, t, compact }) {
         {" · "}unrealised <span style={{ ...NUM, color: COLOR.ink }}>{fmtInr(t.unrealised)}</span>
         {t.marks_stale > 0 && t.mark_asof ? ` · marks as of ${asOf(t)}` : ""}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: compact ? "repeat(3, minmax(0, 1fr))" : "repeat(5, minmax(0, 1fr))",
-        gap: `${SPACE.md}px ${SPACE.lg}px`, marginTop: SPACE.lg }}>
+      </div>
+      <div data-dash-part="facts" style={strip
+        ? { display: "flex", flexWrap: "wrap", alignItems: "center", alignContent: "center", justifyContent: "space-between",
+            gap: `${SPACE.md}px ${SPACE.xxl}px`, maxWidth: 720, borderLeft: `1px solid ${COLOR.line}`, paddingLeft: SPACE.xl,
+            alignSelf: "stretch", minWidth: 0 }
+        : { display: "grid", gridTemplateColumns: compact ? "repeat(3, minmax(0, 1fr))" : "repeat(5, minmax(0, 1fr))",
+            gap: `${SPACE.md}px ${SPACE.lg}px`, marginTop: SPACE.lg }}>
         <Fact label="Net">{fmtInr(t.net)}</Fact>
         <Fact label="From peak" title={peakTitle}>{t.peak == null ? "—" : fmtInr((t.gross ?? 0) - t.peak)}</Fact>
         <Fact label="Charges">₹{Math.round(t.charges || 0).toLocaleString("en-IN")}</Fact>
@@ -70,12 +80,16 @@ export default function FleetKpis({ totals, active, fleet, nowMin, compact = fal
       <div style={{ ...TYPE.meta, color: COLOR.muted, whiteSpace: "nowrap" }}>{session}</div>
     </div>
   );
+  const strip = !compact && books.length === 1;   // ── BOOK_STRIP_20261117 ── hero | facts | Traded today
   return (
-    <div data-testid="dash-books" data-dash-part="books" style={{ ...(compact ? CARD_COMPACT : CARD), fontFamily: "var(--c-font-ui)",
-      display: "grid", gap: compact ? SPACE.xl : SPACE.xxl,
-      gridTemplateColumns: compact ? "minmax(0, 1fr)" : `repeat(${Math.max(1, books.length)}, minmax(0, 1fr)) auto` }}>
+    <div data-testid="dash-books" data-dash-part="books" data-layout={strip ? "strip" : undefined}
+      style={{ ...(compact ? CARD_COMPACT : CARD), fontFamily: "var(--c-font-ui)",
+      display: "grid", gap: compact ? SPACE.xl : SPACE.xxl, alignItems: strip ? "center" : undefined,
+      gridTemplateColumns: compact ? "minmax(0, 1fr)"
+        : strip ? "max-content minmax(0, 1fr) max-content"   // Traded today keeps the right edge, as with two books
+        : `repeat(${Math.max(1, books.length)}, minmax(0, 1fr)) auto` }}>
       {note && <div style={{ ...TYPE.body, color: COLOR.muted, alignSelf: "center" }}>{note}</div>}
-      {books.map(([k, label]) => <Book key={k} book={k} label={label} t={totals[k]} compact={compact} />)}
+      {books.map(([k, label]) => <Book key={k} book={k} label={label} t={totals[k]} compact={compact} strip={strip} />)}
       <div style={compact ? { borderTop: `1px solid ${COLOR.line}`, paddingTop: SPACE.lg }
         : { borderLeft: `1px solid ${COLOR.line}`, paddingLeft: SPACE.xl, alignSelf: "stretch", display: "flex", alignItems: "center" }}>
         {traded}

@@ -56,6 +56,13 @@ function rowTitle(r) {
   return `${p.join(" · ")} — click to focus its panel`;
 }
 
+// ── NAME_ACCENT_20261117 ── each strategy's own colour back beside its name in Traded today
+// (the same accent as its Fleet MTM line, Settings rail and panel). The name only: figures,
+// state and spark stay on the dash tokens.
+function Accent({ c }) {
+  return <i aria-hidden="true" data-accent="" style={{ width: 3, height: 16, borderRadius: 2, flexShrink: 0, display: "inline-block", background: c || COLOR.line }} />;
+}
+
 function BookCell({ book }) {
   return book === "LIVE" ? <span style={liveTag}>LIVE</span>
     : <span style={{ ...TYPE.meta, color: COLOR.muted }}>{bookLabel(book)}</span>;
@@ -111,6 +118,7 @@ function FleetCards({ rows, idle, focusId, onFocus, isAdminUi, meta }) {
               style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: `${SPACE.xs}px ${SPACE.md}px`, width: "100%", textAlign: "left",
                 padding: SPACE.md, background: "transparent", border: `1px solid ${COLOR.line}`, borderRadius: 8, font: "inherit", color: COLOR.ink }}>
               <span style={{ display: "flex", alignItems: "center", gap: SPACE.sm, minWidth: 0 }}>
+                <Accent c={meta?.[r.id]?.accent} />   {/* ── NAME_ACCENT_20261117 ── */}
                 <span style={{ ...TYPE.body, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{name(r.id)}</span>
                 <BookCell book={r.book} />
               </span>
@@ -176,6 +184,7 @@ export default function FleetBlotter({ rows, idle, focusId, onFocus, isAdminUi, 
               <tr key={r.key} className="flb-row" aria-current={focusId === r.id ? "true" : undefined} title={rowTitle(r)} onClick={() => onFocus && onFocus(r.id)}>
                 <td style={{ ...TD, ...LEFT }}>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: SPACE.sm, maxWidth: "100%" }}>
+                    <Accent c={meta?.[r.id]?.accent} />   {/* ── NAME_ACCENT_20261117 ── */}
                     <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{name(r.id)}</span>
                     {isAdminUi && <span style={{ ...TYPE.meta, color: COLOR.muted }}>{r.id}</span>}
                     <ReplayLaunch q={{ strategy: r.id, book: r.book }} title={`Replay ${name(r.id)} — open position or latest trade`} style={QUIET_REPLAY} />

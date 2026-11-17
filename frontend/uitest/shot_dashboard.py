@@ -4,6 +4,8 @@ dash_fixture data, clock fixed at 13:05 IST.  Usage:
     PYTHONPATH=../backend python3 uitest/shot_dashboard.py OUT_PREFIX
 Writes OUT_PREFIX-desktop.png (1470 wide), OUT_PREFIX-phone.png (390 wide) and
 OUT_PREFIX-metrics.json (font sizes / colours actually rendered in the shell).
+    --paper-only   a Paper-only day (no Live rows / book)       ── BOOK_STRIP_20261117 ──
+    --width N      desktop width (default 1470)
 """
 import json
 import os
@@ -17,7 +19,16 @@ from dash_fixture import FLEET                                         # noqa: E
 U.start()
 from playwright.sync_api import sync_playwright                        # noqa: E402
 
-OUT = sys.argv[1] if len(sys.argv) > 1 else "/tmp/dash"
+_args = sys.argv[1:]
+WIDTH = int(_args[_args.index("--width") + 1]) if "--width" in _args else 1470
+_pos = [a for i, a in enumerate(_args) if not a.startswith("--") and (i == 0 or _args[i - 1] != "--width")]
+OUT = _pos[0] if _pos else "/tmp/dash"
+if "--paper-only" in _args:   # ── BOOK_STRIP_20261117 ──
+    import copy
+    FLEET = copy.deepcopy(FLEET)
+    FLEET["strategies"] = [r for r in FLEET["strategies"] if r.get("book") != "LIVE"]
+    FLEET["totals"]["LIVE"] = dict(FLEET["totals"]["LIVE"], rows=0)
+    FLEET["paths"] = {"PAPER": FLEET["paths"]["PAPER"]}
 CHROME = os.environ.get("CHROME") or "/usr/bin/google-chrome"
 BASE = "http://127.0.0.1:47321/"
 SET = U.app_settings_api.SETTINGS_FILE
@@ -55,7 +66,7 @@ METRICS_JS = """
 
 with sync_playwright() as p:
     b = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
-    for name, vp in (("desktop", {"width": 1470, "height": 900}), ("phone", {"width": 390, "height": 844})):
+    for name, vp in (("desktop", {"width": WIDTH, "height": 900}), ("phone", {"width": 390, "height": 844})):
         ctx = b.new_context(viewport=vp, timezone_id="Asia/Kolkata", device_scale_factor=1)
         pg = ctx.new_page()
         pg.clock.set_fixed_time("2026-11-17T13:05:00+05:30")
