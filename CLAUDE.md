@@ -36,5 +36,5 @@ Open `REPO_MAP.md` first. Per strategy (by codename) it names the engine, backte
 - Read the latest `main`, never a file rebuilt from memory.
 - No live deploys Mon–Fri 09:00–15:30 IST.
 
-<!-- REPO_MAP_HOOK_20261117 -->
-- `.githooks/pre-commit` refreshes `REPO_MAP.md` on every commit (`git config core.hooksPath .githooks`). If `--check` says stale, regenerate before trusting line numbers.
+<!-- PRECOMMIT_20261117 -->
+- Commits run pre-commit (ruff errors, dual-tree parity, no backup files, REPO_MAP refresh); pushes are blocked Mon–Fri 09:00–15:30 IST unless `SCALP_PUSH_OK=1`.

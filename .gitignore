@@ -59,3 +59,6 @@ app_debug.db
 react-scripts/
 scalp-frontend@*/
 tools/
+# ── PRECOMMIT_20261117 ── apply-script backups and staging copies stay out of git
+*.bak-*
+*.staging-*

@@ -1,0 +1,3 @@
+# scripts/ci/requirements-ci.txt — ── CI_20261117 ── test tools CI installs on top of backend/requirements.txt
+pytest==8.3.4
+pre-commit==4.6.2

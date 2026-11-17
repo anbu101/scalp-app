@@ -1,0 +1,20 @@
+# ruff.toml — ── PRECOMMIT_20261117 ── (TD-042)
+# Errors only: syntax errors and names that would fail at runtime. Ruff 0.17's
+# own default set is much wider (10,224 hits on 17 Nov main), so `select` is
+# explicit. Nothing here reformats code; the hook never runs --fix.
+target-version = "py310"
+force-exclude = true            # honour exclude for files pre-commit passes by name
+extend-exclude = [".claude", "desktop/src-tauri/backend", "desktop/src-tauri/frontend"]
+
+[lint]
+select = [
+  "E9",   # syntax / IO errors
+  "F63",  # invalid comparisons (is with a literal, …)
+  "F7",   # syntax in the wrong place (return outside a function, …)
+  "F82",  # undefined names (F821/F822/F823)
+]
+
+[lint.per-file-ignores]
+# Baseline, same as check_undefined_names.py: orphaned legacy module, imported
+# by nothing, 10 x undefined `kite` (DEF-045). Delete the file, then this line.
+"backend/app/brokers/zerodha.py" = ["F821"]
