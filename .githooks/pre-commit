@@ -1,0 +1,34 @@
+#!/bin/sh
+# .githooks/pre-commit  — ── REPO_MAP_HOOK_20261117 ── (TD-038)
+#
+# Keeps REPO_MAP.md current: on every commit, if the map is stale it is
+# regenerated and added to the same commit. It never blocks a commit on its
+# own account (a warning only). Enabled per clone by apply_repo_map_hook.py:
+#     git config core.hooksPath .githooks
+# A hook that was already in .git/hooks/pre-commit still runs first, and its
+# verdict stands.
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$top" || exit 0
+
+gd=$(git rev-parse --git-common-dir 2>/dev/null)
+if [ -n "$gd" ] && [ -x "$gd/hooks/pre-commit" ]; then
+  "$gd/hooks/pre-commit" "$@" || exit $?
+fi
+
+gen=scripts/gen_repo_map.py
+[ -f "$gen" ] || exit 0
+py=$(command -v python3 || command -v python) || {
+  echo "repo-map: no python found — REPO_MAP.md not checked"; exit 0; }
+
+"$py" "$gen" --check >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then
+  if "$py" "$gen" >/dev/null 2>&1 && git add REPO_MAP.md; then
+    echo "repo-map: REPO_MAP.md was stale — refreshed and added to this commit"
+  else
+    echo "repo-map: WARNING could not refresh REPO_MAP.md — run: python3 $gen"
+  fi
+elif [ "$rc" -ne 0 ]; then
+  echo "repo-map: WARNING generator failed (commit not blocked) — run: python3 $gen"
+fi
+exit 0

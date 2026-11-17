@@ -35,3 +35,6 @@ Open `REPO_MAP.md` first. Per strategy (by codename) it names the engine, backte
 - `git status` on every target before patching (an `M` is a stop sign); assert the parent fence.
 - Read the latest `main`, never a file rebuilt from memory.
 - No live deploys Mon–Fri 09:00–15:30 IST.
+
+<!-- REPO_MAP_HOOK_20261117 -->
+- `.githooks/pre-commit` refreshes `REPO_MAP.md` on every commit (`git config core.hooksPath .githooks`). If `--check` says stale, regenerate before trusting line numbers.
