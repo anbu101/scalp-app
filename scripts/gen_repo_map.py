@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # scripts/gen_repo_map.py  — ── REPO_MAP_20261117 ── (TD-038)
+#                            ── REPO_MAP_FIX_20261117 ── test modes read from scripts/run_suites.py
 #
 # Writes REPO_MAP.md at the repo root: which file to open first for each
 # strategy, the dual tree, the test suites, the shared modules and fences.
@@ -17,6 +18,7 @@
 # backtest runner, the defaults block, the Settings / Backtest form ranges,
 # the panel and the codename are all read from the code.
 import ast
+import importlib.util
 import os
 import re
 import subprocess
@@ -62,7 +64,7 @@ SHARED = [
     ("execution/kill_switch.py", None, "per-strategy kill: close, cancel GTTs, verify flat"),
     ("api/telegram_api.py", "notify_critical", "critical alerts: bell always, Telegram never for PAPER"),
     ("api_server.py", "BackgroundScheduler",
-     "routes, launches under _boot_guard, APScheduler (misfire 3600, coalesce) + jobs/scheduler_observability.py"),
+     "routes, launches (_boot_guard), APScheduler (misfire 3600, coalesce); jobs/scheduler_observability.py"),
     ("risk/execution_modes.py", None, "OFF/PAPER/LIVE/PAPER_LIVE; paper twin trading/shadow_book.py"),
     ("parity/parity_core.py", None, "parity ledger (recorded day via real runner vs app); recon/ = broker reconciliation"),
     ("marketdata/zerodha_tick_engine.py", "ZerodhaTickEngine", "SCALP_V1 engine + shared Kite tick spine; open no new socket"),
@@ -338,12 +340,28 @@ def build(root):
     w("## Dual tree")
     w("- `backend/` ↔ `desktop/src-tauri/backend/`, `frontend/` ↔ `desktop/src-tauri/frontend/`: the copies are "
       "git-ignored, re-synced by `./desktop/build-scalp.sh frontend|backend|both`. Edit the source; apply scripts "
-      "also write the copy when it exists (`BUILD_COPIES`) so a fix runs before the next build.")
+      "also write the copy when it exists (`BUILD_COPIES`).")
     w("")
 
-    w("## Tests — standalone scripts (exit code), not pytest")
-    w("- Failures + summary only: `python3 scripts/run_suites.py PATH...` (folders or files; backend venv, "
-      "SCALP_TEST_MODE=1).")
+    # ── REPO_MAP_FIX_20261117 ── how the suites run, read from the suites themselves
+    rs = os.path.join(root, "scripts", "run_suites.py")
+    if not os.path.exists(rs):
+        raise Missing("scripts/run_suites.py")
+    spec = importlib.util.spec_from_file_location("_run_suites_for_map", rs)
+    RS = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(RS)
+    bt = [f for f in files if f.startswith("backend/") and os.path.basename(f).startswith("test_")
+          and f.endswith(".py")]
+    modes = [RS.mode_of(f) for f in bt]
+    n_py = sum(1 for m in modes if m["runner"] == "pytest")
+    n_root = sum(1 for m in modes if m["runner"] == "script" and m["cwd"] == "root")
+    py_dirs = sorted({short(os.path.dirname(f)) for f, m in zip(bt, modes) if m["runner"] == "pytest"})
+    w(f"## Tests — {len(bt) - n_py} backend scripts (exit code) + {n_py} pytest files")
+    w("- Failures + summary only: `python3 scripts/run_suites.py PATH...` — runs each suite its own way: "
+      f"scripts from backend/; pytest files ({', '.join(py_dirs)}) via `-m pytest` from their folder; "
+      f"{n_root} BRK suites from the root. A pytest file run as a plain script exits 0 untested.")
+    if os.path.exists(os.path.join(root, ".github", "workflows", "ci.yml")):
+        w("- CI: `.github/workflows/ci.yml` (push to main); SKIP / KNOWN_FAIL lists in `scripts/ci/run_ci_suites.py`.")
     groups = {}
     for f in files:
         b = os.path.basename(f)
@@ -356,12 +374,12 @@ def build(root):
     small = [g for g, n in sorted(groups.items()) if n <= 2]
     lab = lambda g: (g[len(BA):] if g.startswith(BA) else g) + "/"
     w(f"- {sum(groups.values())} suites (under backend/app/ unless shown): " + " · ".join(
-        f"{lab(g)} {n}" for g, n in big) + (f" · ≤2 each in " + ", ".join(lab(g) for g in small) if small else ""))
+        f"{lab(g)} {n}" for g, n in big) + (f" · {sum(groups[g] for g in small)} more in {len(small)} small folders" if small else ""))
     fleet = [f for f in files if re.fullmatch(BA + r"engine/test_(fleet_live|fleet_adversarial|safety_layers)\.py", f)]
     if fleet:
         w("- Fleet, one fake Kite account: `python3 scripts/run_suites.py " + " ".join(short(f) for f in fleet) + "`")
     w("- Before a release: `python3 scripts/run_suites.py "
-      + need(BA + "execution/test_execution_router_contract.py") + "`. PATH may use the E/ B/ A/ J/ prefixes.")
+      + need(BA + "execution/test_execution_router_contract.py") + "` (E/ B/ A/ J/ prefixes work).")
     if need("frontend/uitest"):
         w("- UI (Playwright, app closed): `cd frontend && CI=false npm run build && "
           "PYTHONPATH=../backend python3 uitest/test_ui_<name>.py` (frontend/uitest/README.md).")
@@ -380,7 +398,7 @@ def build(root):
     w("## Fences and .bak-FENCE")
     w("- Fence = dated marker `NAME_YYYYMMDD` on every block a change adds (`# ── NAME_… ──`, BEGIN/END); "
       "`grep -rn NAME_` finds it. A change ships as root `apply_<name>.py`: sha-checked payloads, parent-fence and "
-      "dirty-`git status` stops, py_compile/tests/esbuild gates, all-or-nothing (`--repo --skip-tests --allow-dirty --rollback`).")
+      "dirty-`git status` stops, py_compile/tests/esbuild gates, all-or-nothing, `--rollback`.")
     w("- Each changed file gets `<file>.bak-<FENCE>` first; `--rollback` restores them and deletes new files "
       "(newest fence first); a re-run is a no-op. Timeline: `find . -name \"*.bak-*\" | sed 's/.*bak-//' | sort -u`.")
     return "\n".join(o) + "\n"

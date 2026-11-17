@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# scripts/test_repo_map.py  — ── REPO_MAP_20261117 ── (TD-038) TC-REPOMAP-0001…0014
+# scripts/test_repo_map.py  — ── REPO_MAP_20261117 ── (TD-038) TC-REPOMAP-0001…0015
+#                             ── REPO_MAP_FIX_20261117 ── TC-REPOMAP-0038…0043
 #
 #   python3 scripts/test_repo_map.py      (stdlib only; exit 1 on any failure)
 import ast
@@ -154,6 +155,57 @@ with tempfile.TemporaryDirectory() as d:
         rc == 0 and len(out.strip().splitlines()) == 1, (rc, out))
 rc, out = sh(RUN, "E/no_such_dir")
 chk("TC-REPOMAP-0015", "run_suites expands E/ and rejects a missing path with exit 2", rc == 2 and "no such" in out, out)
+
+# ── REPO_MAP_FIX_20261117 ── suites run their own way (TC-REPOMAP-0038…0043)
+import importlib.util as _ilu  # noqa: E402
+_spec = _ilu.spec_from_file_location("run_suites_t", RUN)
+RS = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(RS)
+bt = []
+for d_, dirs_, fs_ in os.walk(os.path.join(ROOT, "backend")):
+    dirs_[:] = [x for x in dirs_ if x not in RS.SKIP_DIRS]
+    bt += [os.path.relpath(os.path.join(d_, f), ROOT).replace(os.sep, "/") for f in fs_
+           if f.startswith("test_") and f.endswith(".py") and ".bak-" not in f]
+n_py = sum(1 for f in bt if RS.mode_of(f)["runner"] == "pytest")
+hdr = next((l for l in text.splitlines() if l.startswith("## Tests")), "")
+chk("TC-REPOMAP-0038", f"the map's Tests header gives the real split ({len(bt) - n_py} scripts + {n_py} pytest) "
+    "and no longer says 'not pytest'",
+    "not pytest" not in text and hdr == f"## Tests — {len(bt) - n_py} backend scripts (exit code) + {n_py} pytest files",
+    hdr)
+lm = {k: RS.local_mode_of(k) for k in ("backend/app/engine/ic/test_ic_live_core.py",
+                                       "backend/app/engine/brk/test_brk_live_core.py",
+                                       "backend/app/engine/ic/test_ic_iv_sl.py",
+                                       "backend/app/engine/vet/test_vet_manager.py")
+      if os.path.exists(os.path.join(ROOT, k))}
+exp = {"backend/app/engine/ic/test_ic_live_core.py": ("pytest", "dir", []),
+       "backend/app/engine/brk/test_brk_live_core.py": ("script", "root", []),
+       "backend/app/engine/ic/test_ic_iv_sl.py": ("script", "backend", ["backend/app/backtest/ic"]),
+       "backend/app/engine/vet/test_vet_manager.py": ("script", "backend", [])}
+chk("TC-REPOMAP-0039", "run_suites knows how each kind runs: Icarus pytest from its folder, BRK from the root, "
+    "iv_sl with backtest/ic on its path, the rest as scripts",
+    all((v["runner"], v["cwd"], v["path"]) == exp[k] for k, v in lm.items()) and len(lm) == 4, lm)
+ci_py = os.path.join(ROOT, "scripts", "ci", "run_ci_suites.py")
+if os.path.exists(ci_py):
+    diff = [f for f in bt if (lambda a, b: (a["runner"], a["cwd"], a["path"]) != (b["runner"], b["cwd"], b["path"]))(
+        RS.local_mode_of(f), RS.mode_of(f))]
+    chk("TC-REPOMAP-0040", "run_suites' own rule and the CI runner's classify every backend suite the same", not diff, diff)
+else:
+    chk("TC-REPOMAP-0040", "run_suites' own rule and the CI runner's agree (CI runner not in this tree: nothing to compare)", True)
+with tempfile.TemporaryDirectory() as d:
+    open(os.path.join(d, "test_pyfail.py"), "w").write("def test_a():\n    assert 1 == 2, 'REALLY RAN'\n")
+    rc, out = sh(RUN, "--timeout", "120", os.path.join(d, "test_pyfail.py"))
+    have_pytest = _ilu.find_spec("pytest") is not None
+    chk("TC-REPOMAP-0041", "a pytest-style file with a failing test is reported failed (needs pytest) — never a silent pass",
+        ("0 passed" in out) and ((rc == 1 and "REALLY RAN" in out) if have_pytest else "not runnable here" in out),
+        (rc, out[-300:]))
+    open(os.path.join(d, "test_localimp.py"), "w").write("import ic_v1_engine\n")
+    rc, out = sh(RUN, os.path.join(d, "test_localimp.py"))
+    chk("TC-REPOMAP-0042", "a repo module that cannot be imported (bare ic_v1_engine) is a FAILURE, not 'not runnable here'",
+        rc == 1 and "1 failed, 0 not runnable" in out, out[-300:])
+    open(os.path.join(d, "test_gap.py"), "w").write("import no_such_pkg_qq\n")
+    rc, out = sh(RUN, os.path.join(d, "test_gap.py"))
+    chk("TC-REPOMAP-0043", "a third-party package this Python lacks is still 'not runnable here' (exit 0)",
+        rc == 0 and "1 not runnable here" in out, out[-300:])
 
 print("\n" + ("ALL REPO_MAP CHECKS PASSED" if F == 0 else f"{F} FAILURES"))
 sys.exit(1 if F else 0)

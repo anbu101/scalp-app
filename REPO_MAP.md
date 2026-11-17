@@ -27,13 +27,14 @@ Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core
 - Shared engine folders: E/pst/. Codenames: F/strategies/displayNames.js = backend/app/config/strategy_display.py; docs use codenames only.
 
 ## Dual tree
-- `backend/` ↔ `desktop/src-tauri/backend/`, `frontend/` ↔ `desktop/src-tauri/frontend/`: the copies are git-ignored, re-synced by `./desktop/build-scalp.sh frontend|backend|both`. Edit the source; apply scripts also write the copy when it exists (`BUILD_COPIES`) so a fix runs before the next build.
+- `backend/` ↔ `desktop/src-tauri/backend/`, `frontend/` ↔ `desktop/src-tauri/frontend/`: the copies are git-ignored, re-synced by `./desktop/build-scalp.sh frontend|backend|both`. Edit the source; apply scripts also write the copy when it exists (`BUILD_COPIES`).
 
-## Tests — standalone scripts (exit code), not pytest
-- Failures + summary only: `python3 scripts/run_suites.py PATH...` (folders or files; backend venv, SCALP_TEST_MODE=1).
-- 210 suites (under backend/app/ unless shown): api/ 15 · backtest/ 56 · engine/ 63 · execution/ 15 · jobs/ 3 · marketdata/ 3 · parity/ 8 · tests/ 8 · tools/ 5 · utils/ 3 · frontend/uitest/ 11 · ≤2 each in backend/, backend/app/, config/, db/, dev/, recon/, recorder/, risk/, services/, slippage/, trading/, scripts/, scripts/ci/
+## Tests — 179 backend scripts (exit code) + 17 pytest files
+- Failures + summary only: `python3 scripts/run_suites.py PATH...` — runs each suite its own way: scripts from backend/; pytest files (E/ic, backend/app/config, backend/app/db, backend/app/execution) via `-m pytest` from their folder; 2 BRK suites from the root. A pytest file run as a plain script exits 0 untested.
+- CI: `.github/workflows/ci.yml` (push to main); SKIP / KNOWN_FAIL lists in `scripts/ci/run_ci_suites.py`.
+- 210 suites (under backend/app/ unless shown): api/ 15 · backtest/ 56 · engine/ 63 · execution/ 15 · jobs/ 3 · marketdata/ 3 · parity/ 8 · tests/ 8 · tools/ 5 · utils/ 3 · frontend/uitest/ 11 · 20 more in 13 small folders
 - Fleet, one fake Kite account: `python3 scripts/run_suites.py E/test_fleet_adversarial.py E/test_fleet_live.py E/test_safety_layers.py`
-- Before a release: `python3 scripts/run_suites.py backend/app/execution/test_execution_router_contract.py`. PATH may use the E/ B/ A/ J/ prefixes.
+- Before a release: `python3 scripts/run_suites.py backend/app/execution/test_execution_router_contract.py` (E/ B/ A/ J/ prefixes work).
 - UI (Playwright, app closed): `cd frontend && CI=false npm run build && PYTHONPATH=../backend python3 uitest/test_ui_<name>.py` (frontend/uitest/README.md).
 - No Starlette TestClient (breaks on the build Mac); timestamp knobs get a real-epoch test.
 
@@ -44,7 +45,7 @@ Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core
 - `execution/broker_truth.py` LEDGER:471 — strict reads (BrokerUnreadable, never [] = flat); LEDGER = who holds what on a shared contract
 - `execution/kill_switch.py` — per-strategy kill: close, cancel GTTs, verify flat
 - `api/telegram_api.py` notify_critical:1690 — critical alerts: bell always, Telegram never for PAPER
-- `api_server.py` BackgroundScheduler:869 — routes, launches under _boot_guard, APScheduler (misfire 3600, coalesce) + jobs/scheduler_observability.py
+- `api_server.py` BackgroundScheduler:869 — routes, launches (_boot_guard), APScheduler (misfire 3600, coalesce); jobs/scheduler_observability.py
 - `risk/execution_modes.py` — OFF/PAPER/LIVE/PAPER_LIVE; paper twin trading/shadow_book.py
 - `parity/parity_core.py` — parity ledger (recorded day via real runner vs app); recon/ = broker reconciliation
 - `marketdata/zerodha_tick_engine.py` ZerodhaTickEngine:54 — SCALP_V1 engine + shared Kite tick spine; open no new socket
@@ -52,5 +53,5 @@ Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core
 - `backtest/engine/lot_compounding.py` — lot compounding/DD guard/tax for all runners; dte_lots.py
 
 ## Fences and .bak-FENCE
-- Fence = dated marker `NAME_YYYYMMDD` on every block a change adds (`# ── NAME_… ──`, BEGIN/END); `grep -rn NAME_` finds it. A change ships as root `apply_<name>.py`: sha-checked payloads, parent-fence and dirty-`git status` stops, py_compile/tests/esbuild gates, all-or-nothing (`--repo --skip-tests --allow-dirty --rollback`).
+- Fence = dated marker `NAME_YYYYMMDD` on every block a change adds (`# ── NAME_… ──`, BEGIN/END); `grep -rn NAME_` finds it. A change ships as root `apply_<name>.py`: sha-checked payloads, parent-fence and dirty-`git status` stops, py_compile/tests/esbuild gates, all-or-nothing, `--rollback`.
 - Each changed file gets `<file>.bak-<FENCE>` first; `--rollback` restores them and deletes new files (newest fence first); a re-run is a no-op. Timeline: `find . -name "*.bak-*" | sed 's/.*bak-//' | sort -u`.
