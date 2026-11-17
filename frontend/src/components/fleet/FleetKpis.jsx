@@ -1,187 +1,84 @@
 // frontend/src/components/fleet/FleetKpis.jsx — ── DASH_MODERN_20260925 ──
-// ── FLEET_KPIS_V2_20260925 ── redesigned as a two-row BOOK LEDGER instead of
-// ── LIVE_ROW_HIDE_20260925 ── a book with no orders today is not shown at all.
-// ── FLEET_KPIS_PERIOD_20260928 ── risk-to-stops / positions / path columns replaced
-// by Week P/L and Month P/L (net realised, per book, from the same feed).
-// six tiles: one row for Live, one for Paper, the same eight columns for both
-// (MTM today, realised, unrealised, charges, net, from peak, risk to stops,
-// positions) plus a sparkline, and the session block on the right. Live and
-// Paper are still never summed; an idle book dims and says so instead of
-// spending a quarter of the strip on a zero. Every value comes from
-// /api/fleet/today (the same feed the chart and blotter read).
+// ── DASH_SYSTEM_20261117 ── rebuilt on components/fleet/dash.js. Was a 9-column
+// ledger with every figure coloured; now one block per book that traded today:
+// the MTM is the hero (the only coloured figure), realised / unrealised read as a
+// sentence under it, and Net · From peak · Charges · Week · Month sit in one quiet
+// facts row. "Traded today" closes the card. Same feed, same rules as before:
+// Live and Paper are never summed; a book with no orders today is not shown.
 
-import { colors, spacing, typography, pnlStyle } from "../../tokens";
 import { MARKET_START_MIN, FNO_END_MIN } from "../../marketSession";
 import { fmtInr, hhmm } from "./fleetFormat";
+import { SPACE, COLOR, TYPE, NUM, CAPS, CARD, CARD_COMPACT, tone, liveTag } from "./dash";
 
-const COLS = "86px minmax(176px, 1.35fr) repeat(7, minmax(112px, 1fr))";
-const ROW_H = 48;
 const BOOKS = [["LIVE", "Live"], ["PAPER", "Paper"]];   // ── LIVE_ROW_HIDE_20260925 ──
+const asOf = (t) => hhmm(Math.floor(((t.mark_asof + 19800) % 86400) / 60));
 
-// ── LIVE_ROW_HIDE_20260925 ── the one row shown while no book has traded
-function NoteRow({ text }) {
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: COLS, alignItems: "center", height: ROW_H, borderTop: `1px solid ${colors.border.dark}` }}>
-      <span style={{ gridColumn: "1 / -1", padding: "0 12px", fontSize: 12.5, color: colors.text.muted }}>{text}</span>
-    </div>
-  );
-}
-
-function BookTag({ live, children }) {
-  const c = live ? colors.warning : colors.text.secondary;
-  return (
-    <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.3px", padding: "2px 8px", borderRadius: 4,
-      border: `1px solid ${c}`, color: c, whiteSpace: "nowrap" }}>
-      {children}
-    </span>
-  );
-}
-
-const cell = (align = "right") => ({ padding: "0 12px", textAlign: align, whiteSpace: "nowrap", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" });
-const num = { ...typography.mono, fontSize: 14, fontWeight: 500 };
-
-function BookRow({ book, label, t }) {
-  const idle = !t || !t.rows;
-  const dim = { color: colors.text.muted, fontWeight: 400 };
-  const money = (v, tone = "pnl", extra = {}) => (
-    idle ? <span style={dim}>—</span>
-      : <span style={{ ...(tone === "pnl" ? pnlStyle(v) : {}), ...extra }}>{fmtInr(v)}</span>
-  );
-  const peakTitle = !idle && t.peak != null ? `peak ${fmtInr(t.peak)}${t.peak_min != null ? ` at ${hhmm(t.peak_min)}` : ""}` : undefined;
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: COLS, alignItems: "center", height: ROW_H,
-      borderTop: `1px solid ${colors.border.dark}`, opacity: idle ? 0.6 : 1 }}>
-      <span style={cell("left")}><BookTag live={book === "LIVE"}>{label}</BookTag></span>
-      <span style={{ ...cell(), ...typography.mono, fontSize: 23, fontWeight: 700, letterSpacing: "-0.01em", ...pnlStyle(idle ? 0 : t.gross), ...(idle ? dim : {}) }}>
-        {!idle && t.approx ? "≈" : ""}{fmtInr(idle ? 0 : t.gross)}
-        {!idle && t.marks_stale > 0 && t.mark_asof && (   /* ── FLEET_MARKS_20260928 ── */
-          <span title={`${t.marks_stale} open leg${t.marks_stale > 1 ? "s" : ""} valued at the last mark seen (no live tick)`}
-            style={{ display: "block", fontSize: 10.5, fontWeight: 400, letterSpacing: 0, color: colors.text.muted, marginTop: 1 }}>
-            marks as of {hhmm(Math.floor(((t.mark_asof + 19800) % 86400) / 60))}
-          </span>
-        )}
-      </span>
-      <span style={{ ...cell(), ...num }}>{money(t?.realised ?? 0)}</span>
-      <span style={{ ...cell(), ...num }}>{money(t?.unrealised ?? 0)}</span>
-      <span style={{ ...cell(), ...num, color: colors.text.muted }}>{idle ? "—" : `₹${Math.round(t.charges || 0).toLocaleString("en-IN")}`}</span>
-      <span style={{ ...cell(), ...num, fontWeight: 600 }}>{money(t?.net ?? 0)}</span>
-      <span style={{ ...cell(), ...num }} title={peakTitle}>{idle || t.peak == null ? <span style={dim}>—</span> : money((t.gross ?? 0) - t.peak)}</span>
-      <span style={{ ...cell(), ...num }} title={idle ? undefined : `${t.week_trades ?? 0} trades exited since ${t.week_from || "—"}, net of charges`}>
-        {idle ? <span style={dim}>—</span> : <span style={pnlStyle(t.week_net ?? 0)}>{t.week_approx ? "≈" : ""}{fmtInr(t.week_net ?? 0)}</span>}
-      </span>
-      <span style={{ ...cell(), ...num }} title={idle ? undefined : `${t.month_trades ?? 0} trades exited since ${t.month_from || "—"}, net of charges`}>
-        {idle ? <span style={dim}>—</span> : <span style={pnlStyle(t.month_net ?? 0)}>{t.month_approx ? "≈" : ""}{fmtInr(t.month_net ?? 0)}</span>}
-      </span>
-    </div>
-  );
-}
-
-// ── DASH_MODERN_MOBILE_20261007 BEGIN ── phone layout: one card per book that
-// traded today (same rule: an idle book is not shown), hero MTM with realised /
-// unrealised under it, then Net · From peak · Charges and Week / Month P/L in a
-// 3-column grid; the fleet line (traded today, session) closes the card.
-function MStat({ label, title, children }) {
+function Fact({ label, title, children }) {
   return (
     <div style={{ minWidth: 0 }} title={title}>
-      <div style={{ fontSize: 10.5, color: colors.text.muted, marginBottom: 2, whiteSpace: "nowrap" }}>{label}</div>
-      <div style={{ ...typography.mono, fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{children}</div>
+      <div style={{ ...TYPE.meta, color: COLOR.muted, whiteSpace: "nowrap" }}>{label}</div>
+      <div style={{ ...TYPE.body, ...NUM, color: COLOR.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{children}</div>
     </div>
   );
 }
 
-function MobileBook({ book, label, t, first }) {
-  const money = (v) => <span style={pnlStyle(v ?? 0)}>{fmtInr(v ?? 0)}</span>;
+function Book({ book, label, t, compact }) {
   const peakTitle = t.peak != null ? `peak ${fmtInr(t.peak)}${t.peak_min != null ? ` at ${hhmm(t.peak_min)}` : ""}` : undefined;
   return (
-    <div style={{ padding: `${spacing.md}px ${spacing.md + 2}px`, borderTop: first ? "none" : `1px solid ${colors.border.dark}` }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <BookTag live={book === "LIVE"}>{label}</BookTag>
-        {t.marks_stale > 0 && t.mark_asof && (
-          <span style={{ fontSize: 10.5, color: colors.text.muted }}>marks as of {hhmm(Math.floor(((t.mark_asof + 19800) % 86400) / 60))}</span>
-        )}
+    <div data-book={book} style={{ minWidth: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: SPACE.sm, height: 20 }}>   {/* fixed: LIVE's box must not shift the row */}
+        {book === "LIVE" ? <span style={liveTag}>LIVE</span> : <span style={CAPS}>{label}</span>}
+        <span style={{ ...TYPE.meta, color: COLOR.muted }}>MTM today</span>
       </div>
-      <div style={{ ...typography.mono, fontSize: 30, fontWeight: 700, letterSpacing: "-0.01em", lineHeight: 1.1, marginTop: 8, whiteSpace: "nowrap", ...pnlStyle(t.gross) }}>
+      <div style={{ ...TYPE.hero, color: tone(t.gross), marginTop: SPACE.xs, whiteSpace: "nowrap" }}>
         {t.approx ? "≈" : ""}{fmtInr(t.gross)}
       </div>
-      <div style={{ fontSize: 11.5, color: colors.text.muted, marginTop: 4, display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <span>realised <b style={{ ...typography.mono, fontWeight: 500 }}>{money(t.realised)}</b></span>
-        <span>unrealised <b style={{ ...typography.mono, fontWeight: 500 }}>{money(t.unrealised)}</b></span>
+      <div style={{ ...TYPE.body, color: COLOR.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+        realised <span style={{ ...NUM, color: COLOR.ink }}>{fmtInr(t.realised)}</span>
+        {" · "}unrealised <span style={{ ...NUM, color: COLOR.ink }}>{fmtInr(t.unrealised)}</span>
+        {t.marks_stale > 0 && t.mark_asof ? ` · marks as of ${asOf(t)}` : ""}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "10px 12px", marginTop: spacing.md, paddingTop: spacing.md, borderTop: `1px dashed ${colors.border.dark}` }}>
-        <MStat label="Net">{money(t.net)}</MStat>
-        <MStat label="From peak" title={peakTitle}>{t.peak == null ? <span style={{ color: colors.text.muted }}>—</span> : money((t.gross ?? 0) - t.peak)}</MStat>
-        <MStat label="Charges"><span style={{ color: colors.text.muted, fontWeight: 500 }}>₹{Math.round(t.charges || 0).toLocaleString("en-IN")}</span></MStat>
-        <MStat label="Week P/L" title={`${t.week_trades ?? 0} trades exited since ${t.week_from || "—"}, net of charges`}>
-          <span style={pnlStyle(t.week_net ?? 0)}>{t.week_approx ? "≈" : ""}{fmtInr(t.week_net ?? 0)}</span>
-        </MStat>
-        <MStat label="Month P/L" title={`${t.month_trades ?? 0} trades exited since ${t.month_from || "—"}, net of charges`}>
-          <span style={pnlStyle(t.month_net ?? 0)}>{t.month_approx ? "≈" : ""}{fmtInr(t.month_net ?? 0)}</span>
-        </MStat>
-      </div>
-    </div>
-  );
-}
-
-function MobileKpis({ totals, active, fleet, session }) {
-  const books = totals ? BOOKS.filter(([k]) => totals[k] && totals[k].rows > 0) : [];
-  return (
-    <div style={{ background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 10,
-      overflow: "hidden", fontFamily: "var(--c-font-ui)", boxShadow: "0 1px 3px var(--c-shadow)" }}>
-      {!totals && <div style={{ padding: spacing.md, fontSize: 12.5, color: colors.text.muted }}>loading books…</div>}
-      {totals && !books.length && (
-        <div style={{ padding: spacing.md, fontSize: 12.5, color: colors.text.muted }}>No orders yet today — Live and Paper cards appear at the first fill.</div>
-      )}
-      {books.map(([k, label], i) => <MobileBook key={k} book={k} label={label} t={totals[k]} first={i === 0} />)}
-      <div style={{ display: "flex", alignItems: "baseline", gap: 6, padding: `${spacing.sm}px ${spacing.md + 2}px`,
-        borderTop: `1px solid ${colors.border.dark}`, background: "var(--c-bg-tertiary)", fontSize: 11.5, color: colors.text.muted }}>
-        <b style={{ ...typography.mono, fontSize: 14, fontWeight: 700, color: colors.text.primary }}>{active ?? "—"}</b>
-        <span>of {fleet ?? "—"} traded today</span>
-        <span style={{ marginLeft: "auto", whiteSpace: "nowrap" }}>{session}</span>
+      <div style={{ display: "grid", gridTemplateColumns: compact ? "repeat(3, minmax(0, 1fr))" : "repeat(5, minmax(0, 1fr))",
+        gap: `${SPACE.md}px ${SPACE.lg}px`, marginTop: SPACE.lg }}>
+        <Fact label="Net">{fmtInr(t.net)}</Fact>
+        <Fact label="From peak" title={peakTitle}>{t.peak == null ? "—" : fmtInr((t.gross ?? 0) - t.peak)}</Fact>
+        <Fact label="Charges">₹{Math.round(t.charges || 0).toLocaleString("en-IN")}</Fact>
+        <Fact label="Week" title={`${t.week_trades ?? 0} trades exited since ${t.week_from || "—"}, net of charges`}>
+          {t.week_approx ? "≈" : ""}{fmtInr(t.week_net ?? 0)}
+        </Fact>
+        <Fact label="Month" title={`${t.month_trades ?? 0} trades exited since ${t.month_from || "—"}, net of charges`}>
+          {t.month_approx ? "≈" : ""}{fmtInr(t.month_net ?? 0)}
+        </Fact>
       </div>
     </div>
   );
 }
-// ── DASH_MODERN_MOBILE_20261007 END ──
 
 export default function FleetKpis({ totals, active, fleet, nowMin, compact = false }) {   // ── DASH_MODERN_MOBILE_20261007 ── compact
   const left = Math.max(0, FNO_END_MIN - nowMin);
   const session = nowMin < MARKET_START_MIN ? `opens ${hhmm(MARKET_START_MIN)}`
     : left > 0 ? `closes in ${Math.floor(left / 60)}h ${String(left % 60).padStart(2, "0")}m` : "market closed";
-  const head = { ...cell(), fontSize: 11, color: colors.text.muted, fontWeight: 500 };
-  if (compact) return <MobileKpis totals={totals} active={active} fleet={fleet} session={session} />;   // ── DASH_MODERN_MOBILE_20261007 ──
-  return (
-    <div style={{ display: "flex", background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 8,
-      overflow: "hidden", fontFamily: "var(--c-font-ui)", boxShadow: "0 1px 3px var(--c-shadow)" }}>
-      <div style={{ flex: 1, minWidth: 0, overflowX: "auto" }}>
-        <div style={{ minWidth: 1040, padding: `${spacing.sm}px ${spacing.xs}px 0` }}>
-          <div style={{ display: "grid", gridTemplateColumns: COLS, alignItems: "baseline", paddingBottom: 6 }}>
-            <span style={{ ...head, textAlign: "left" }}>Book</span>
-            <span style={head}>MTM today</span>
-            <span style={head}>Realised</span>
-            <span style={head}>Unrealised</span>
-            <span style={head}>Charges</span>
-            <span style={head}>Net</span>
-            <span style={head} title="MTM now minus today's highest MTM (sampled each minute)">From peak</span>
-            <span style={head} title="Net realised P&L of trades exited in the last 7 calendar days, today included">Week P/L</span>
-            <span style={head} title="Net realised P&L of trades exited since this day last month">Month P/L</span>
-          </div>
-          {/* ── LIVE_ROW_HIDE_20260925 ── a book with no orders today is not shown at all;
-              when neither book has traded, one quiet row says so. */}
-          {(() => {
-            if (!totals) return <NoteRow text="loading books…" />;
-            const active = BOOKS.filter(([k]) => totals[k] && totals[k].rows > 0);
-            if (!active.length) return <NoteRow text="No orders yet today — Live and Paper rows appear at the first fill." />;
-            return active.map(([k, label]) => <BookRow key={k} book={k} label={label} t={totals[k]} />);
-          })()}
-        </div>
+  const books = totals ? BOOKS.filter(([k]) => totals[k] && totals[k].rows > 0) : [];
+  const note = !totals ? "loading books…"
+    : !books.length ? "No orders yet today — Live and Paper appear here at the first fill." : null;
+  const traded = (
+    <div style={{ minWidth: 0 }}>
+      <div style={CAPS}>Traded today</div>
+      <div style={{ ...TYPE.figure, color: COLOR.ink, marginTop: SPACE.xs, whiteSpace: "nowrap" }}>
+        {active ?? "—"}<span style={{ ...TYPE.body, ...NUM, color: COLOR.muted }}> of {fleet ?? "—"}</span>
       </div>
-      <div style={{ flex: "0 0 auto", borderLeft: `1px solid ${colors.border.dark}`, padding: `${spacing.sm}px ${spacing.xl}px`,
-        display: "flex", flexDirection: "column", justifyContent: "center", minWidth: 168 }}>
-        <div style={{ fontSize: 11, color: colors.text.muted }}>Traded today</div>
-        <div style={{ ...typography.mono, fontSize: 28, fontWeight: 700, lineHeight: 1.1, whiteSpace: "nowrap", marginTop: 2 }}>
-          {active ?? "—"}<span style={{ color: colors.text.muted, fontSize: 14, fontWeight: 400 }}> of {fleet ?? "—"}</span>
-        </div>
-        <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 3, whiteSpace: "nowrap" }}>{session}</div>
+      <div style={{ ...TYPE.meta, color: COLOR.muted, whiteSpace: "nowrap" }}>{session}</div>
+    </div>
+  );
+  return (
+    <div data-testid="dash-books" data-dash-part="books" style={{ ...(compact ? CARD_COMPACT : CARD), fontFamily: "var(--c-font-ui)",
+      display: "grid", gap: compact ? SPACE.xl : SPACE.xxl,
+      gridTemplateColumns: compact ? "minmax(0, 1fr)" : `repeat(${Math.max(1, books.length)}, minmax(0, 1fr)) auto` }}>
+      {note && <div style={{ ...TYPE.body, color: COLOR.muted, alignSelf: "center" }}>{note}</div>}
+      {books.map(([k, label]) => <Book key={k} book={k} label={label} t={totals[k]} compact={compact} />)}
+      <div style={compact ? { borderTop: `1px solid ${COLOR.line}`, paddingTop: SPACE.lg }
+        : { borderLeft: `1px solid ${COLOR.line}`, paddingLeft: SPACE.xl, alignSelf: "stretch", display: "flex", alignItems: "center" }}>
+        {traded}
       </div>
     </div>
   );

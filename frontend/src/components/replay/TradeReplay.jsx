@@ -46,11 +46,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getApiBase } from "../../api/base";
 import { alpha, colors, spacing, typography } from "../../tokens";
+// ── LIVE_CHART_SYSTEM_20261117 ── presentation on the Dashboard system (components/fleet/dash.js):
+// 4-pt spacing, type 11/13/15/20, ink/muted/line/up/down; inside the PLOT a calmer data palette
+// (indicators), amber kept as the "near / stale" state colour. Behaviour unchanged.
+import { SPACE, COLOR, TYPE, NUM, CAPS } from "../fleet/dash";
 
 const OPEN = 555, CLOSE = 930, SEG = CLOSE - OPEN;
 const MONO = "'JetBrains Mono', 'Fira Code', monospace";
-const PAD = { l: 64, r: 92, t: 8, b: 6 };
-const SERIES = { a: "#f59e0b", b: "#38bdf8", c: "#a78bfa", d: "#f472b6", e: "#34d399", f: "#fb923c" };
+const PAD = { l: 64, r: 108, t: 8, b: 6 };   // ── LIVE_CHART_SYSTEM_20261117 ── r: room for "live 23322.94" at 11 px
+const SERIES = { a: "#d9a441", b: "#5fa8d3", c: "#a393eb", d: "#d58fb1", e: "#6cc1a0", f: "#e09a5a" };   // ── LIVE_CHART_SYSTEM_20261117 ── data palette: same hues, desaturated so candles lead
 const TF_CHOICES = [1, 3, 5, 15];
 const MIN_SPAN = 20;                       // narrowest window, minutes
 const TICK_STEPS = [5, 10, 15, 30, 60, 120, 180];
@@ -136,7 +140,7 @@ export function initialWin(d, z) {
 function col(k) {
   if (!k) return colors.text.secondary;
   if (SERIES[k]) return SERIES[k];
-  return { profit: colors.profit, loss: colors.loss, warning: colors.warning, primary: colors.primary,
+  return { profit: colors.profit, loss: colors.loss, warning: colors.warning, primary: COLOR.ink,   // ── LIVE_CHART_SYSTEM_20261117 ── live price = ink
            muted: colors.text.muted }[k] || k;
 }
 const inr = (v) => (v == null ? "—" : `${v < 0 ? "−" : v > 0 ? "+" : ""}₹${Math.abs(Math.round(v)).toLocaleString("en-IN")}`);
@@ -248,17 +252,17 @@ function Pane({ y0, h, width, xOf, bars: allBars, tf, overlays, levels: allLevel
   return (
     <g>
       <defs><clipPath id={clipId}><rect x={PAD.l} y={y0} width={plotW} height={h} /></clipPath></defs>
-      <rect x={PAD.l} y={y0} width={plotW} height={h} style={{ fill: "transparent", stroke: colors.border.dark }} />
+      <rect x={PAD.l} y={y0} width={plotW} height={h} style={{ fill: "transparent", stroke: COLOR.line, strokeOpacity: 0.6 }} />
       {ticks.map((v) => (
         <g key={v}>
-          <line x1={PAD.l} x2={PAD.l + plotW} y1={y(v)} y2={y(v)} style={{ stroke: colors.border.dark, strokeWidth: 1, opacity: 0.6 }} />
-          <text x={PAD.l - 6} y={y(v) + 3.5} textAnchor="end" style={{ fill: colors.text.muted, fontSize: 10.5, fontFamily: MONO }}>{fmtTick(v, step)}</text>
+          <line x1={PAD.l} x2={PAD.l + plotW} y1={y(v)} y2={y(v)} style={{ stroke: COLOR.line, strokeWidth: 1, opacity: 0.45 }} strokeDasharray="2 6" />
+          <text x={PAD.l - SPACE.sm} y={y(v) + 4} textAnchor="end" style={{ fill: COLOR.muted, fontSize: 11, fontFamily: MONO }}>{fmtTick(v, step)}</text>
         </g>
       ))}
       {zero && lo < 0 && hi > 0 && (
         <line x1={PAD.l} x2={PAD.l + plotW} y1={y(0)} y2={y(0)} style={{ stroke: colors.text.muted, strokeWidth: 1 }} />
       )}
-      <text x={PAD.l + 6} y={y0 + 14} style={{ fill: colors.text.muted, fontSize: 10.5, fontWeight: 600, letterSpacing: 0.5 }}>{label}</text>
+      <text x={PAD.l + SPACE.sm} y={y0 + 16} style={{ fill: COLOR.muted, fontSize: 11, letterSpacing: 0.3 }}>{label}</text>
       <g clipPath={`url(#${clipId})`}>
         {(overlays || []).filter((o) => !hidden[o.label]).map((o, i) => {
           if (o.type === "shade" || o.type === "box") {
@@ -310,7 +314,7 @@ function Pane({ y0, h, width, xOf, bars: allBars, tf, overlays, levels: allLevel
           );
         })}
         {line && line.length > 1 && (
-          <path d={pathOf(line, 1, false)} style={{ fill: "none", stroke: colors.primary, strokeWidth: 1.8 }} />
+          <path d={pathOf(line, 1, false)} style={{ fill: "none", stroke: COLOR.ink, strokeWidth: 1.8 }} />
         )}
         {(overlays || []).filter((o) => !hidden[o.label] && (o.type === "line" || o.type === "dots")).map((o, i) => (
           o.type === "line"
@@ -329,14 +333,17 @@ function Pane({ y0, h, width, xOf, bars: allBars, tf, overlays, levels: allLevel
           const xb = l.to_ts != null ? xOf(l.to_ts) : PAD.l + plotW;
           if (xa == null || xb == null || l.value < lo || l.value > hi) return null;
           // a very short trade still gets a visible stub (never past the plot edge)
+          // ── LIVE_CHART_SYSTEM_20261117 ── the live price is a quiet guide (thin, dashed), not a rule across the pane
+          const isLive = l.kind === "live";
           return <line key={`v${i}`} x1={xa} x2={Math.min(PAD.l + plotW, Math.max(xb, xa + 56))} y1={y(l.value)} y2={y(l.value)}
-            style={{ stroke: col(l.color), strokeWidth: 1.3, strokeDasharray: l.dash === false ? undefined : "6 4" }} />;
+            style={{ stroke: col(l.color), strokeWidth: isLive ? 1 : 1.3, opacity: isLive ? 0.7 : 1,
+                     strokeDasharray: isLive ? "3 3" : l.dash === false ? undefined : "6 4" }} />;
         })}
         {(vlines || []).map((v, i) => {
           const xa = xOf(v.ts);
           if (xa == null) return null;
           return <line key={`x${i}`} x1={xa} x2={xa} y1={y0} y2={y0 + h}
-            style={{ stroke: v.kind === "entry" ? colors.primary : colors.text.muted, strokeWidth: 1, strokeDasharray: "3 3", opacity: 0.7 }} />;
+            style={{ stroke: COLOR.muted, strokeWidth: 1, strokeDasharray: "2 4", opacity: 0.8 }} />;
         })}
         {(markers || []).map((m, i) => {   // price tags: entry to the left, exit to the right (flipped at the edges)
           const xa = xOf(m.ts);
@@ -344,18 +351,18 @@ function Pane({ y0, h, width, xOf, bars: allBars, tf, overlays, levels: allLevel
           const text = m.kind === "exit"
             ? `exit ${px2(m.price)}${m.reason ? ` ${m.reason}` : ""} ${hhmm(m.ts)}`
             : `${m.onSpot ? "entry" : m.short ? "sell" : "buy"} ${px2(m.price)} ${hhmm(m.ts)}`;
-          const w = text.length * 6.1 + 10;
+          const w = text.length * 6.7 + 12;
           let x0 = m.kind === "exit" ? xa + 9 : xa - 9 - w;
           if (x0 < PAD.l + 2) x0 = xa + 9;
           if (x0 + w > PAD.l + plotW - 2) x0 = xa - 9 - w;
           const yy = Math.min(Math.max(y(m.price) + (m.kind === "exit" ? 12 : -12), y0 + 18), y0 + h - 10);
-          const tone = m.kind === "exit" ? (m.win == null ? colors.text.secondary : m.win ? colors.profit : colors.loss)
-            : m.onSpot ? colors.primary : (m.short ? colors.loss : colors.profit);
+          // ── LIVE_CHART_SYSTEM_20261117 ── a tag is ink on the page background; only an exit's result is coloured
+          const tone = m.kind === "exit" ? (m.win == null ? COLOR.ink : m.win ? colors.profit : colors.loss) : COLOR.ink;
           return (
             <g key={`tag${i}`} pointerEvents="none">
-              <rect x={x0} y={yy - 8} width={w} height={15} rx={3}
-                style={{ fill: colors.bg.elevated, stroke: tone, strokeWidth: 1, opacity: 0.94 }} />
-              <text x={x0 + 5} y={yy + 3} style={{ fill: tone, fontSize: 10, fontFamily: MONO, fontWeight: 600 }}>{text}</text>
+              <rect x={x0} y={yy - 9} width={w} height={18} rx={4}
+                style={{ fill: "var(--c-bg-primary)", stroke: COLOR.line, strokeWidth: 1, opacity: 0.96 }} />
+              <text x={x0 + 6} y={yy + 4} style={{ fill: tone, fontSize: 11, fontFamily: MONO }}>{text}</text>
             </g>
           );
         })}
@@ -373,21 +380,21 @@ function Pane({ y0, h, width, xOf, bars: allBars, tf, overlays, levels: allLevel
           }
           const upArrow = !m.short;
           const d = upArrow ? `M${xa},${yy - 1}L${xa - 6},${yy + 10}L${xa + 6},${yy + 10}Z` : `M${xa},${yy + 1}L${xa - 6},${yy - 10}L${xa + 6},${yy - 10}Z`;
-          return <path key={`m${i}`} d={d} style={{ fill: upArrow ? colors.profit : colors.loss, stroke: colors.bg.primary, strokeWidth: 1 }}>
+          return <path key={`m${i}`} d={d} style={{ fill: COLOR.ink, stroke: "var(--c-bg-primary)", strokeWidth: 1 }}>
             <title>{`${m.short ? "sell" : "buy"} ${hhmm(m.ts)} @ ${px2(m.price)}`}</title></path>;
         })}
       </g>
       {(() => {   // right-axis labels, nudged apart so equal/near levels (SL = exit) stay readable
         const tags = (levels || []).filter((l) => !hidden[l.label] && l.value >= lo && l.value <= hi)
           .map((l) => ({ l, yy: y(l.value) + 3.5 })).sort((a, b) => a.yy - b.yy);
-        for (let k = 1; k < tags.length; k++) if (tags[k].yy - tags[k - 1].yy < 11) tags[k].yy = tags[k - 1].yy + 11;
+        for (let k = 1; k < tags.length; k++) if (tags[k].yy - tags[k - 1].yy < 14) tags[k].yy = tags[k - 1].yy + 14;
         return tags.map(({ l, yy }, i) => (
-          <text key={`t${i}`} x={PAD.l + plotW + 4} y={yy}
-            style={{ fill: col(l.color), fontSize: 10, fontFamily: MONO }}>{String(l.tag || l.label).replace(/^signal /, "sig ").slice(0, 15)}</text>   /* ── TRADE_REPLAY_STREAM_20261017 ── tag: moving live price */
+          <text key={`t${i}`} x={PAD.l + plotW + SPACE.sm} y={yy}
+            style={{ fill: col(l.color), fontSize: 11, fontFamily: MONO }}>{String(l.tag || l.label).replace(/^signal /, "sig ").slice(0, 15)}</text>   /* ── TRADE_REPLAY_STREAM_20261017 ── tag: moving live price */
         ));
       })()}
       {crossTs != null && xOf(crossTs) != null && (
-        <line x1={xOf(crossTs)} x2={xOf(crossTs)} y1={y0} y2={y0 + h} style={{ stroke: colors.text.secondary, strokeWidth: 1, opacity: 0.55 }} />
+        <line x1={xOf(crossTs)} x2={xOf(crossTs)} y1={y0} y2={y0 + h} style={{ stroke: COLOR.ink, strokeWidth: 1, opacity: 0.35 }} />
       )}
     </g>
   );
@@ -398,13 +405,14 @@ function Legend({ items: raw, hidden, toggle }) {
   const items = raw.filter((o) => (seen.has(o.label) ? false : seen.add(o.label)));   // one chip per label (toggles all)
   if (!items.length) return null;
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+    <div style={{ display: "flex", flexWrap: "wrap", gap: `${SPACE.xs}px ${SPACE.lg}px`, alignItems: "center" }}>
       {items.map((o) => (
         <button key={o.label} type="button" onClick={() => toggle(o.label)} title={hidden[o.label] ? "show" : "hide"}
-          style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "2px 8px", borderRadius: 999,
-                   border: `1px solid ${colors.border.light}`, background: "transparent", cursor: "pointer",
-                   color: colors.text.secondary, fontSize: 11, opacity: hidden[o.label] ? 0.4 : 1 }}>
-          <span style={{ width: 10, height: 3, borderRadius: 2, background: col(o.color) }} />{o.label}
+          style={{ display: "inline-flex", alignItems: "center", gap: SPACE.sm, padding: 0, border: 0, background: "transparent",
+                   cursor: "pointer", color: COLOR.muted, ...TYPE.meta, opacity: hidden[o.label] ? 0.4 : 1,
+                   textDecoration: hidden[o.label] ? "line-through" : "none" }}>
+          <span style={{ width: SPACE.md, height: 0, opacity: o.kind === "live" ? 0.7 : 1,
+                         borderTop: `${o.kind === "live" ? 1 : 2}px ${o.dash || o.type === "level" || o.kind === "live" ? "dashed" : "solid"} ${col(o.color)}` }} />{o.label}
         </button>
       ))}
     </div>
@@ -416,8 +424,8 @@ function Legend({ items: raw, hidden, toggle }) {
 // of the way from entry to SL; green ≥ 80 % of the way to TP).
 const legName = (sym) => { const m = String(sym || "").match(/(\d+(?:\.\d+)?)(CE|PE)$/); return m ? `${m[1]}${m[2]}` : String(sym || ""); };
 function LiveStrip({ live, okAt, nowMs, viewSym, extra = null }) {   // ── TRADE_REPLAY_METER_20261030 ── extra = meter chip
-  const box = { display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "7px 18px",
-                borderBottom: `1px solid ${colors.border.dark}`, fontSize: 12, fontFamily: MONO, color: colors.text.secondary };
+  const box = { display: "flex", alignItems: "center", gap: `${SPACE.sm}px ${SPACE.xl}px`, flexWrap: "wrap", padding: `${SPACE.md}px ${SPACE.xl}px`,   // ── LIVE_CHART_SYSTEM_20261117 ──
+                borderBottom: `1px solid ${COLOR.line}`, ...TYPE.body, ...NUM, color: COLOR.muted };
   if (!live.active) {
     if (live.watch) return <div style={box}><span style={{ color: colors.text.muted }}>Market closed — showing the last session; live updates resume at 09:15 IST</span>{extra}</div>;
     if (!live.open) return extra ? <div style={box}>{extra}</div> : null;
@@ -430,31 +438,33 @@ function LiveStrip({ live, okAt, nowMs, viewSym, extra = null }) {   // ── T
   const lvl = (l, k) => {
     if (!l[k]) return null;
     const used = l[`${k}_used`] || 0;
-    const c = k === "sl" ? (used >= 0.8 ? colors.loss : used >= 0.5 ? colors.warning : colors.text.secondary)
-      : (used >= 0.8 ? colors.profit : colors.text.secondary);
+    // ── LIVE_CHART_SYSTEM_20261117 ── quiet until it matters: amber ≥ 50 % / red ≥ 80 % to SL, green ≥ 80 % to TP
+    const c = k === "sl" ? (used >= 0.8 ? colors.loss : used >= 0.5 ? colors.warning : COLOR.muted)
+      : (used >= 0.8 ? colors.profit : COLOR.muted);
     return (
-      <span style={{ color: c, fontWeight: used >= 0.8 ? 700 : 500 }}
-        title={`${Math.round(used * 100)}% of the way from entry to ${k.toUpperCase()}`}>
-        {k.toUpperCase()} {px2(l[k])}{l[`${k}_dist`] != null ? ` · ${px2(l[`${k}_dist`])} (${Number(l[`${k}_pct`]).toFixed(1)}%) away` : ""}
+      <span style={{ color: c, fontWeight: used >= 0.5 ? 600 : 400 }}
+        title={`${Math.round(used * 100)}% of the way from entry to ${k.toUpperCase()} · ${Number(l[`${k}_pct`]).toFixed(1)}% away`}>
+        {k.toUpperCase()} <span style={{ color: used >= 0.5 ? c : COLOR.ink }}>{px2(l[k])}</span>{l[`${k}_dist`] != null ? ` · ${px2(l[`${k}_dist`])} away` : ""}
       </span>
     );
   };
   return (
     <div style={box}>
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: tone, fontWeight: 700 }}
+      <span style={{ display: "inline-flex", alignItems: "center", gap: SPACE.sm, color: stale ? tone : COLOR.ink, fontWeight: 600 }}
         title={stale ? (live.no_feed?.length ? `no live price for ${live.no_feed.join(", ")}` : "the live feed has not updated recently") : "live"}>
         <i style={{ width: 7, height: 7, borderRadius: "50%", background: tone, display: "inline-block",
                     animation: stale ? "none" : "rpLivePulse 1.6s ease-in-out infinite" }} />
         LIVE <span style={{ fontWeight: 400, color: colors.text.muted }}>{age == null ? "" : `${age}s ago`}{live.max_age_s != null && live.max_age_s > 10 ? ` · feed ${Math.round(live.max_age_s)}s old` : ""}</span>
       </span>
-      {live.spot_ltp != null && <span>NIFTY <b style={{ color: colors.text.primary }}>{Number(live.spot_ltp).toFixed(2)}</b></span>}
+      {live.spot_ltp != null && <span>NIFTY <span style={{ color: COLOR.ink }}>{Number(live.spot_ltp).toFixed(2)}</span></span>}
       {!legs.length && !extra && <span style={{ color: colors.text.muted, fontFamily: "var(--c-font-ui)" }}>no open position · watching for an entry</span>}
       {legs.map((l) => (
-        <span key={l.key} style={{ display: "inline-flex", alignItems: "center", gap: 10, padding: "2px 10px", borderRadius: 6,
-                                   border: `1px solid ${l.symbol === viewSym ? colors.primary : colors.border.dark}` }}>
-          <span style={{ color: l.short ? colors.loss : colors.profit, fontWeight: 700 }} title={l.symbol}>{l.short ? "S" : "B"} {l.label || legName(l.symbol)}</span>
-          <b style={{ color: colors.text.primary }}>{l.ltp == null ? "no price" : px2(l.ltp)}</b>
-          {l.pnl != null && <span style={{ color: l.pnl >= 0 ? colors.profit : colors.loss }}>{inr(l.pnl)}</span>}
+        <span key={l.key} data-live-leg style={{ display: "inline-flex", alignItems: "baseline", gap: SPACE.md }}>
+          <span style={{ color: COLOR.ink, fontWeight: 600, fontFamily: "var(--c-font-ui)",
+                         boxShadow: l.symbol === viewSym ? `inset 0 -2px 0 ${COLOR.ink}` : "none" }} title={l.symbol}>
+            <span style={{ ...TYPE.meta, color: COLOR.muted, fontWeight: 400, marginRight: SPACE.xs }}>{l.short ? "SELL" : "BUY"}</span>{l.label || legName(l.symbol)}</span>
+          <span style={{ color: COLOR.ink }}>{l.ltp == null ? "no price" : px2(l.ltp)}</span>
+          {l.pnl != null && <span style={{ fontWeight: 600, color: l.pnl > 0 ? colors.profit : l.pnl < 0 ? colors.loss : COLOR.ink }}>{inr(l.pnl)}</span>}
           {lvl(l, "sl")}
           {lvl(l, "tp")}
         </span>
@@ -476,10 +486,10 @@ function LiveStrip({ live, okAt, nowMs, viewSym, extra = null }) {   // ── T
 // battery, level word, short reason — that opens the big dial + the full
 // checklist. Numbers come from the server (waiting.meter_for), computed from
 // the same checklist; starts collapsed, and collapses again on a strategy change.
-const METER_BLUE = "#5aa9ff";
+const METER_BLUE = COLOR.muted;   // ── LIVE_CHART_SYSTEM_20261117 ── early entry readiness reads quiet
 function meterTone(m) {
   if (!m || m.side === "none" || m.side === "timed") return colors.text.secondary;
-  if (m.side === "entry") return m.word === "blocked" ? colors.warning : (m.level >= 3 ? colors.primary : m.level >= 2 ? colors.primary : METER_BLUE);
+  if (m.side === "entry") return m.word === "blocked" ? colors.warning : (m.level >= 2 ? COLOR.ink : METER_BLUE);
   if (m.score >= 90) return colors.loss;
   if (m.score >= 45) return colors.warning;
   return colors.profit;
@@ -525,7 +535,7 @@ function Dial({ m, size = 52, labels = false }) {
     </svg>
   );
 }
-function MeterChip({ m, open, onToggle }) {
+export function MeterChip({ m, open, onToggle, compact = false }) {   // ── PHONE_METER_20261117 ── exported; compact = phone
   if (!m) return null;
   const tone = meterTone(m);
   const side = m.side === "entry" ? "ENTRY" : m.side === "exit" ? "EXIT" : m.side === "hold" ? "HOLD" : m.side === "timed" ? "TIMED" : "STATUS";
@@ -534,23 +544,25 @@ function MeterChip({ m, open, onToggle }) {
   return (
     <button type="button" onClick={onToggle} aria-expanded={open} data-testid="replay-meter"
       aria-label={`${side} ${num || ""} ${m.word}. ${open ? "Hide" : "Show"} conditions`}
-      style={{ display: "inline-flex", alignItems: "center", gap: 10, padding: "3px 11px 3px 7px", borderRadius: 10, cursor: "pointer",
-               border: `1px solid ${tone}`, background: "transparent", color: colors.text.primary, font: "inherit" }}>
-      {m.score != null && <Dial m={m} size={46} />}
-      <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".8px", color: tone }}>{side}</span>
-      {num && <span style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: tone }}>{num}</span>}
+      style={{ display: compact ? "flex" : "inline-flex", flexWrap: compact ? "wrap" : undefined, width: compact ? "100%" : undefined,
+               textAlign: "left", rowGap: SPACE.xs, alignItems: "center", gap: SPACE.md, padding: `${SPACE.xs}px ${SPACE.md}px ${SPACE.xs}px ${SPACE.sm}px`, borderRadius: 8, cursor: "pointer",   // ── LIVE_CHART_SYSTEM_20261117 ──
+               border: `1px solid ${COLOR.line}`, background: "transparent", color: COLOR.ink, font: "inherit" }}>
+      {m.score != null && <Dial m={m} size={40} />}
+      <span style={{ ...CAPS, fontWeight: 600, color: tone }}>{side}</span>
+      {num && <span style={{ ...TYPE.body, ...NUM, fontWeight: 600, color: tone }}>{num}</span>}
       {m.level != null && (
-        <span style={{ display: "inline-flex", gap: 3 }} aria-hidden="true">
+        <span style={{ display: "inline-flex", gap: 2 }} aria-hidden="true">
           {[0, 1, 2, 3, 4].map((i) => (
-            <span key={i} style={{ width: 12, height: 9, borderRadius: 2, background: i < segs ? tone : colors.border.dark }} />
+            <span key={i} style={{ width: 10, height: 6, borderRadius: 1, background: i < segs ? tone : COLOR.line }} />
           ))}
         </span>
       )}
-      <span style={{ fontSize: 12.5, fontWeight: 600, color: tone }}>{m.word}</span>
-      {m.reason && <span style={{ fontSize: 11.5, color: colors.text.secondary, maxWidth: 360, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m.reason}</span>}
-      <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true">
+      <span style={{ ...TYPE.body, fontWeight: 600, color: tone }}>{m.word}</span>
+      {m.reason && !compact && <span style={{ ...TYPE.meta, color: COLOR.muted, maxWidth: 360, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m.reason}</span>}
+      <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true" style={compact ? { marginLeft: "auto" } : undefined}>
         <path d={open ? "M3 7.5 L6 4.5 L9 7.5" : "M3 4.5 L6 7.5 L9 4.5"} fill="none" stroke={colors.text.muted} strokeWidth="1.6" strokeLinecap="round" />
       </svg>
+      {m.reason && compact && <span style={{ ...TYPE.meta, color: COLOR.muted, flexBasis: "100%" }}>{m.reason}</span>}   {/* ── PHONE_METER_20261117 ── own line */}
     </button>
   );
 }
@@ -559,50 +571,58 @@ const WAIT_TONE = { waiting: "secondary", ready: "profit", blocked: "warning", w
                     holding: "profit", near: "warning", exit: "loss" };   // ── TRADE_REPLAY_HOLD_20261030 ── in-trade states
 const WAIT_LABEL = { waiting: "WAITING", ready: "READY", blocked: "BLOCKED", warming: "WARMING UP", timed: "TIMED", unknown: "—",
                      holding: "IN TRADE", near: "EXIT NEAR", exit: "EXIT DUE" };
-function WaitingPanel({ w }) {
+export function WaitingPanel({ w, compact = false }) {   // ── PHONE_METER_20261117 ── exported; compact = phone (stacked)
   if (!w || !w.headline) return null;
   const toneKey = WAIT_TONE[w.status] || "secondary";
   const tone = toneKey === "secondary" ? colors.text.secondary : toneKey === "muted" ? colors.text.muted : colors[toneKey];
   const m = w.meter;   // ── TRADE_REPLAY_METER_20261030 ── big dial beside the checklist
   return (
-    <div data-testid="replay-waiting" style={{ padding: "10px 18px 12px", borderBottom: `1px solid ${colors.border.dark}`,
-                                              display: "flex", gap: 22, alignItems: "center" }}>
+    <div data-testid="replay-waiting" style={compact
+      ? { padding: `${SPACE.md}px 0 0`, display: "flex", flexDirection: "column", gap: SPACE.lg, alignItems: "stretch" }
+      : { padding: `${SPACE.md}px ${SPACE.xl}px ${SPACE.lg}px`, borderBottom: `1px solid ${COLOR.line}`,
+          display: "flex", gap: SPACE.xl, alignItems: "center" }}>
     {m && m.score != null && (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0 }}>
-        <Dial m={m} size={150} labels />
-        <span style={{ fontFamily: MONO, fontSize: 20, fontWeight: 700, color: meterTone(m) }}>{m.side === "hold" && m.tp_pct ? `TP ${m.tp_pct}%` : `${m.score}%`}</span>
-        <span style={{ fontSize: 11, color: colors.text.muted }}>{m.side === "entry" ? "entry readiness"
+        <Dial m={m} size={compact ? 128 : 150} labels />
+        <span style={{ ...TYPE.figure, color: meterTone(m) }}>{m.side === "hold" && m.tp_pct ? `TP ${m.tp_pct}%` : `${m.score}%`}</span>
+        <span style={{ ...TYPE.meta, color: COLOR.muted }}>{m.side === "entry" ? "entry readiness"
           : (m.side === "hold" && m.tp_pct ? `TP progress · exit pressure ${m.score}%` : "exit pressure")}</span>   {/* ── TRADE_REPLAY_METER_FIX1_20261030 ── */}
       </div>
     )}
-    <div style={{ display: "flex", flexDirection: "column", gap: 7, flex: 1, minWidth: 0 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, fontSize: 13, color: colors.text.primary, lineHeight: 1.45 }}>
-        <span style={{ flexShrink: 0, fontSize: 10.5, fontWeight: 700, letterSpacing: "0.5px", padding: "2px 8px", borderRadius: 999,
-                       border: `1px solid ${tone}`, color: tone }}>{WAIT_LABEL[w.status] || "—"}</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: SPACE.sm, flex: 1, minWidth: 0 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: SPACE.md, ...TYPE.body, color: COLOR.ink }}>
+        <span style={{ flexShrink: 0, ...CAPS, fontWeight: 600, color: tone }}>{WAIT_LABEL[w.status] || "—"}</span>
         <span>{w.headline}</span>
       </div>
       {(w.items || []).length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: compact ? `${SPACE.sm}px 0` : `${SPACE.xs}px ${SPACE.lg}px` }}>
           {w.items.map((it, i) => {
-            const c = it.ok === true ? colors.profit : it.ok === false ? colors.loss : colors.text.muted;
+            const c = it.ok === true ? colors.profit : it.ok === false ? colors.loss : COLOR.muted;
             return (
-              <span key={i} style={{ display: "inline-flex", alignItems: "baseline", gap: 6, fontSize: 11.5, padding: "3px 9px",
-                                     borderRadius: 6, border: `1px solid ${colors.border.dark}`, color: colors.text.secondary }}>
+              compact ? (   /* ── PHONE_METER_20261117 ── one condition per row, its value under it */
+                <span key={i} style={{ display: "grid", gridTemplateColumns: `${SPACE.md}px 1fr`, columnGap: SPACE.sm, ...TYPE.body, color: COLOR.muted, width: "100%" }}>
+                  <b style={{ color: c }}>{it.ok === true ? "✓" : it.ok === false ? "✗" : "·"}</b>
+                  <span>{it.text}</span>
+                  {it.value ? <span style={{ gridColumn: 2, fontFamily: MONO, ...TYPE.meta, color: colors.text.primary }}>{it.value}</span> : null}
+                </span>
+              ) : (
+              <span key={i} style={{ display: "inline-flex", alignItems: "baseline", gap: SPACE.sm, ...TYPE.body, color: COLOR.muted }}>
                 <b style={{ color: c }}>{it.ok === true ? "✓" : it.ok === false ? "✗" : "·"}</b>
                 {it.text}
                 {it.value ? <span style={{ fontFamily: MONO, color: colors.text.primary }}>{it.value}</span> : null}
               </span>
+              )
             );
           })}
         </div>
       )}
       {w.provisional && (
-        <div style={{ fontSize: 12, color: colors.text.secondary }}>
-          <span style={{ fontFamily: MONO, color: colors.primary, marginRight: 6 }}>┄</span>{w.provisional}
+        <div style={{ ...TYPE.meta, color: COLOR.muted }}>
+          <span style={{ fontFamily: MONO, color: COLOR.ink, marginRight: SPACE.sm }}>┄</span>{w.provisional}
         </div>
       )}
       {((w.events || []).length > 0 || w.action) && (
-        <div style={{ fontSize: 11.5, color: colors.text.muted, lineHeight: 1.5 }}>
+        <div style={{ ...TYPE.meta, color: COLOR.muted }}>
           {(w.events || []).length > 0 && <div>today: {w.events.slice(-3).join(" · ")}</div>}
           {w.action && <div>{w.mode === "hold" ? "holding " : ""}{w.action}{w.as_of_ts ? ` · as of the ${hhmm(w.as_of_ts)} close` : ""}</div>}
         </div>
@@ -614,11 +634,11 @@ function WaitingPanel({ w }) {
 
 function Chip({ on, children, onClick, title }) {
   return (
-    <button type="button" onClick={onClick} title={title}
-      style={{ padding: "3px 9px", borderRadius: 6, fontSize: 11.5, cursor: "pointer", fontWeight: on ? 600 : 500,
-               border: `1px solid ${on ? colors.primary : colors.border.light}`,
-               background: on ? alpha(colors.primary, 16) : "transparent",
-               color: on ? colors.text.primary : colors.text.secondary }}>{children}</button>
+    // ── LIVE_CHART_SYSTEM_20261117 ── a word, not a box: selected = ink + 2 px underline
+    <button type="button" onClick={onClick} title={title} aria-pressed={on ? "true" : "false"}
+      style={{ padding: `${SPACE.xs}px ${SPACE.xs}px`, border: 0, borderRadius: 0, cursor: "pointer", background: "transparent",
+               ...TYPE.body, fontWeight: on ? 600 : 400, color: on ? COLOR.ink : COLOR.muted,
+               boxShadow: on ? `inset 0 -2px 0 ${COLOR.ink}` : "none" }}>{children}</button>
   );
 }
 
@@ -638,6 +658,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
   const [width, setWidth] = useState(1100);
   const [win, setWin] = useState(null);          // visible [u0, u1] in session minutes
   const [dragging, setDragging] = useState(false);
+  const [showNotes, setShowNotes] = useState(false);   // ── LIVE_CHART_SYSTEM_20261117 ── provenance notes folded
   const hostRef = useRef(null);
   const svgRef = useRef(null);
   const winRef = useRef(null);
@@ -939,7 +960,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
 
   const g = data?.group;
   const firstDay = data?.window?.days?.[0];
-  const card = { background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 10 };
+  const card = { background: "transparent", border: `1px solid ${COLOR.line}`, borderRadius: 8 };   // ── LIVE_CHART_SYSTEM_20261117 ──
 
   return (
     <div role={embedded ? "region" : "dialog"} aria-modal={embedded ? undefined : "true"}
@@ -948,68 +969,63 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
       style={embedded ? { position: "relative", width: "100%" }   /* ── TRADE_REPLAY_WATCH_20261021 ── inline card */
         : { position: "fixed", inset: 0, zIndex: 1200, background: "rgba(2,6,23,0.62)",
             display: "flex", alignItems: "center", justifyContent: "center", padding: "2vh 2vw" }}>
-      <div style={embedded ? { ...card, width: "100%", display: "flex", flexDirection: "column", background: colors.bg.primary, overflow: "hidden" }
+      <div style={embedded ? { ...card, width: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }
         : { ...card, width: "min(1500px, 96vw)", height: "96vh", display: "flex", flexDirection: "column",
-            background: colors.bg.primary, boxShadow: "0 24px 64px rgba(0,0,0,0.45)", overflow: "hidden" }}>
-        {/* header */}
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: spacing.md,
-                      padding: "14px 18px 10px", borderBottom: `1px solid ${colors.border.dark}` }}>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <span style={{ ...(embedded ? typography.headingSmall : typography.headingLarge), color: colors.text.primary }}>
-                {data?.watch ? (embedded ? "Live chart" : "Strategy watch") : (embedded ? "Live chart · open position" : "Trade replay")}</span>
-              {data && <span style={{ ...typography.label, color: colors.text.muted }}>{data.strategy_id} · {data.underlying}</span>}
-              {data && sourceLabel && (   /* ── TRADE_REPLAY_LIVE_20261017 ── which page opened it */
-                <span style={{ fontSize: 10.5, padding: "2px 8px", borderRadius: 999, border: `1px solid ${colors.border.light}`,
-                               color: colors.text.secondary }}>{sourceLabel}</span>
-              )}
-              {data && (
-                <span title={`${TIER_TEXT[data.parity?.tier] || ""}\n${data.parity?.detail || ""}`}
-                  style={{ fontSize: 10.5, padding: "2px 8px", borderRadius: 999, border: `1px solid ${colors.border.light}`,
-                           color: data.parity?.tier === "exact" ? colors.profit : colors.text.secondary }}>
-                  indicators: {data.parity?.tier}
+            background: "var(--c-bg-primary)", overflow: "hidden" }}>
+        {/* header — ── LIVE_CHART_SYSTEM_20261117 ── one hero figure (open P&L at LTP, else the trade's net),
+            one muted context line; the title only in full screen (the Dashboard card titles itself) */}
+        {(() => {
+          const openPnl = g && g.open_legs > 0 && (data.live?.legs || []).some((l) => l.pnl != null)
+            ? data.live.legs.reduce((a, l) => a + (l.pnl || 0), 0) : null;
+          const hero = !g || g.watch ? null : openPnl != null ? { v: openPnl, label: "open P&L at LTP · gross" } : { v: g.net, label: "net" };
+          const ctx = [];
+          if (g && !g.watch && firstDay) ctx.push(`${longDay(firstDay)}${data.window.days.length > 1 ? ` → ${dayLabel(data.window.days[data.window.days.length - 1])}` : ""}`);
+          if (g && g.watch && firstDay) ctx.push(`${longDay(data.window.days[data.window.days.length - 1])}${data.waiting?.mode === "hold" ? " · open position" : ` · no open position${data.waiting ? "" : " — watching for the next entry"}`}`);
+          if (g && !g.watch) {
+            if (g.dte != null) ctx.push(`DTE ${g.dte}`);
+            ctx.push(`${legs.length} leg${legs.length > 1 ? "s" : ""}`);
+            if (g.exit_reasons?.length) ctx.push(g.exit_reasons.join(", "));
+            if (openPnl != null) ctx.push(`realised ${inr(g.net)} net`);
+          }
+          const tier = data ? `indicators ${data.parity?.tier}` : null;
+          return (
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: SPACE.lg,
+                          padding: `${SPACE.lg}px ${SPACE.xl}px`, borderBottom: `1px solid ${COLOR.line}` }}>
+              <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: SPACE.xs }}>
+                {!embedded && (
+                  <div style={{ display: "flex", alignItems: "baseline", gap: SPACE.md, flexWrap: "wrap" }}>
+                    <span style={{ ...TYPE.title, color: COLOR.ink }}>{data?.watch ? "Strategy watch" : "Trade replay"}</span>
+                    {data && <span style={{ ...TYPE.meta, color: COLOR.muted }}>{data.strategy_id} · {data.underlying}{sourceLabel ? ` · from ${sourceLabel}` : ""}</span>}
+                  </div>
+                )}
+                {hero && (
+                  <div style={{ display: "flex", alignItems: "baseline", gap: SPACE.md, flexWrap: "wrap" }} data-testid="replay-hero">
+                    <span style={{ ...TYPE.figure, color: hero.v > 0 ? colors.profit : hero.v < 0 ? colors.loss : COLOR.ink }}>{inr(hero.v)}</span>
+                    <span style={{ ...TYPE.meta, color: COLOR.muted }}>{hero.label}</span>
+                  </div>
+                )}
+                {data && (
+                  <div style={{ ...TYPE.meta, color: COLOR.muted }}>
+                    {embedded ? `${data.strategy_id} · ${data.underlying} · ` : ""}{ctx.join(" · ")}{ctx.length ? " · " : ""}
+                    <span title={`${TIER_TEXT[data.parity?.tier] || ""}\n${data.parity?.detail || ""}`} style={{ textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{tier}</span>
+                    {data.config_brief ? ` · ${data.config_brief}` : ""}
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: SPACE.md, flexShrink: 0 }}>
+                <button type="button" onClick={() => go("prev")} disabled={nav?.prev_trade_id == null} style={navBtn(nav?.prev_trade_id == null)}>‹ Prev</button>
+                <span style={{ ...TYPE.meta, ...NUM, color: COLOR.muted, minWidth: 40, textAlign: "center" }}>
+                  {nav ? `${nav.index + 1} / ${nav.count}` : "…"}
                 </span>
-              )}
+                <button type="button" onClick={() => go("next")} disabled={nav?.next_trade_id == null} style={navBtn(nav?.next_trade_id == null)}>Next ›</button>
+                {onClose && (   /* ── TRADE_REPLAY_WATCH_20261021 ── an inline card has no close */
+                  <button type="button" onClick={onClose} aria-label="Close" title="Close (Esc)"
+                    style={{ ...navBtn(false), ...TYPE.title, marginLeft: SPACE.sm }}>✕</button>
+                )}
+              </div>
             </div>
-            {g && g.watch && (   /* ── TRADE_REPLAY_WATCH_20261021 ── */
-              <div style={{ marginTop: 4, fontSize: 12.5, color: colors.text.secondary }}>
-                {firstDay ? longDay(data.window.days[data.window.days.length - 1]) : ""}{data.waiting?.mode === "hold" ? " · open position" : ` · no open position${data.waiting ? "" : " — watching for the next entry"}`}   {/* ── TRADE_REPLAY_LVB_20261030 ── LVB tracks its own position */}
-              </div>
-            )}
-            {g && !g.watch && (
-              <div style={{ marginTop: 4, fontSize: 12.5, color: colors.text.secondary }}>
-                {firstDay ? longDay(firstDay) : ""}{data.window.days.length > 1 ? ` → ${dayLabel(data.window.days[data.window.days.length - 1])}` : ""}
-                {g.dte != null ? ` · DTE ${g.dte}` : ""} · {legs.length} leg{legs.length > 1 ? "s" : ""}
-                {g.exit_reasons?.length ? ` · ${g.exit_reasons.join(", ")}` : ""} ·{" "}
-                <b style={{ color: g.net > 0 ? colors.profit : g.net < 0 ? colors.loss : colors.text.primary, fontFamily: MONO }}>{inr(g.net)}</b>
-                <span style={{ color: colors.text.muted }}> net ({inr(g.gross)} gross){g.open_legs ? " realised" : ""}</span>
-                {/* ── TRADE_REPLAY_HOLD_FIX1_20261030 ── an open position's header read "₹0 net" while
-                    it was ₹67k up: add the open legs' P&L at the live LTP */}
-                {g.open_legs > 0 && (data.live?.legs || []).some((l) => l.pnl != null) && (() => {
-                  const op = data.live.legs.reduce((a, l) => a + (l.pnl || 0), 0);
-                  return (
-                    <span> · <b style={{ color: op > 0 ? colors.profit : op < 0 ? colors.loss : colors.text.primary, fontFamily: MONO }}>{inr(op)}</b>
-                      <span style={{ color: colors.text.muted }}> open at LTP (gross)</span></span>
-                  );
-                })()}
-              </div>
-            )}
-            {data?.config_brief && <div style={{ marginTop: 2, fontSize: 11.5, color: colors.text.muted }}>{data.config_brief}</div>}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-            <button type="button" onClick={() => go("prev")} disabled={nav?.prev_trade_id == null}
-              style={navBtn(nav?.prev_trade_id == null)}>‹ Prev</button>
-            <span style={{ fontSize: 12, color: colors.text.muted, fontFamily: MONO, minWidth: 74, textAlign: "center" }}>
-              {nav ? `${nav.index + 1} / ${nav.count}` : "…"}
-            </span>
-            <button type="button" onClick={() => go("next")} disabled={nav?.next_trade_id == null}
-              style={navBtn(nav?.next_trade_id == null)}>Next ›</button>
-            {onClose && (   /* ── TRADE_REPLAY_WATCH_20261021 ── an inline card has no close */
-              <button type="button" onClick={onClose} aria-label="Close" title="Close (Esc)"
-                style={{ ...navBtn(false), padding: "6px 10px", marginLeft: 6 }}>✕</button>
-            )}
-          </div>
-        </div>
+          );
+        })()}
 
         {/* ── TRADE_REPLAY_STREAM_20261017 ── live strip */}
         {/* ── TRADE_REPLAY_METER_20261030 ── meter chip in the LIVE row; checklist only when opened */}
@@ -1019,27 +1035,27 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
           return (<>
             {data?.live && <LiveStrip live={data.live} okAt={liveOkAt} nowMs={clock} viewSym={vSym} extra={chip} />}
             {chip && !stripShows && (
-              <div style={{ padding: "7px 18px", borderBottom: `1px solid ${colors.border.dark}` }}>{chip}</div>
+              <div style={{ padding: `${SPACE.md}px ${SPACE.xl}px`, borderBottom: `1px solid ${COLOR.line}` }}>{chip}</div>
             )}
             {data?.waiting && (meterOpen || !data.waiting.meter) && <WaitingPanel w={data.waiting} />}
           </>);
         })()}
 
         {/* body */}
-        <div style={{ flex: embedded ? "none" : 1, overflow: "auto", padding: "10px 18px 16px" }}>
-          {err && <div style={{ ...card, padding: 14, color: colors.loss, fontSize: 13 }}>Replay unavailable: {err}</div>}
-          {!data && !err && <div style={{ padding: 40, textAlign: "center", color: colors.text.muted }}>Loading replay…</div>}
+        <div style={{ flex: embedded ? "none" : 1, overflow: "auto", padding: `${SPACE.md}px ${SPACE.xl}px ${SPACE.lg}px` }}>
+          {err && <div style={{ ...card, padding: SPACE.lg, color: colors.loss, ...TYPE.body }}>Replay unavailable: {err}</div>}
+          {!data && !err && <div style={{ padding: SPACE.xxl, textAlign: "center", color: COLOR.muted, ...TYPE.body }}>Loading replay…</div>}
           {data && (
             <>
-              <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", marginBottom: 8 }}>
-                <span style={{ ...typography.label, color: colors.text.muted }}>{data.spot.label}</span>
-                <div style={{ display: "flex", gap: 4 }}>
+              <div data-testid="replay-toolbar" style={{ display: "flex", alignItems: "center", gap: `${SPACE.sm}px ${SPACE.lg}px`, flexWrap: "wrap", marginBottom: SPACE.sm }}>
+                <span style={CAPS}>{data.spot.label}</span>
+                <div style={{ display: "flex", gap: SPACE.sm }}>
                   {TF_CHOICES.map((t) => <Chip key={t} on={spotTf === t} onClick={() => pickSpotTf(t)}>{t}m</Chip>)}
                 </div>
-                {!noLower && <span style={{ width: 1, height: 18, background: colors.border.light }} />}
-                {!noLower && <span style={{ ...typography.label, color: colors.text.muted }}>Lower pane</span>}
+                {!noLower && <span style={{ width: 1, height: 16, background: COLOR.line }} />}
+                {!noLower && <span style={CAPS}>Lower pane</span>}
                 {!noLower && (
-                <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: SPACE.sm, flexWrap: "wrap" }}>
                   {(data.views || []).map((v) => (
                     <Chip key={v.key} on={view === v.key} onClick={() => pickView(v.key)}
                       title={v.synthetic ? "model-priced leg — no candles" : v.symbol || ""}>{v.label}</Chip>
@@ -1047,20 +1063,20 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                 </div>
                 )}
                 {!isBasket && !noLower && (
-                  <div style={{ display: "flex", gap: 4 }}>
+                  <div style={{ display: "flex", gap: SPACE.sm }}>
                     {haBars && <Chip on={useHa} onClick={flipHa} title="Heikin Ashi candles (HA_V1)">HA</Chip>}
                     {(!haBars || !useHa) && TF_CHOICES.map((t) => <Chip key={t} on={premTf === t} onClick={() => pickPremTf(t)}>{t}m</Chip>)}
                   </div>
                 )}
-                {loading && <span style={{ fontSize: 11, color: colors.text.muted }}>loading…</span>}
-                <span style={{ width: 1, height: 18, background: colors.border.light }} />
-                <span style={{ ...typography.label, color: colors.text.muted }}>Zoom</span>
-                <div style={{ display: "flex", gap: 4, alignItems: "center" }} data-testid="replay-zoom">
+                {loading && <span style={{ ...TYPE.meta, color: COLOR.muted }}>loading…</span>}
+                <span style={{ width: 1, height: 16, background: COLOR.line }} />
+                <span style={CAPS}>Zoom</span>
+                <div style={{ display: "flex", gap: SPACE.sm, alignItems: "center" }} data-testid="replay-zoom">
                   <Chip onClick={() => zoomAt(1 / 0.7, null)} title="Zoom out ( - )">−</Chip>
                   <Chip onClick={() => zoomAt(0.7, null)} title="Zoom in ( + )">+</Chip>
                   <Chip onClick={focusTrade} title={data.watch ? "Frame the last 2½ hours" : "Frame the trade (double-click the chart)"}>{data.watch ? "Now" : "Trade"}</Chip>
                   <Chip on={isFit} onClick={fitAll} title="Whole window ( 0 )">Fit</Chip>
-                  <span style={{ fontSize: 11, color: colors.text.muted, fontFamily: MONO, marginLeft: 4 }}>{spanTxt}</span>
+                  <span style={{ ...TYPE.meta, ...NUM, color: COLOR.muted, marginLeft: SPACE.xs }}>{spanTxt}</span>
                 </div>
               </div>
 
@@ -1116,14 +1132,14 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                       return (
                         <g key={ds}>
                           {k > 0 && inPlot(xd) && <line x1={xd} x2={xd} y1={0} y2={totalH - H_AX}
-                            style={{ stroke: colors.border.medium, strokeWidth: 1 }} />}
+                            style={{ stroke: COLOR.line, strokeWidth: 1 }} />}
                           {ticks.map(([m, xx]) => (
                             <text key={m} x={xx} y={totalH - H_AX + 13} textAnchor="middle"
-                              style={{ fill: colors.text.muted, fontSize: 10.5, fontFamily: MONO }}>
+                              style={{ fill: COLOR.muted, fontSize: 11, fontFamily: MONO }}>
                               {`${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`}</text>
                           ))}
                           {lblX != null && (
-                            <text x={lblX} y={totalH - 4} style={{ fill: colors.text.secondary, fontSize: 11, fontWeight: 600 }}>
+                            <text x={lblX} y={totalH - 4} style={{ fill: COLOR.ink, fontSize: 11, fontWeight: 600 }}>
                               {dayLabel(data.window.days[k])}</text>
                           )}
                         </g>
@@ -1140,18 +1156,18 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                       applyWin([u - (b - a) / 2, u + (b - a) / 2], false);
                     }}
                     style={{ position: "relative", marginLeft: PAD.l, width: plotW, height: 10, marginTop: 2,
-                             borderRadius: 5, background: alpha(colors.text.muted, 14), cursor: "pointer" }}>
+                             borderRadius: 4, background: alpha(colors.text.muted, 14), cursor: "pointer" }}>
                     <div data-testid="replay-thumb" onMouseDown={startThumb}
                       style={{ position: "absolute", top: 1, height: 8, borderRadius: 4, cursor: "grab",
                                left: `${(w0 / U) * 100}%`, width: `max(18px, ${((w1 - w0) / U) * 100}%)`,
-                               background: alpha(colors.primary, 55) }} />
+                               background: alpha(colors.text.muted, 55) }} />
                   </div>
                 )}
                 {tooltip && (
                   <div style={{ position: "absolute", top: 6, right: PAD.r + 8, pointerEvents: "none", ...card,
-                                background: colors.bg.elevated, padding: "6px 9px", fontSize: 11, fontFamily: MONO,
-                                color: colors.text.secondary, lineHeight: 1.55, minWidth: 170 }}>
-                    <div style={{ color: colors.text.primary, fontWeight: 600 }}>{hhmm(tooltip.ts)}</div>
+                                background: "var(--c-bg-primary)", padding: `${SPACE.sm}px ${SPACE.md}px`, ...TYPE.meta, ...NUM,
+                                color: COLOR.muted, minWidth: 170 }}>
+                    <div style={{ color: COLOR.ink, fontWeight: 600 }}>{hhmm(tooltip.ts)}</div>
                     {tooltip.sb && <div>spot O {px2(tooltip.sb[1])} H {px2(tooltip.sb[2])}<br />L {px2(tooltip.sb[3])} C {px2(tooltip.sb[4])}</div>}
                     {tooltip.pb && <div style={{ marginTop: 3 }}>prem O {px2(tooltip.pb[1])} H {px2(tooltip.pb[2])}<br />L {px2(tooltip.pb[3])} C {px2(tooltip.pb[4])}</div>}
                     {tooltip.mt && <div style={{ marginTop: 3 }}>MTM {inr(tooltip.mt[1])}</div>}
@@ -1159,20 +1175,20 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                 )}
               </div>
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, margin: "8px 0 12px" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: SPACE.sm, margin: `${SPACE.sm}px 0 ${SPACE.lg}px` }}>
                 <Legend items={[...spotOverlays.filter((o) => o.label && o.type !== "regime"), ...spotLevels]} hidden={hidden} toggle={toggle} />
                 <Legend items={[...premOverlays.filter((o) => o.label), ...premLevels]} hidden={hidden} toggle={toggle} />
               </div>
 
               {/* legs */}
               {legs.length > 0 && (   /* ── TRADE_REPLAY_WATCH_20261021 ── a watch has none */
-              <div style={{ ...card, overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <div style={{ overflowX: "auto" }}>   {/* ── LIVE_CHART_SYSTEM_20261117 ── same table as Traded today */}
+                <table data-testid="replay-legs" style={{ width: "100%", borderCollapse: "collapse", ...TYPE.body }}>
                   <thead>
-                    <tr style={{ background: colors.bg.tertiary }}>
+                    <tr>
                       {["Leg", "Side", "Qty", "In", "Out", "Entry", "Exit", "SL", "TP", "Reason", "MAE", "Net ₹"].map((h) => (
-                        <th key={h} style={{ padding: "7px 8px", textAlign: h === "Leg" || h === "Reason" || h === "Side" ? "left" : "right",
-                                             ...typography.label, color: colors.text.muted, whiteSpace: "nowrap" }}>{h}</th>
+                        <th key={h} style={{ padding: `0 ${SPACE.md}px ${SPACE.sm}px`, textAlign: h === "Leg" || h === "Reason" || h === "Side" ? "left" : "right",
+                                             ...CAPS, fontWeight: 400, whiteSpace: "nowrap", borderBottom: `1px solid ${COLOR.line}` }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -1185,29 +1201,29 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                       const lv = open ? (data.live?.legs || []).find((x) => x.symbol === l.tradingsymbol) : null;
                       const sl = l.sl ?? lv?.sl ?? null, tp = l.tp ?? lv?.tp ?? null;
                       const net = open ? (lv?.pnl ?? null) : l.net;
-                      const off = <span style={{ color: colors.text.muted, fontFamily: "var(--c-font-ui)", fontSize: 11 }}>off</span>;
+                      const off = <span style={{ color: COLOR.muted, fontFamily: "var(--c-font-ui)", ...TYPE.meta }}>off</span>;
                       return (
-                      <tr key={l.id} onClick={() => pickView(`leg:${l.id}`)} style={{ cursor: "pointer", borderTop: `1px solid ${colors.border.dark}`,
-                        background: view === `leg:${l.id}` ? alpha(colors.primary, 10) : "transparent" }}>
-                        <td style={{ padding: "7px 8px", fontFamily: MONO, whiteSpace: "nowrap", color: colors.text.primary }}>
+                      <tr key={l.id} onClick={() => pickView(`leg:${l.id}`)} style={{ cursor: "pointer", borderBottom: `1px solid ${COLOR.line}`,
+                        boxShadow: view === `leg:${l.id}` ? `inset 2px 0 0 ${COLOR.ink}` : "none" }}>
+                        <td style={{ ...num, textAlign: "left", color: COLOR.ink }}>
                           {l.tradingsymbol}{l.synthetic ? <span style={{ color: colors.warning }}> · synthetic</span> : null}
-                          {l.condition ? <span style={{ color: colors.text.muted, fontSize: 10.5 }}> · {String(l.condition).slice(0, 40)}</span> : null}
+                          {l.condition ? <span style={{ color: COLOR.muted, ...TYPE.meta }}> · {String(l.condition).slice(0, 40)}</span> : null}
                         </td>
-                        <td style={{ padding: "7px 8px", color: l.short ? colors.loss : colors.profit }}>{l.short ? "Sell" : "Buy"} {l.instrument_type}</td>
+                        <td style={{ ...num, textAlign: "left", fontFamily: "var(--c-font-ui)", color: COLOR.ink }}>{l.short ? "Sell" : "Buy"} {l.instrument_type}</td>
                         <td style={num}>{l.qty}</td>
                         <td style={num}>{l.entry_ts ? hhmm(l.entry_ts) : "—"}</td>
                         <td style={num}>{l.exit_ts ? hhmm(l.exit_ts) : "open"}</td>
                         <td style={num}>{px2(l.entry_price)}</td>
                         <td style={num}>{open
-                          ? (lv?.ltp != null ? <span title="live LTP — the leg is still open"><span style={{ color: colors.text.muted, fontSize: 10.5 }}>LTP </span>{px2(lv.ltp)}</span> : "—")
+                          ? (lv?.ltp != null ? <span title="live LTP — the leg is still open"><span style={{ color: COLOR.muted, ...TYPE.meta }}>LTP </span>{px2(lv.ltp)}</span> : "—")
                           : px2(l.exit_price)}</td>
                         <td style={{ ...num, color: colors.loss }}>{sl != null ? px2(sl) : (open ? off : "—")}{sl != null && data.sl_basis === "spot" ? "ˢ" : ""}</td>
                         <td style={{ ...num, color: colors.profit }}>{tp != null ? px2(tp) : (open ? off : "—")}{tp != null && data.tp_basis === "spot" ? "ˢ" : ""}</td>
-                        <td style={{ padding: "7px 8px" }}>{l.exit_reason || (open ? <span style={{ color: colors.text.muted }}>open</span> : "—")}{l.ambiguous ? " ⚠️" : ""}</td>
+                        <td style={{ ...num, textAlign: "left", fontFamily: "var(--c-font-ui)" }}>{l.exit_reason || (open ? <span style={{ color: COLOR.muted }}>open</span> : "—")}{l.ambiguous ? " ⚠️" : ""}</td>
                         <td style={num}>{px2(l.max_adverse)}</td>
-                        <td style={{ ...num, fontWeight: 700, color: net > 0 ? colors.profit : net < 0 ? colors.loss : colors.text.primary }}
+                        <td style={{ ...num, fontWeight: 600, color: net > 0 ? colors.profit : net < 0 ? colors.loss : COLOR.ink }}
                             title={open ? "open P&L at the live LTP, gross (before charges)" : undefined}>
-                          {net == null ? "—" : inr(net)}{open && net != null ? <span style={{ fontWeight: 400, color: colors.text.muted, fontSize: 10.5 }}> open</span> : null}
+                          {net == null ? "—" : inr(net)}{open && net != null ? <span style={{ fontWeight: 400, color: COLOR.muted, ...TYPE.meta }}> open</span> : null}
                         </td>
                       </tr>
                       );
@@ -1216,12 +1232,22 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                 </table>
               </div>
               )}
-              <div style={{ marginTop: 8, fontSize: 11.5, color: colors.text.muted, lineHeight: 1.6 }}>
-                {(data.sl_basis === "spot" || data.tp_basis === "spot") && <div>ˢ level on the underlying (drawn on the upper pane)</div>}
-                <div>{TIER_TEXT[data.parity?.tier] || ""}{data.parity?.detail ? ` · ${data.parity.detail}` : ""}</div>
-                {(data.notes || []).map((n, i) => <div key={i}>• {n}</div>)}
-                {!embedded && <div style={{ opacity: 0.8 }}>← / → previous / next trade · Esc closes · click a legend chip to hide a line</div>}
-                <div style={{ opacity: 0.8 }}>zoom: pinch, ⌘/Ctrl-scroll, + / − keys · pan: drag, swipe sideways, Shift-scroll, the scrollbar · double-click: Trade ↔ Fit · 0: Fit</div>
+              {/* ── LIVE_CHART_SYSTEM_20261117 ── provenance + help folded under one line */}
+              <div style={{ marginTop: SPACE.md, ...TYPE.meta, color: COLOR.muted }}>
+                <button type="button" data-testid="replay-notes-toggle" aria-expanded={showNotes} onClick={() => setShowNotes((o) => !o)}
+                  style={{ border: 0, background: "transparent", padding: 0, cursor: "pointer", font: "inherit", ...TYPE.meta, color: COLOR.muted }}>
+                  <span style={{ display: "inline-block", width: SPACE.md, transform: showNotes ? "rotate(90deg)" : "none", transition: "transform .15s ease" }}>▸</span>
+                  Data notes{(data.notes || []).length ? ` · ${data.notes.length}` : ""} and controls
+                </button>
+                {showNotes && (
+                  <div data-testid="replay-notes" style={{ marginTop: SPACE.sm, paddingLeft: SPACE.md, display: "flex", flexDirection: "column", gap: SPACE.xs }}>
+                    {(data.sl_basis === "spot" || data.tp_basis === "spot") && <div>ˢ level on the underlying (drawn on the upper pane)</div>}
+                    <div>{TIER_TEXT[data.parity?.tier] || ""}{data.parity?.detail ? ` · ${data.parity.detail}` : ""}</div>
+                    {(data.notes || []).map((n, i) => <div key={i}>• {n}</div>)}
+                    {!embedded && <div>← / → previous / next trade · Esc closes · click a legend entry to hide a line</div>}
+                    <div>zoom: pinch, ⌘/Ctrl-scroll, + / − keys · pan: drag, swipe sideways, Shift-scroll, the scrollbar · double-click: Trade ↔ Fit · 0: Fit</div>
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -1231,9 +1257,9 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
   );
 }
 
-const num = { padding: "7px 8px", textAlign: "right", fontFamily: MONO, whiteSpace: "nowrap" };
+const num = { height: 40, padding: `0 ${SPACE.md}px`, textAlign: "right", ...NUM, whiteSpace: "nowrap" };   // ── LIVE_CHART_SYSTEM_20261117 ──
 function navBtn(disabled) {
-  return { padding: "6px 12px", borderRadius: 7, border: `1px solid ${colors.border.light}`, fontSize: 12.5,
-           background: colors.bg.secondary, color: disabled ? colors.text.muted : colors.text.primary,
+  return { padding: `${SPACE.xs}px ${SPACE.xs}px`, borderRadius: 0, border: 0, ...TYPE.body,
+           background: "transparent", color: disabled ? COLOR.muted : COLOR.ink,
            cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1, fontWeight: 600 };
 }

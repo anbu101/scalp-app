@@ -24,6 +24,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { getApiBase } from "../../api/base";
 import { colors, spacing } from "../../tokens";
 import { stratName } from "../../strategies/displayNames";
+import { COLOR, TYPE } from "./dash";   // ── DASH_SYSTEM_20261117 ──
 
 const KIND_TEXT = {
   ORPHAN: "No strategy holds this position",
@@ -84,11 +85,10 @@ export function BrokerBadge({ status, expanded, setExpanded }) {
   if (status === false) return null;
   const s = summary(status);
   return (
+    // ── DASH_SYSTEM_20261117 ── text, not a pill: muted when all is well, the loss colour (600) when it needs you
     <button type="button" onClick={() => setExpanded((e) => !e)} title={s.title} aria-expanded={expanded}
-      style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: s.color, border: `1px solid ${s.color}`,
-               background: s.alert ? (s.color === colors.loss ? colors.lossBg : colors.warningBg) : "transparent",
-               display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", opacity: 0.95, fontFamily: "inherit", lineHeight: "normal", margin: 0 }}>
-      <i aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: s.color, display: "inline-block" }} />
+      style={{ ...TYPE.meta, color: s.alert ? COLOR.down : COLOR.muted, fontWeight: s.alert ? 600 : 400, padding: 0, border: 0,
+               background: "transparent", cursor: "pointer", fontFamily: "inherit", margin: 0, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>
       {s.label}
     </button>
   );

@@ -68,7 +68,7 @@ import ORBPanel     from "../strategies/orb/ORBPanel.jsx";     // ── ORB_V1 
 import EMCPanel     from "../strategies/emc/EMCPanel.jsx";     // ── EMC_V1_LIVE_20261011 ──
 import BRKPanel     from "../strategies/brk/BRKPanel.jsx";     // ── BRK_V1 ──
 import KillSwitch   from "./KillSwitch.jsx";   // ── KILL_SWITCH ──
-import { LiveChartCard } from "./replay/ReplayHost";   // ── TRADE_REPLAY_STREAM_20261017 ── ── TRADE_REPLAY_WATCH_20261021 ── inline live chart
+import { LiveChartCard, MeterCard } from "./replay/ReplayHost";   // ── PHONE_METER_20261117 ── MeterCard   // ── TRADE_REPLAY_STREAM_20261017 ── ── TRADE_REPLAY_WATCH_20261021 ── inline live chart
 import ClosedRecentFor, { SELF_RENDERING } from "./ClosedRecentFor.jsx";   // ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── SELF_RENDERING
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
@@ -405,8 +405,10 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
           key={outsider || effectiveFocus}
           style={{ width: "100%", animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}
         >
-          {outsider ? (<>{outsiderNote}<RecentSlot mode={recent} strategyId={outsider} /></>) : (<>   {/* ── TRADE_REPLAY_LVB_20261030 ── */}
+          {outsider ? (<><MeterCard strategyId={outsider} />{outsiderNote}<RecentSlot mode={recent} strategyId={outsider} /></>) : (<>   {/* ── TRADE_REPLAY_LVB_20261030 ── ── PHONE_METER_20261117 ── */}
           <KillSwitch strategyId={effectiveFocus} />
+          {/* ── PHONE_METER_20261117 ── phones get the Entry/Exit meter alone (admin, Dashboard only; the Live chart stays desktop) */}
+          <MeterCard strategyId={effectiveFocus} />
           {renderPanel(effectiveFocus, ltpMap)}
           <RecentSlot mode={recent} strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── */}
           </>)}

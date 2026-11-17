@@ -38,7 +38,8 @@ import FleetBlotter from "../components/fleet/FleetBlotter";
 import TodayStrip from "../components/fleet/TodayStrip";   // ── FLEET_TODAY_STRIP_20261015 ──
 import { useBrokerCheck, BrokerBadge, BrokerIssues } from "../components/fleet/SystemChecks";   // ── SYSTEM_CHECKS_UI_20261029 ── ── CHECKS_LAYOUT_20261029 ── badge + on-demand card
 import { useFleetToday } from "../components/fleet/useFleetToday";
-import { useStrategyVisibility } from "../hooks/useStrategyVisibility";   // ── OFF_HIDDEN_20261117 ── (TD-009)
+import { useStrategyVisibility } from "../hooks/useStrategyVisibility";
+import { SPACE, COLOR, TYPE, CARD, CARD_COMPACT } from "../components/fleet/dash";   // ── DASH_SYSTEM_20261117 ──   // ── OFF_HIDDEN_20261117 ── (TD-009)
 import { nowMinIst, bookLabel } from "../components/fleet/fleetFormat";
 import { stratName } from "../strategies/displayNames";
 import { colors, spacing, typography } from "../tokens";
@@ -58,13 +59,9 @@ function sessionLabel(nowMin) {
   return { label: "Market closed", color: colors.text.muted };
 }
 
-function Card({ children, style }) {
-  return (
-    <div style={{ background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 8,
-      boxShadow: "0 1px 3px var(--c-shadow)", padding: `${spacing.md}px ${spacing.lg}px`, ...style }}>
-      {children}
-    </div>
-  );
+// ── DASH_SYSTEM_20261117 ── one card: 1 px line, radius 8, no fill / shadow, padding 24 (16 on a phone)
+function Card({ children, compact = false }) {
+  return <div data-dash-part="card" style={compact ? CARD_COMPACT : CARD}>{children}</div>;
 }
 
 export default function ModernDashboard() {
@@ -146,17 +143,16 @@ export default function ModernDashboard() {
   const feedStale = loaded && (!!error || (feedAge != null && feedAge > 20));
 
   return (
-    <div style={{ padding: isMobile ? spacing.md : spacing.xxl, background: colors.bg.page, color: colors.text.primary,
-      minHeight: "100vh", fontFamily: "var(--c-font-ui)", display: "flex", flexDirection: "column", gap: isMobile ? spacing.md : spacing.lg }}>
+    <div data-dash-root style={{ padding: isMobile ? SPACE.lg : SPACE.xxl, background: colors.bg.page, color: COLOR.ink,   /* ── DASH_SYSTEM_20261117 ── */
+      minHeight: "100vh", fontFamily: "var(--c-font-ui)", display: "flex", flexDirection: "column", gap: isMobile ? SPACE.lg : SPACE.xl }}>
 
       {isMobile && (   /* ── DASH_MODERN_MOBILE_20261007 ── phone header: date, session, feed dot; index badges swipe */
-        <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
-          <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
-            <div style={{ ...typography.headingMedium, fontSize: 18, color: colors.text.primary }}>{dateStr}</div>
-            <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: session.color, border: `1px solid ${session.color}`, opacity: 0.9 }}>{session.label}</span>
+        <div style={{ display: "flex", flexDirection: "column", gap: SPACE.sm }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: SPACE.sm, flexWrap: "wrap", paddingRight: SPACE.xxl + SPACE.sm }}>   {/* ── DASH_SYSTEM_20261117 ── right room: the floating bell */}
+            <div style={{ ...TYPE.title, color: COLOR.ink }}>{dateStr}</div>
+            <span style={{ ...TYPE.meta, color: COLOR.muted }}>{session.label}</span>
             <BrokerBadge {...broker} />   {/* ── CHECKS_LAYOUT_20261029 ── */}
-            <span title={error ? String(error) : "fleet feed"} style={{ marginLeft: "auto", fontSize: 11, color: feedStale ? colors.warning : colors.text.muted, display: "inline-flex", alignItems: "center", gap: 5 }}>
-              <i style={{ width: 7, height: 7, borderRadius: "50%", background: !loaded ? colors.text.muted : feedStale ? colors.warning : colors.success, display: "inline-block" }} />
+            <span title={error ? String(error) : "fleet feed"} style={{ marginLeft: "auto", ...TYPE.meta, color: feedStale ? COLOR.down : COLOR.muted }}>
               {!loaded ? "loading" : feedStale ? (error ? "error" : `stale ${feedAge}s`) : "live"}
             </span>
           </div>
@@ -168,22 +164,21 @@ export default function ModernDashboard() {
         </div>
       )}
 
-      {!isMobile && (<div style={{ display: "flex", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
-        <div style={{ ...typography.headingMedium, color: colors.text.primary }}>{dateStr}</div>
-        <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: session.color, border: `1px solid ${session.color}`, opacity: 0.9 }}>{session.label}</span>
+      {!isMobile && (<div data-dash-part="header" style={{ display: "flex", alignItems: "baseline", gap: SPACE.md, flexWrap: "wrap" }}>   {/* ── DASH_SYSTEM_20261117 ── */}
+        <div style={{ ...TYPE.title, color: COLOR.ink }}>{dateStr}</div>
+        <span style={{ ...TYPE.meta, color: COLOR.muted }}>{session.label}</span>
         <BrokerBadge {...broker} />   {/* ── CHECKS_LAYOUT_20261029 ── */}
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "baseline", gap: SPACE.lg, flexWrap: "wrap" }}>
           <MarketBadge name="NIFTY" data={indices?.NIFTY} />
           <MarketBadge name="BANKNIFTY" data={indices?.BANKNIFTY} />
-          <span title={error ? String(error) : "fleet feed"} style={{ fontSize: 11, color: feedStale ? colors.warning : colors.text.muted, display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <i style={{ width: 6, height: 6, borderRadius: "50%", background: !loaded ? colors.text.muted : feedStale ? colors.warning : colors.success, display: "inline-block" }} />
+          <span title={error ? String(error) : "fleet feed"} style={{ ...TYPE.meta, color: feedStale ? COLOR.down : COLOR.muted }}>
             {!loaded ? "loading feed" : feedStale ? (error ? "feed error, showing last good data" : `feed stale ${feedAge}s`) : "books live"}
           </span>
         </div>
       </div>)}
 
       {error && !data && (
-        <div style={{ padding: spacing.md, borderRadius: 8, background: colors.warningBg, border: `1px solid ${colors.warning}`, color: colors.warning, fontSize: 12.5, fontWeight: 600 }}>
+        <div style={{ padding: SPACE.lg, borderRadius: 8, border: `1px solid ${COLOR.down}`, color: COLOR.down, ...TYPE.body }}>
           Fleet feed unavailable ({String(error)}). The backend may still be starting; Settings → App Settings → Dashboard layout switches to Legacy.
         </div>
       )}
@@ -194,12 +189,11 @@ export default function ModernDashboard() {
 
       <FleetKpis totals={data?.totals} paths={data?.paths} active={data?.active} fleet={data ? (data.active ?? 0) + idle.length : undefined} nowMin={nowMin} compact={isMobile} />   {/* ── DASH_MODERN_MOBILE_20261007 ── compact   ── OFF_HIDDEN_20261117 ── "of N" excludes hidden OFF strategies */}
 
-      <Card style={isMobile ? { padding: chartOpen ? `${spacing.sm + 2}px ${spacing.md}px` : `${spacing.sm}px ${spacing.md}px` }   /* ── DASH_MODERN_MOBILE_20261007 ── */
-        : chartOpen ? undefined : { padding: `${spacing.sm}px ${spacing.lg}px` }}>   {/* ── FLEET_CHART_COLLAPSE_20260925 ── */}
-        <FleetChart series={series} nowMin={nowMin} height={isMobile ? 180 : 220} collapsed={!chartOpen} onToggle={toggleChart} onFocusStrategy={pick} compact={isMobile} />   {/* ── FLEET_CHART_V2_20260928 ── ── DASH_MODERN_MOBILE_20261007 ── */}
+      <Card compact={isMobile}>   {/* ── DASH_SYSTEM_20261117 ── */}
+        <FleetChart series={series} nowMin={nowMin} height={isMobile ? 176 : 216} collapsed={!chartOpen} onToggle={toggleChart} onFocusStrategy={pick} compact={isMobile} />   {/* ── FLEET_CHART_V2_20260928 ── ── DASH_MODERN_MOBILE_20261007 ── */}
       </Card>
 
-      <Card style={{ padding: isMobile ? `${spacing.md}px ${spacing.md}px` : `${spacing.md}px ${spacing.lg}px ${spacing.xs}px` }}>
+      <Card compact={isMobile}>
         <FleetBlotter rows={rows} idle={idle} focusId={shownFocus} onFocus={pick} isAdminUi={isAdminUi} meta={META} compact={isMobile} />   {/* ── DASH_MODERN_MOBILE_20261007 ── compact */}
       </Card>
 

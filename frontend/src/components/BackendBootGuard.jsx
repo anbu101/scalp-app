@@ -572,7 +572,12 @@ export default function BackendBootGuard({ children }) {
 
   useEffect(() => () => { clearTimeout(fadeTimer.current); clearTimeout(todayTimer.current); }, []);
 
-  if (phase === "done") return <>{children}</>;
+  // ── BOOT_NO_REMOUNT_20261117 ── (DEF-038) the app lives in ONE keyed wrapper at the SAME tree
+  // position in every phase. Before, "booting"/"ready" rendered it inside a hidden <div> and "done"
+  // returned it bare — a different position, so React unmounted and re-mounted the WHOLE app when
+  // the overlay finished: every page fetched twice at start-up and the Live chart blanked once.
+  // display: contents adds no layout box; visibility / pointer-events still inherit while hidden.
+  if (phase === "done") return <><div key="app" style={{ display: "contents" }}>{children}</div></>;
 
   const pct          = phase === "ready" ? 100 : Math.min(95, (elapsed / EXPECTED_BOOT_MS) * 100);
   const isReady      = phase === "ready";
@@ -582,7 +587,7 @@ export default function BackendBootGuard({ children }) {
 
   return (
     <>
-      <div style={{ visibility: "hidden", pointerEvents: "none" }}>{children}</div>
+      <div key="app" style={{ display: "contents", visibility: "hidden", pointerEvents: "none" }}>{children}</div>   {/* ── BOOT_NO_REMOUNT_20261117 ── */}
 
       {/* Full-screen overlay */}
       <div className="boot-overlay" style={{   // ── THEME_THALAPATHY_20260906 ── className lets a theme paint the canvas

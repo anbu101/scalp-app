@@ -1,33 +1,30 @@
 // frontend/src/components/fleet/FleetBlotter.jsx — ── DASH_MODERN_20260925 ──
-// One row per (strategy, book) that placed an order today, Live and Paper as
-// separate rows; the strategies that did nothing collapse into one idle line
-// of chips. Every row and chip focuses that strategy's panel below (the rail
-// is gone under the Modern layout, so this IS the picker). Names go through
-// stratName (UI_MASK: codenames for non-admin). Numbers marked ≈ carry an
-// unmarked leg or modelled charges — never an invented figure shown as exact.
+// One row per (strategy, book) that placed an order today; idle strategies as one
+// line of names. Every row / name focuses that strategy's panel below. Names go
+// through stratName (UI_MASK). Numbers marked ≈ carry an unmarked leg or modelled
+// charges.
+// ── DASH_SYSTEM_20261117 ── rebuilt on components/fleet/dash.js: 9 columns (was 12,
+// min-width 1180 px, last column clipped at 1470 px). Trades / Peak go to the row
+// tooltip, the stop into the state text; the MTM bar is gone (the number is the
+// bar); badges are words — only LIVE is boxed; only the MTM is coloured; one
+// accent-free spark per row coloured by its sign.
 
-import { colors, spacing, typography, pnlStyle } from "../../tokens";
 import { stratName } from "../../strategies/displayNames";
 import { fmtInr, hhmm, bookLabel } from "./fleetFormat";
 import { MARKET_START_MIN, FNO_END_MIN } from "../../marketSession";
 import { ReplayLaunch } from "../replay/ReplayHost";   // ── TRADE_REPLAY_STREAM_20261017 ──
+import { SPACE, COLOR, TYPE, NUM, CAPS, ROW_H, tone, liveTag } from "./dash";
 
-const TH = { ...typography.label, color: colors.text.muted, textAlign: "right", padding: "8px 12px", borderBottom: `1px solid ${colors.border.light}`, whiteSpace: "nowrap", fontWeight: 600 };
-const TD = { padding: "9px 12px", borderBottom: `1px solid ${colors.border.dark}`, textAlign: "right", whiteSpace: "nowrap", verticalAlign: "middle", ...typography.mono, fontSize: 12.5 };
-const LEFT = { textAlign: "left" };
+const clock = (ts) => hhmm(Math.floor(((ts + 19800) % 86400) / 60));
+const TH = { ...CAPS, textAlign: "right", padding: `0 ${SPACE.md}px ${SPACE.sm}px`, borderBottom: `1px solid ${COLOR.line}`, whiteSpace: "nowrap", fontWeight: 400 };
+const TD = { ...TYPE.body, ...NUM, height: ROW_H, padding: `0 ${SPACE.md}px`, borderBottom: `1px solid ${COLOR.line}`, textAlign: "right",
+  whiteSpace: "nowrap", verticalAlign: "middle", color: COLOR.ink, overflow: "hidden", textOverflow: "ellipsis" };
+const LEFT = { textAlign: "left", fontFamily: "var(--c-font-ui)" };
+const QUIET_REPLAY = { border: 0, color: COLOR.muted, fontSize: TYPE.meta.fontSize, height: 20, minWidth: 16 };
 
-function Badge({ children, tone }) {
-  const c = tone === "live" ? colors.warning : tone === "open" ? colors.profit : tone === "sl" ? colors.loss : colors.text.muted;
-  return (
-    <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.4px", padding: "1px 6px", borderRadius: 4, border: `1px solid ${c}`, color: c, opacity: tone ? 1 : 0.8, whiteSpace: "nowrap", fontFamily: "var(--c-font-ui)" }}>
-      {children}
-    </span>
-  );
-}
-
-function Spark({ path, color, w = 110, h = 22 }) {
+function Spark({ path, w = 80, h = 20 }) {
   const pts = Array.isArray(path) ? path : [];
-  if (pts.length < 2) return <span style={{ color: colors.text.muted, fontSize: 11 }}>—</span>;
+  if (pts.length < 2) return <span style={{ color: COLOR.muted }}>—</span>;
   let lo = 0, hi = 0;
   pts.forEach(([, v]) => { if (v < lo) lo = v; if (v > hi) hi = v; });
   const pad = (hi - lo) * 0.08 || 1; lo -= pad; hi += pad;
@@ -36,201 +33,171 @@ function Spark({ path, color, w = 110, h = 22 }) {
   const d = pts.map(([m, v], i) => `${i ? "L" : "M"}${x(m).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
   return (
     <svg viewBox={`0 0 ${w} ${h}`} width={w} height={h} style={{ display: "block", marginLeft: "auto" }}>
-      <line x1="0" x2={w} y1={y(0)} y2={y(0)} style={{ stroke: colors.border.light }} strokeDasharray="2 3" />
-      <path d={d} fill="none" stroke={color} strokeWidth="1.4" />
+      <line x1="0" x2={w} y1={y(0)} y2={y(0)} style={{ stroke: COLOR.line }} strokeDasharray="2 4" />
+      <path d={d} fill="none" stroke={tone(pts[pts.length - 1][1])} strokeWidth="1.25" />
     </svg>
   );
 }
 
+/* state as words: what it is (ink / down for a stop-out) + the detail (muted) */
 function stateOf(r) {
   const reason = r.last_event?.reason || "";
-  if (r.state === "OPEN") return { badge: "Open", tone: "open", text: r.carried ? `${r.open_legs} leg${r.open_legs > 1 ? "s" : ""}, carried` : `${r.open_legs} leg${r.open_legs > 1 ? "s" : ""}${r.first_entry_ts ? ` since ${hhmm(Math.floor(((r.first_entry_ts + 19800) % 86400) / 60))}` : ""}` };
-  if (/SL|STOP/i.test(reason)) return { badge: "Stopped out", tone: "sl", text: r.last_event ? `at ${hhmm(Math.floor(((r.last_event.ts + 19800) % 86400) / 60))}` : "" };
-  return { badge: "Done", tone: null, text: r.last_event ? `last exit ${hhmm(Math.floor(((r.last_event.ts + 19800) % 86400) / 60))}` : "" };
+  const legs = `${r.open_legs} leg${r.open_legs > 1 ? "s" : ""}`;
+  const stop = r.stop != null ? ` · stop ${fmtInr(r.stop)}` : "";
+  if (r.state === "OPEN") return { word: "Open", color: COLOR.ink, text: `${legs}${r.carried ? ", carried" : r.first_entry_ts ? ` since ${clock(r.first_entry_ts)}` : ""}${stop}` };
+  if (/SL|STOP/i.test(reason)) return { word: "Stopped out", color: COLOR.down, text: r.last_event?.ts ? `at ${clock(r.last_event.ts)}` : "" };
+  return { word: "Done", color: COLOR.muted, text: r.last_event?.ts ? `last exit ${clock(r.last_event.ts)}` : "" };
 }
 
-// ── DASH_MODERN_MOBILE_20261007 BEGIN ── phone layout: the blotter as a list of
-// cards, one per (strategy, book) that traded today — name + book, MTM, state,
-// path, then realised / unrealised / charges / stop and the last event. Tap a
-// card (or an idle chip) to focus that strategy's panel.
+function rowTitle(r) {
+  const p = [`${r.closed_trades || 0} trade${r.closed_trades === 1 ? "" : "s"} closed`];
+  if (r.peak != null) p.push(`peak ${fmtInr(r.peak)}`);
+  if (r.stop != null) p.push(`stop ${fmtInr(r.stop)}`);
+  return `${p.join(" · ")} — click to focus its panel`;
+}
+
+function BookCell({ book }) {
+  return book === "LIVE" ? <span style={liveTag}>LIVE</span>
+    : <span style={{ ...TYPE.meta, color: COLOR.muted }}>{bookLabel(book)}</span>;
+}
+
+function IdleLine({ idle, focusId, onFocus, name }) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: `${SPACE.xs}px ${SPACE.md}px`, ...TYPE.meta, color: COLOR.muted }}>
+      <span>Idle today</span>
+      {idle.map((s) => (
+        <button key={s.id} type="button" className="flb-chip" aria-current={focusId === s.id ? "true" : undefined} onClick={() => onFocus && onFocus(s.id)}
+          style={{ border: 0, background: "transparent", padding: 0, cursor: "pointer", font: "inherit", ...TYPE.meta,
+            color: focusId === s.id ? COLOR.ink : COLOR.muted, fontWeight: focusId === s.id ? 600 : 400 }}>
+          {name(s.id)}{s.mode && s.mode !== "PAPER" ? ` (${s.mode === "PAPER_LIVE" ? "paper+live" : s.mode.toLowerCase()})` : ""}
+        </button>
+      ))}
+      {idle.length === 0 && <span>—</span>}
+    </div>
+  );
+}
+
+function Header({ count, hint }) {
+  return (
+    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: SPACE.md }}>
+      <div style={{ ...TYPE.title, color: COLOR.ink }}>
+        Traded today <span style={{ ...TYPE.body, ...NUM, color: COLOR.muted, marginLeft: SPACE.xs }}>{count}</span>
+      </div>
+      <span style={{ ...TYPE.meta, color: COLOR.muted }}>{hint}</span>
+    </div>
+  );
+}
+
+// ── DASH_MODERN_MOBILE_20261007 ── phone: one card per (strategy, book)
 function FleetCards({ rows, idle, focusId, onFocus, isAdminUi, meta }) {
   const list = Array.isArray(rows) ? rows : [];
-  const idleList = Array.isArray(idle) ? idle : [];
   const name = (id) => stratName(id, isAdminUi, meta?.[id]?.name);
-  const accent = (id) => meta?.[id]?.accent || colors.border.light;
   const num = (r, v) => `${r.approx ? "≈" : ""}${fmtInr(v)}`;
-  const small = { ...typography.mono, fontWeight: 500 };
   return (
     <div style={{ fontFamily: "var(--c-font-ui)" }}>
-      <style>{`
-        .flm-card { cursor: pointer; transition: background .12s ease; -webkit-tap-highlight-color: transparent; }
-        .flm-card:active { background: var(--c-bg-tertiary) !important; }
-        .flm-card[aria-current="true"] { background: var(--c-bg-tertiary) !important; outline: 1px solid var(--c-primary); }
-        .flm-chip[aria-current="true"] { border-color: var(--c-primary) !important; color: var(--c-text-primary) !important; }
-      `}</style>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: spacing.sm }}>
-        <div style={{ ...typography.headingSmall, color: colors.text.primary }}>
-          Traded today <span style={{ ...typography.mono, fontWeight: 400, color: colors.text.muted, marginLeft: 6 }}>{list.length}</span>
-        </div>
-        <span style={{ fontSize: 11, color: colors.text.muted }}>tap to focus</span>
-      </div>
-      {list.length === 0 && (
-        <div style={{ padding: "18px 6px", textAlign: "center", color: colors.text.muted, fontSize: 12.5 }}>No strategy has placed an order yet today. Cards appear here at the first fill.</div>
-      )}
-      <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
+      <style>{`.flm-card { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+        .flm-card[aria-current="true"] { box-shadow: inset 2px 0 0 ${COLOR.ink}; border-color: ${COLOR.ink} !important; }`}</style>
+      <Header count={list.length} hint="tap to focus" />
+      {list.length === 0 && <div style={{ padding: `${SPACE.lg}px 0`, textAlign: "center", ...TYPE.body, color: COLOR.muted }}>No strategy has placed an order yet today.</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: SPACE.sm }}>
         {list.map((r) => {
           const st = stateOf(r);
+          const facts = [
+            r.closed_trades > 0 && `R ${num(r, r.realised)}`, r.open_legs > 0 && `U ${num(r, r.unrealised)}`,
+            r.closed_trades > 0 && `chg ₹${Math.round(r.charges || 0).toLocaleString("en-IN")}`,
+          ].filter(Boolean).join(" · ");
           return (
             <button key={r.key} type="button" className="flm-card" aria-current={focusId === r.id ? "true" : undefined} onClick={() => onFocus && onFocus(r.id)}
-              style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", columnGap: 10, rowGap: 5, width: "100%", textAlign: "left",
-                padding: "10px 12px 10px 11px", background: colors.bg.primary, border: `1px solid ${colors.border.dark}`, borderLeft: `3px solid ${accent(r.id)}`,
-                borderRadius: 8, font: "inherit", color: "inherit" }}>
-              <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                <b style={{ fontWeight: 700, fontSize: 14, color: colors.text.primary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{name(r.id)}</b>
-                <Badge tone={r.book === "LIVE" ? "live" : null}>{bookLabel(r.book).toUpperCase()}</Badge>
+              style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: `${SPACE.xs}px ${SPACE.md}px`, width: "100%", textAlign: "left",
+                padding: SPACE.md, background: "transparent", border: `1px solid ${COLOR.line}`, borderRadius: 8, font: "inherit", color: COLOR.ink }}>
+              <span style={{ display: "flex", alignItems: "center", gap: SPACE.sm, minWidth: 0 }}>
+                <span style={{ ...TYPE.body, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{name(r.id)}</span>
+                <BookCell book={r.book} />
               </span>
-              <b style={{ ...typography.mono, fontSize: 16, fontWeight: 700, whiteSpace: "nowrap", textAlign: "right", ...pnlStyle(r.gross) }}>{num(r, r.gross)}</b>
-              <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, fontSize: 12, color: colors.text.muted }}>
-                <Badge tone={st.tone}>{st.badge}</Badge>
-                <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{st.text}</span>
+              <span style={{ ...TYPE.title, ...NUM, color: tone(r.gross), whiteSpace: "nowrap", textAlign: "right" }}>{num(r, r.gross)}</span>
+              <span style={{ ...TYPE.meta, color: COLOR.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                <span style={{ color: st.color, fontWeight: 600 }}>{st.word}</span>{st.text ? ` · ${st.text}` : ""}
               </span>
-              <span style={{ justifySelf: "end", alignSelf: "center" }}><Spark path={r.path} color={accent(r.id)} w={84} h={20} /></span>
-              <span style={{ gridColumn: "1 / -1", display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11.5, color: colors.text.muted }}>
-                {r.closed_trades > 0 && <span>R <b style={{ ...small, ...pnlStyle(r.realised) }}>{num(r, r.realised)}</b></span>}
-                {r.open_legs > 0 && <span>U <b style={{ ...small, ...pnlStyle(r.unrealised) }}>{num(r, r.unrealised)}</b></span>}
-                {r.closed_trades > 0 && <span>{r.closed_trades} trade{r.closed_trades > 1 ? "s" : ""}</span>}
-                {r.closed_trades > 0 && <span>chg <b style={small}>₹{Math.round(r.charges || 0).toLocaleString("en-IN")}</b></span>}
-                {r.stop != null && <span>stop <b style={{ ...small, color: colors.loss }}>{fmtInr(r.stop)}</b></span>}
-              </span>
-              {r.last_event?.text && (
-                <span style={{ gridColumn: "1 / -1", fontSize: 11.5, color: colors.text.secondary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.last_event.text}</span>
-              )}
+              <span style={{ justifySelf: "end", alignSelf: "center" }}><Spark path={r.path} w={72} h={18} /></span>
+              {facts && <span style={{ gridColumn: "1 / -1", ...TYPE.meta, ...NUM, color: COLOR.muted }}>{facts}</span>}
+              {r.last_event?.text && <span style={{ gridColumn: "1 / -1", ...TYPE.meta, color: COLOR.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.last_event.text}</span>}
             </button>
           );
         })}
       </div>
-      <div style={{ marginTop: spacing.md, fontSize: 11.5, color: colors.text.muted }}>
-        <div style={{ marginBottom: 6 }}>Idle today, no orders</div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {idleList.map((s) => (
-            <button key={s.id} type="button" className="flm-chip" aria-current={focusId === s.id ? "true" : undefined} onClick={() => onFocus && onFocus(s.id)}
-              style={{ font: "inherit", fontSize: 11.5, padding: "4px 8px", borderRadius: 5, background: colors.bg.primary, cursor: "pointer",
-                border: `1px solid ${colors.border.dark}`, color: colors.text.secondary, opacity: s.mode === "OFF" ? 0.55 : 1, display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <i style={{ width: 3, height: 12, borderRadius: 2, background: accent(s.id), display: "inline-block" }} />
-              {name(s.id)}
-              <em style={{ fontStyle: "normal", color: colors.text.muted }}>{s.mode === "OFF" ? "off" : s.mode === "PAPER_LIVE" ? "paper+live" : (s.mode || "").toLowerCase()}</em>
-            </button>
-          ))}
-          {idleList.length === 0 && <span>—</span>}
-        </div>
-      </div>
+      <div style={{ marginTop: SPACE.md }}><IdleLine idle={Array.isArray(idle) ? idle : []} focusId={focusId} onFocus={onFocus} name={name} /></div>
     </div>
   );
 }
-// ── DASH_MODERN_MOBILE_20261007 END ──
 
-export default function FleetBlotter({ rows, idle, focusId, onFocus, isAdminUi, meta, compact = false }) {   // ── DASH_MODERN_MOBILE_20261007 ── compact
+export default function FleetBlotter({ rows, idle, focusId, onFocus, isAdminUi, meta, compact = false }) {
   if (compact) return <FleetCards rows={rows} idle={idle} focusId={focusId} onFocus={onFocus} isAdminUi={isAdminUi} meta={meta} />;
   const list = Array.isArray(rows) ? rows : [];
-  const idleList = Array.isArray(idle) ? idle : [];
-  const maxAbs = Math.max(1, ...list.map((r) => Math.abs(r.gross || 0)));
   const name = (id) => stratName(id, isAdminUi, meta?.[id]?.name);
-  const accent = (id) => meta?.[id]?.accent || colors.border.light;
   const num = (r, v) => `${r.approx ? "≈" : ""}${fmtInr(v)}`;
+  const dash = <span style={{ color: COLOR.muted }}>—</span>;
   return (
     <div style={{ fontFamily: "var(--c-font-ui)" }}>
       <style>{`
-        .flb-row { cursor: pointer; transition: background .12s ease; }
-        .flb-row:hover { background: var(--c-bg-tertiary); }
-        .flb-row[aria-current="true"] { background: var(--c-bg-tertiary); box-shadow: inset 3px 0 0 var(--c-primary); }
-        .flb-chip { cursor: pointer; }
-        .flb-chip:hover, .flb-chip[aria-current="true"] { border-color: var(--c-primary) !important; color: var(--c-text-primary) !important; }
+        .flb-row { cursor: pointer; }
+        .flb-row:hover td { box-shadow: inset 0 -1px 0 ${COLOR.ink}; }
+        .flb-row[aria-current="true"] td:first-child { box-shadow: inset 2px 0 0 ${COLOR.ink}; }
+        .flb-chip:hover { color: ${COLOR.ink} !important; }
       `}</style>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", padding: `0 0 ${spacing.xs}px` }}>
-        <div style={{ ...typography.headingSmall, color: colors.text.primary }}>
-          Traded today <span style={{ ...typography.mono, fontWeight: 400, color: colors.text.muted, marginLeft: 6 }}>{list.length}</span>
-        </div>
-        <span style={{ fontSize: 11, color: colors.text.muted }}>click a row to focus its panel</span>
-      </div>
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1180 }}>
-          <thead>
-            <tr>
-              <th style={{ ...TH, ...LEFT }}>Strategy</th>
-              <th style={{ ...TH, ...LEFT }}>Book</th>
-              <th style={{ ...TH, ...LEFT }}>State</th>
-              <th style={TH}>Trades</th>
-              <th style={TH}>MTM today</th>
-              <th style={TH}>Realised</th>
-              <th style={TH}>Unrealised</th>
-              <th style={TH}>Charges</th>
-              <th style={TH}>Peak</th>
-              <th style={TH}>Stop</th>
-              <th style={TH}>Path</th>
-              <th style={{ ...TH, ...LEFT }}>Last event</th>
-            </tr>
-          </thead>
-          <tbody>
-            {list.length === 0 && (
-              <tr><td colSpan={12} style={{ ...TD, textAlign: "center", color: colors.text.muted, fontFamily: "var(--c-font-ui)", padding: "22px 12px" }}>
-                No strategy has placed an order yet today. Rows appear here at the first fill.
-              </td></tr>
-            )}
-            {list.map((r) => {
-              const st = stateOf(r);
-              const w = (Math.abs(r.gross || 0) / maxAbs) * 50;
-              return (
-                <tr key={r.key} className="flb-row" aria-current={focusId === r.id ? "true" : undefined} onClick={() => onFocus && onFocus(r.id)}>
-                  <td style={{ ...TD, ...LEFT, fontFamily: "var(--c-font-ui)" }}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                      <i style={{ width: 3, height: 16, borderRadius: 2, background: accent(r.id), display: "inline-block" }} />
-                      <b style={{ fontWeight: 700, color: colors.text.primary }}>{name(r.id)}</b>
-                      {isAdminUi && <span style={{ fontSize: 10, color: colors.text.muted, letterSpacing: "0.4px" }}>{r.id}{r.mode && r.mode !== "PAPER" && r.mode !== "LIVE" ? ` · ${r.mode}` : ""}</span>}
-                      {/* ── TRADE_REPLAY_STREAM_20261017 ── open group (else latest trade) of this strategy+book; admin, desktop */}
-                      <ReplayLaunch q={{ strategy: r.id, book: r.book }} title={`Replay ${name(r.id)} — open position or latest trade`} />
-                    </span>
-                  </td>
-                  <td style={{ ...TD, ...LEFT }}><Badge tone={r.book === "LIVE" ? "live" : null}>{bookLabel(r.book).toUpperCase()}</Badge></td>
-                  <td style={{ ...TD, ...LEFT, fontFamily: "var(--c-font-ui)" }}>
-                    <Badge tone={st.tone}>{st.badge}</Badge>
-                    <span style={{ color: colors.text.muted, fontSize: 12, marginLeft: 8 }}>{st.text}</span>
-                  </td>
-                  <td style={TD}>{r.closed_trades || "—"}</td>
-                  <td style={TD}>
-                    <span style={{ display: "inline-block", width: 96, height: 6, background: colors.border.dark, borderRadius: 3, position: "relative", verticalAlign: "middle", marginRight: 10 }}>
-                      <i style={{ position: "absolute", top: 0, height: 6, borderRadius: 3, width: `${w.toFixed(1)}%`, ...(r.gross >= 0 ? { left: "50%", background: colors.profit } : { right: "50%", background: colors.loss }) }} />
-                      <i style={{ position: "absolute", left: "50%", top: -2, width: 1, height: 10, background: colors.border.light }} />
-                    </span>
-                    <b style={{ fontWeight: 600, ...pnlStyle(r.gross) }}>{num(r, r.gross)}</b>
-                  </td>
-                  <td style={{ ...TD, ...pnlStyle(r.realised) }}>{r.closed_trades ? num(r, r.realised) : <span style={{ color: colors.text.muted }}>—</span>}</td>
-                  <td style={{ ...TD, ...pnlStyle(r.unrealised) }}>{r.open_legs ? num(r, r.unrealised) : <span style={{ color: colors.text.muted }}>—</span>}</td>
-                  <td style={{ ...TD, color: colors.text.muted }}>{r.closed_trades ? `${r.approx ? "≈" : ""}₹${Math.round(r.charges || 0).toLocaleString("en-IN")}` : "—"}</td>
-                  <td style={TD}>{r.peak == null ? "—" : fmtInr(r.peak)}</td>
-                  <td style={{ ...TD, color: r.stop == null ? colors.text.muted : colors.loss }}>{r.stop == null ? "—" : fmtInr(r.stop)}</td>
-                  <td style={TD}><Spark path={r.path} color={accent(r.id)} /></td>
-                  <td style={{ ...TD, ...LEFT, fontFamily: "var(--c-font-ui)", color: colors.text.secondary, fontSize: 12 }}>{r.last_event?.text || "—"}</td>
-                </tr>
-              );
-            })}
-            <tr>
-              <td colSpan={12} style={{ ...TD, ...LEFT, fontFamily: "var(--c-font-ui)", color: colors.text.muted, fontSize: 12, borderBottom: 0, padding: "10px 12px 6px", whiteSpace: "normal" }}>
-                <span style={{ marginRight: 10 }}>Idle today, no orders</span>
-                {idleList.map((s) => (
-                  <button key={s.id} type="button" className="flb-chip" aria-current={focusId === s.id ? "true" : undefined} onClick={() => onFocus && onFocus(s.id)}
-                    style={{ font: "inherit", fontSize: 11.5, padding: "3px 8px", margin: "2px 6px 2px 0", borderRadius: 5, background: colors.bg.primary,
-                      border: `1px solid ${colors.border.dark}`, color: colors.text.secondary, opacity: s.mode === "OFF" ? 0.55 : 1, display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    <i style={{ width: 3, height: 12, borderRadius: 2, background: accent(s.id), display: "inline-block" }} />
-                    {name(s.id)}
-                    <em style={{ fontStyle: "normal", color: colors.text.muted }}>{s.mode === "OFF" ? "off" : s.mode === "PAPER_LIVE" ? "paper+live" : (s.mode || "").toLowerCase()}</em>
-                  </button>
-                ))}
-                {idleList.length === 0 && <span style={{ color: colors.text.muted }}>—</span>}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <Header count={list.length} hint="click a row to focus its panel" />
+      <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+        <colgroup>
+          <col style={{ width: "19%" }} /><col style={{ width: 64 }} /><col style={{ width: "17%" }} />
+          <col style={{ width: 112 }} /><col style={{ width: 104 }} /><col style={{ width: 104 }} /><col style={{ width: 80 }} />
+          <col style={{ width: 104 }} /><col />
+        </colgroup>
+        <thead>
+          <tr>
+            <th style={{ ...TH, ...LEFT }}>Strategy</th>
+            <th style={{ ...TH, ...LEFT }}>Book</th>
+            <th style={{ ...TH, ...LEFT }}>State</th>
+            <th style={TH}>MTM today</th>
+            <th style={TH}>Realised</th>
+            <th style={TH}>Unrealised</th>
+            <th style={TH}>Charges</th>
+            <th style={TH}>Path</th>
+            <th style={{ ...TH, ...LEFT }}>Last event</th>
+          </tr>
+        </thead>
+        <tbody>
+          {list.length === 0 && (
+            <tr><td colSpan={9} style={{ ...TD, ...LEFT, textAlign: "center", color: COLOR.muted }}>
+              No strategy has placed an order yet today. Rows appear here at the first fill.
+            </td></tr>
+          )}
+          {list.map((r) => {
+            const st = stateOf(r);
+            return (
+              <tr key={r.key} className="flb-row" aria-current={focusId === r.id ? "true" : undefined} title={rowTitle(r)} onClick={() => onFocus && onFocus(r.id)}>
+                <td style={{ ...TD, ...LEFT }}>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: SPACE.sm, maxWidth: "100%" }}>
+                    <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{name(r.id)}</span>
+                    {isAdminUi && <span style={{ ...TYPE.meta, color: COLOR.muted }}>{r.id}</span>}
+                    <ReplayLaunch q={{ strategy: r.id, book: r.book }} title={`Replay ${name(r.id)} — open position or latest trade`} style={QUIET_REPLAY} />
+                  </span>
+                </td>
+                <td style={{ ...TD, ...LEFT }}><BookCell book={r.book} /></td>
+                <td style={{ ...TD, ...LEFT }}>
+                  <span style={{ color: st.color, fontWeight: 600 }}>{st.word}</span>
+                  <span style={{ color: COLOR.muted }}>{st.text ? ` · ${st.text}` : ""}</span>
+                </td>
+                <td style={{ ...TD, fontWeight: 600, color: tone(r.gross) }}>{num(r, r.gross)}</td>
+                <td style={TD}>{r.closed_trades ? num(r, r.realised) : dash}</td>
+                <td style={TD}>{r.open_legs ? num(r, r.unrealised) : dash}</td>
+                <td style={{ ...TD, color: COLOR.muted }}>{r.closed_trades ? `${r.approx ? "≈" : ""}₹${Math.round(r.charges || 0).toLocaleString("en-IN")}` : "—"}</td>
+                <td style={TD}><Spark path={r.path} /></td>
+                <td style={{ ...TD, ...LEFT, color: COLOR.muted }} title={r.last_event?.text || undefined}>{r.last_event?.text || "—"}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div style={{ marginTop: SPACE.md }}><IdleLine idle={Array.isArray(idle) ? idle : []} focusId={focusId} onFocus={onFocus} name={name} /></div>
     </div>
   );
 }

@@ -15,7 +15,7 @@
 // below measures.
 
 import { fmtInr } from "./fleetFormat";
-import { colors, spacing, typography, pnlStyle } from "../../tokens";
+import { SPACE, COLOR, TYPE, NUM, CAPS, tone } from "./dash";   // ── DASH_SYSTEM_20261117 ──
 
 const clock = (ts) => {
   if (!ts) return null;
@@ -44,33 +44,30 @@ export function todayExplain(r) {
   return { scope, panel };
 }
 
+// ── DASH_SYSTEM_20261117 ── rebuilt on dash.js: no card of its own — a two-line caption
+// under a rule, headline MTM coloured, the equation in ink, the explanation muted.
 export default function TodayStrip({ rows = [], name, compact = false }) {
   if (!rows.length) return null;
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: spacing.sm }}>
+    <div data-testid="today-strip" data-dash-part="strip" style={{ display: "flex", flexDirection: "column", gap: SPACE.sm, marginBottom: SPACE.lg }}>
       {rows.map((r) => {
         const ex = todayExplain(r);
         const asof = r.marks_stale > 0 ? clock(r.mark_asof) : null;
         return (
-          <div key={r.key} style={{ background: colors.bg.secondary, border: `1px solid ${colors.border.light}`,
-                                    borderRadius: 8, padding: compact ? "8px 10px" : "8px 14px" }}>
-            <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: compact ? 10 : 16 }}>
-              <span style={{ fontSize: 10.5, letterSpacing: "0.6px", textTransform: "uppercase", color: colors.text.muted }}>
-                Today · {name} · {r.book === "LIVE" ? "Live" : "Paper"}
-              </span>
-              <b style={{ fontSize: 18, ...typography.mono, ...pnlStyle(r.gross) }}>{fmtInr(r.gross)}</b>
-              <span style={{ fontSize: 12, color: colors.text.secondary, ...typography.mono }}>
-                = realised <b style={pnlStyle(r.realised)}>{fmtInr(r.realised)}</b>
-                {" "}+ unrealised <b style={pnlStyle(r.unrealised)}>{fmtInr(r.unrealised)}</b>
-                {" "}· charges ₹{Math.round(Number(r.charges) || 0).toLocaleString("en-IN")}
-                {" "}· net <b style={pnlStyle(r.net)}>{fmtInr(r.net)}</b>
-              </span>
-              <span style={{ fontSize: 11, color: colors.text.muted, marginLeft: compact ? 0 : "auto" }}>
-                same numbers as its row in Traded today{asof ? ` · marks as of ${asof}` : ""}
+          <div key={r.key} style={{ borderTop: `1px solid ${COLOR.line}`, paddingTop: SPACE.md, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: `${SPACE.xs}px ${compact ? SPACE.md : SPACE.lg}px` }}>
+              <span style={CAPS}>Today · {name} · {r.book === "LIVE" ? "Live" : "Paper"}</span>
+              <span style={{ ...TYPE.title, ...NUM, color: tone(r.gross) }}>{fmtInr(r.gross)}</span>
+              <span style={{ ...TYPE.body, color: COLOR.muted }}>
+                realised <span style={{ ...NUM, color: COLOR.ink }}>{fmtInr(r.realised)}</span>
+                {" · "}unrealised <span style={{ ...NUM, color: COLOR.ink }}>{fmtInr(r.unrealised)}</span>
+                {" · "}charges <span style={{ ...NUM, color: COLOR.ink }}>₹{Math.round(Number(r.charges) || 0).toLocaleString("en-IN")}</span>
+                {" · "}net <span style={{ ...NUM, color: COLOR.ink }}>{fmtInr(r.net)}</span>
+                {asof ? ` · marks as of ${asof}` : ""}
               </span>
             </div>
             {ex && (
-              <div style={{ fontSize: 11.5, color: colors.text.tertiary, marginTop: 4 }}>
+              <div style={{ ...TYPE.meta, color: COLOR.muted, marginTop: SPACE.xs }}>
                 Counts {ex.scope}. {ex.panel}
               </div>
             )}

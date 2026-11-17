@@ -16,14 +16,16 @@
 // view); every ReplayLaunch renders nothing otherwise. The routes sit behind
 // the backend admin wall as well.
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";   // ── PHONE_METER_20261117 ── useRef
 import { getApiBase } from "../../api/base";
 import { useEntitlements } from "../../hooks/useEntitlements";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { colors } from "../../tokens";
-import TradeReplay from "./TradeReplay";
+import TradeReplay, { MeterChip, WaitingPanel } from "./TradeReplay";   // ── PHONE_METER_20261117 ──
+import { SPACE, COLOR, TYPE } from "../fleet/dash";   // ── LIVE_CHART_SYSTEM_20261117 ──
 
 const Ctx = createContext(null);
+const PhoneCtx = createContext(false);   // ── PHONE_METER_20261117 ── admin + phone: the meter only
 
 const compositeUrl = (k) => {
   const s = String(k);
@@ -38,6 +40,7 @@ export function ReplayHostProvider({ children }) {
   const { loaded, isAdminUi } = useEntitlements();
   const isMobile = useIsMobile();
   const enabled = loaded && isAdminUi && !isMobile;
+  const phoneMeter = loaded && isAdminUi && isMobile;   // ── PHONE_METER_20261117 ──
   const [open, setOpen] = useState(null);          // { key, nav }
   const [msg, setMsg] = useState(null);
 
@@ -65,6 +68,7 @@ export function ReplayHostProvider({ children }) {
 
   const value = useMemo(() => (enabled ? { launch } : null), [enabled, launch]);
   return (
+    <PhoneCtx.Provider value={phoneMeter}>   {/* ── PHONE_METER_20261117 ── */}
     <Ctx.Provider value={value}>
       {children}
       {enabled && open && (
@@ -79,6 +83,7 @@ export function ReplayHostProvider({ children }) {
         </div>
       )}
     </Ctx.Provider>
+    </PhoneCtx.Provider>
   );
 }
 
@@ -138,23 +143,87 @@ export function LiveChartCard({ strategyId }) {
   if (!host || !strategyId) return null;
   const toggle = () => setOpen((o) => { try { localStorage.setItem(CARD_OPEN_KEY, o ? "0" : "1"); } catch {} return !o; });
   return (
-    <div style={{ margin: "0 0 10px" }} data-testid="live-chart-card">
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: open ? 6 : 0 }}>
+    // ── LIVE_CHART_SYSTEM_20261117 ── the card's one title row: chevron + "Live chart" (title step) +
+    // what it shows (muted), Full screen as a text action on the right
+    <div style={{ margin: `0 0 ${SPACE.lg}px` }} data-testid="live-chart-card">
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: SPACE.md, marginBottom: open ? SPACE.md : 0 }}>
         <button type="button" onClick={toggle} aria-expanded={open}
-          style={{ display: "inline-flex", alignItems: "center", gap: 8, font: "inherit", fontSize: 12, fontWeight: 600,
-                   color: colors.text.secondary, background: "transparent", border: `1px solid ${colors.border.dark}`,
-                   borderRadius: 6, padding: "5px 10px", cursor: "pointer" }}>
-          <span style={{ display: "inline-block", transform: open ? "rotate(90deg)" : "none", transition: "transform .15s ease" }}>▸</span>
-          Live chart{res ? (res.watch ? " · watching for an entry" : " · open position") : ""}
+          style={{ display: "inline-flex", alignItems: "baseline", gap: SPACE.sm, font: "inherit", padding: 0, border: 0,
+                   background: "transparent", cursor: "pointer", color: COLOR.ink }}>
+          <span style={{ ...TYPE.meta, color: COLOR.muted, display: "inline-block", width: SPACE.md, transform: open ? "rotate(90deg)" : "none", transition: "transform .15s ease" }}>▸</span>
+          <span style={TYPE.title}>Live chart</span>
+          {res && <span style={{ ...TYPE.meta, color: COLOR.muted }}>{res.watch ? "watching for an entry" : "open position"}</span>}
         </button>
-        <ReplayLaunch q={{ strategy: strategyId }} label="Full screen" title="Open the live chart full screen" />
+        <ReplayLaunch q={{ strategy: strategyId }} label="Full screen" title="Open the live chart full screen"
+          style={{ border: 0, height: "auto", padding: 0, color: COLOR.ink, ...TYPE.body, fontWeight: 600 }} />
       </div>
-      {open && err && <div style={{ fontSize: 12, color: colors.text.muted, padding: "6px 2px" }}>Live chart unavailable ({err}).</div>}
-      {open && !err && !res && <div style={{ fontSize: 12, color: colors.text.muted, padding: "6px 2px" }}>Loading live chart…</div>}
+      {open && err && <div style={{ ...TYPE.body, color: COLOR.muted }}>Live chart unavailable ({err}).</div>}
+      {open && !err && !res && <div style={{ ...TYPE.body, color: COLOR.muted }}>Loading live chart…</div>}
       {open && res && (
         <TradeReplay key={`${strategyId}:${res.key}`} embedded runId="live:card" tradeId={res.key} navKeys={res.nav}
           fetchUrl={compositeUrl} toNavKey={toNavKey} />
       )}
+    </div>
+  );
+}
+
+
+/* ── PHONE_METER_20261117 ── phones get the Entry/Exit meter ONLY (the Live chart stays a
+   desktop view). Same lookup as the chart (open position live, else watching for an entry)
+   from GET /api/replay/meter — the meter + checklist, not the candles. Polls every live
+   poll_ms (2 s) in session, every 30 s otherwise, paused while the app is in the background;
+   the last good reading stays up through a failed poll. Tap the meter for the conditions.
+   Renders nothing for non-admin, on a desktop, or outside a ReplayHostProvider. */
+const METER_IDLE_MS = 30000;
+const METER_RETRY_MS = 5000;
+export function MeterCard({ strategyId }) {
+  const on = useContext(PhoneCtx);
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState(null);
+  const [open, setOpen] = useState(false);
+  const dRef = useRef(null);
+  dRef.current = d;
+  useEffect(() => { setD(null); setErr(null); setOpen(false); }, [strategyId]);
+  useEffect(() => {
+    if (!on || !strategyId) return undefined;
+    let dead = false, t = null;
+    const tick = async () => {
+      if (dead) return;
+      if (!(typeof document !== "undefined" && document.hidden)) {
+        try {
+          const r = await fetch(`${getApiBase()}/api/replay/meter?strategy=${encodeURIComponent(strategyId)}`);
+          const j = await r.json().catch(() => ({}));
+          if (!dead) {
+            if (r.ok && j.ok) { dRef.current = j; setD(j); setErr(null); }   // the ref now: the next delay reads this reading
+            else setErr(j.detail || `HTTP ${r.status}`);
+          }
+        } catch (e) { if (!dead) setErr(String(e.message || e)); }
+      }
+      const lv = dRef.current?.live;
+      const delay = !dRef.current ? METER_RETRY_MS                                   // nothing on screen yet: try again soon
+        : lv?.active ? Math.max(1000, Number(lv.poll_ms) || 2000) : METER_IDLE_MS;
+      if (!dead) t = setTimeout(tick, delay);
+    };
+    tick();
+    return () => { dead = true; clearTimeout(t); };
+  }, [on, strategyId]);
+  if (!on || !strategyId) return null;
+  const w = d?.waiting, m = w?.meter;
+  const lv = d?.live || {};
+  const noFeed = Array.isArray(lv.no_feed) ? lv.no_feed.length > 0 : !!lv.no_feed;   // a list of legs without a feed ([] = all fine)
+  const stale = !!lv.stale || noFeed || (!!err && !!d);   // …or the last poll failed: the reading on screen is the last good one
+  return (
+    <div data-testid="phone-meter" style={{ margin: `0 0 ${SPACE.lg}px`, padding: SPACE.lg, border: `1px solid ${COLOR.line}`, borderRadius: 8 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: SPACE.sm, flexWrap: "wrap", marginBottom: SPACE.md }}>
+        <span style={{ ...TYPE.title, color: COLOR.ink }}>Entry / Exit</span>
+        {d && <span style={{ ...TYPE.meta, color: COLOR.muted }}>{d.watch ? "watching for an entry" : "open position"}</span>}
+        {stale && <span data-testid="phone-meter-stale" style={{ ...TYPE.meta, color: COLOR.muted, marginLeft: "auto" }}>last reading · feed stale</span>}
+      </div>
+      {!d && err && <div style={{ ...TYPE.body, color: COLOR.muted }}>Meter unavailable ({err}).</div>}
+      {!d && !err && <div style={{ ...TYPE.body, color: COLOR.muted }}>Reading the meter…</div>}
+      {d && m && <MeterChip m={m} compact open={open} onToggle={() => setOpen((o) => !o)} />}
+      {d && w && (open || !m) && <WaitingPanel w={w} compact />}
+      {d && !w && <div style={{ ...TYPE.body, color: COLOR.muted }}>No entry conditions for this strategy.</div>}
     </div>
   );
 }
