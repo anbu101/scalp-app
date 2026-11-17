@@ -576,6 +576,11 @@ const AXES = [
     hint: "0, 1", parse: _num,
     apply: (c, v) => { if (Number(v)) c.short_tp_skip_expiry = true; else delete c.short_tp_skip_expiry; },
     fmt: (v) => (Number(v) ? "sTP noExp" : "sTP allDays") },
+  // ── IC2_HEDGE_FLAT_20261117 ── sell L3/L4 once no short is open (IC_V2 carry runs)
+  { key: "ic_hedge_flat", label: "Close hedges when flat (0/1)", strategies: [IC],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { c.hedge_close_when_flat = !!Number(v); },
+    fmt: (v) => (Number(v) ? "hedgeFlat" : "hedgeHeld") },
   // ── IC_V2 END ──
   // ── PST_REMOVAL_20260909 ── PST sweep params removed.
   // ── VAP_V1 ── nested v1.main/v1.hedge config; guards keep a sweep from

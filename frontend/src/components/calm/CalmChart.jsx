@@ -83,11 +83,16 @@ export default function CalmChart({ lines, overlays = [], nowMin, height = 220, 
           {drawn.map((l) => {
             const p = l.path[l.path.length - 1];
             const top = (Y(p[1]) / height) * 100, left = (X(Math.min(p[0], x1)) / W) * 100;
+            // ── END_LABELS_20261117 ── the line that ends highest takes its label ABOVE its dot, every other line BELOW it
+            // (stacked 16 px apart), so two end labels can never land on each other, whichever book ends higher
+            const order = [...drawn].sort((a, b) => Y(a.path[a.path.length - 1][1]) - Y(b.path[b.path.length - 1][1]) || (b.primary ? 1 : 0) - (a.primary ? 1 : 0));
+            const rank = order.indexOf(l);
+            const lblTop = rank === 0 ? "- 24px" : `+ ${8 + (rank - 1) * 16}px`;
             return (
               <span key={l.key}>
                 <span aria-hidden="true" style={{ position: "absolute", left: `calc(${left}% - 5px)`, top: `calc(${top}% - 5px)`, width: 10, height: 10, borderRadius: 5,
                   background: l.primary ? l.color : C.page, border: l.primary ? 0 : `2px solid ${l.color}`, boxSizing: "border-box" }} />
-                {both && <span style={{ position: "absolute", right: compact ? 0 : SP.lg, top: `calc(${top}% ${l.primary ? "- 26px" : "+ 8px"})`, ...T.meta, color: l.primary ? l.color : C.muted }}>{l.label}</span>}
+                {both && <span data-chart-end-label={l.key} style={{ position: "absolute", right: compact ? 0 : SP.lg, top: `calc(${top}% ${lblTop})`, ...T.meta, color: l.primary ? l.color : C.muted }}>{l.label}</span>}
               </span>
             );
           })}

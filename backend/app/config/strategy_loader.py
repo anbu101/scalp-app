@@ -520,6 +520,11 @@ DEFAULT_STRATEGY_CONFIGS = {
         "adjust_on_sl": True,
         "adjust_delay_s": 60,
         "adjust_only": False,
+        # ── IC2_HEDGE_FLAT_20261117 ── when no short (L1/L2) is open any more,
+        # sell the L3/L4 wings at once (·ADJ buys do not keep them —
+        # IC2_HEDGE_FLAT2_20261117) instead of holding them to the expiry
+        # close / next morning.
+        "hedge_close_when_flat": True,
         "adjust": {
             "L1": {"enabled": True, "lots": 5, "premium_max": 100,
                    "sl_val": 30, "sl_mode": "pct", "tp_val": 100, "tp_mode": "pct"},

@@ -110,6 +110,22 @@
 # untouched.
 # ══════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════
+# ── IC2_HEDGE_FLAT_20261117 ── hedge_close_when_flat (IC_V2, default OFF here)
+#   The BUY wings (L3/L4 — BUY legs that are not ·ADJ) exist only to hedge
+#   the shorts. Once every SELL leg of the session is CLOSED, the wings are
+#   sold at the OPEN of the NEXT 1m candle (first price after the minute the
+#   last short left), reason HEDGE_FLAT — an OPEN ·ADJ buy does not keep
+#   them (── IC2_HEDGE_FLAT2_20261117 ──); one still pending (the delay after
+#   the stop) does, until it opens or is dropped — instead of riding to the expiry close or
+#   carrying overnight alone. A wing with no candle at that minute closes on
+#   its next candle; with no candles left in the session (or none at all —
+#   synthetic) it closes at its last mark and the runner re-prices a
+#   synthetic one at that minute. Entry sessions only: a carried basket
+#   leaves at next_open_time as a whole, as before.
+#   OFF (default) ⇒ every path below is byte-identical to the previous build.
+# ══════════════════════════════════════════════════════════════════════
+
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
@@ -332,7 +348,8 @@ def simulate_session(legs: List[dict],
                      entry_overrides: Optional[Dict[str, dict]] = None,
                      iv_by_minute: Optional[Dict[int, Dict[str, float]]] = None,
                      iv_thresholds: Optional[Dict[str, float]] = None,
-                     adjust_fill: str = "close") -> dict:
+                     adjust_fill: str = "close",
+                     hedge_close_when_flat: bool = False) -> dict:   # ── IC2_HEDGE_FLAT_20261117 ──
     """Simulate ONE session for a condor — either its entry day or a
     carried day.
 
@@ -398,6 +415,11 @@ def simulate_session(legs: List[dict],
       that minute; on 5 paper adjustments (16–29 Oct) the close was dearer
       every time (mean −5.5 pts vs paper), the open within −0.85. A synthetic
       fill_price is unaffected (it is priced at the start of the minute).
+
+    ── IC2_HEDGE_FLAT_20261117 param ──
+    hedge_close_when_flat: sell the BUY wings (non-·ADJ BUY legs) at the next
+      candle's OPEN once no SELL leg is open and no adjustment is pending —
+      an open ·ADJ buy does not keep them (reason HEDGE_FLAT). Entry sessions only. Default False.
 
     adjust_picks entries MAY additionally carry:
       "fill_price": float — modelled premium at the activation minute.
@@ -491,6 +513,32 @@ def simulate_session(legs: List[dict],
     # ── IC_V2 ── pending adjustments: short leg id → activation ts
     pending_adjust: Dict[str, int] = {}
 
+    # ── IC2_HEDGE_FLAT_20261117 BEGIN ──
+    hedge_on = bool(hedge_close_when_flat) and not carry_in
+    hedge_flat_at: Optional[int] = None     # minute the orphaned wings are sold
+
+    def _is_wing(st: dict) -> bool:
+        return st["leg"]["action"] == "BUY" and not st.get("is_adjust")
+
+    def _hedge_flat_now() -> bool:
+        """Wings open, no SELL leg open, no adjustment still waiting to open.
+        ── IC2_HEDGE_FLAT2_20261117 ── an OPEN ·ADJ buy no longer keeps them:
+        the wings hedge the shorts only, and a long needs no hedge. A PENDING
+        adjustment still does (live parity: selling the last legs before it
+        opens would finalize the condor and drop the adjustment)."""
+        if not any(st["open"] and _is_wing(st) for st in state.values()):
+            return False
+        if any(st["open"] and st["leg"]["action"] == "SELL" for st in state.values()):
+            return False
+        for _src in pending_adjust:
+            _a = adjust_cfg.get(_src)
+            if _a and _a.get("enabled", True) and int(_a.get("lots") or 0) > 0:
+                return False
+        return True
+    if hedge_on:
+        flags["hedge_flat_closes"] = 0
+    # ── IC2_HEDGE_FLAT_20261117 END ──
+
     # candle index per leg, rebuilt as adjustment legs join mid-session
     def _ts_index():
         lo_bound = 0 if carry_in else entry_ts
@@ -540,6 +588,25 @@ def simulate_session(legs: List[dict],
                 flags["next_open_closes"] += 1
                 if ts > next_open_ts:
                     flags["next_open_fallbacks"] += 1
+
+        # ── IC2_HEDGE_FLAT_20261117 ── 0b) sell orphaned wings at this OPEN
+        if hedge_flat_at is not None and ts >= hedge_flat_at:
+            for lid, st in state.items():
+                if not st["open"] or not _is_wing(st):
+                    continue
+                if not candles_by_leg.get(lid):
+                    # no corpus candles (synthetic wing): booked at the due
+                    # minute; the runner re-prices it there
+                    st["open"] = False
+                    st["exit"] = (hedge_flat_at, st["last_close"], "HEDGE_FLAT", False)
+                    flags["hedge_flat_closes"] += 1
+                    continue
+                cd = by_leg_ts.get(lid, {}).get(ts)
+                if cd is None:
+                    continue                    # wait for this wing's next candle
+                st["open"] = False
+                st["exit"] = (ts, float(cd["open"]), "HEDGE_FLAT", False)
+                flags["hedge_flat_closes"] += 1
 
         # 1) apply due MTC re-pins BEFORE this candle's checks
         for lid, act_ts in list(pending_mtc.items()):
@@ -723,6 +790,11 @@ def simulate_session(legs: List[dict],
             if len(armed_here) > 1:
                 flags["double_sl_adjust"] = True
 
+        # ── IC2_HEDGE_FLAT_20261117 ── 4c) no short left (── IC2_HEDGE_FLAT2_20261117 ──
+        # ·ADJ buys do not count) → sell the wings at the NEXT open.
+        if hedge_on and hedge_flat_at is None and _hedge_flat_now():
+            hedge_flat_at = ts + 60
+
     # ── IC_V2 ── adjustments still pending when the session's candles run
     # out never got a fill minute → dropped (C2/b), not carried forward.
     #
@@ -776,8 +848,20 @@ def simulate_session(legs: List[dict],
     # 5) close-out for anything still open
     trades: List[dict] = []
     carry_out: Dict[str, dict] = {}
+    # ── IC2_HEDGE_FLAT_20261117 ── wings still orphaned at session end (their
+    # sell minute had no candle left, or the last short left on the final
+    # candle): close at the last mark.
+    hedge_end = hedge_on and (hedge_flat_at is not None or _hedge_flat_now())
+    _last_ts = all_ts[-1] if all_ts else None
     for lid, st in list(state.items()):
         leg = st["leg"]
+        if st["open"] and hedge_end and _is_wing(st):
+            _hts = hedge_flat_at if hedge_flat_at is not None else (_last_ts or st["last_ts"])
+            if _last_ts is not None and _hts > _last_ts:
+                _hts = _last_ts
+            st["exit"] = (_hts, st["last_close"], "HEDGE_FLAT", False)
+            st["open"] = False
+            flags["hedge_flat_closes"] += 1
         if st["open"]:
             if legacy or hard_close_ts is not None:
                 # EOD square-off (IC_V1) or hard close (expiry / end of range)

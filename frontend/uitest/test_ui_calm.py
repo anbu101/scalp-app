@@ -15,7 +15,7 @@ import urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_server as U                                                  # noqa: E402
 from dash_fixture import FLEET                                         # noqa: E402
-from calm_fixture import METERS, paper_only, pre_open                  # noqa: E402
+from calm_fixture import METERS, paper_only, pre_open, mix_scene                # noqa: E402
 
 U.start()
 from playwright.sync_api import sync_playwright                        # noqa: E402
@@ -203,6 +203,29 @@ with sync_playwright() as p:
         errs += pg._errors
         ctx.close()
     check("TC-CALM-0022", len(set(inks.values())) >= 3, f"every theme renders and the text follows the theme ({inks})")
+    # ── CARD_HEAD_20261117 / END_LABELS_20261117 (DEF-043, DEF-042): 17 Nov mock-up scene
+    for w in (1440, 1180):
+        ctx, pg = open_dash(b, fleet=mix_scene(), width=w)
+        pg.wait_for_selector("[data-testid=calm-card]", timeout=60000)
+        pg.wait_for_timeout(1200)
+        heads = pg.evaluate("""[...document.querySelectorAll('[data-testid=calm-card]')].map(c => {
+          const k = c.querySelector('[data-testid=calm-card-books]') || c.querySelector('[data-accent]').parentElement.children[2]; const m = c.querySelector('[data-testid=calm-card-mtm]');
+          return { id: c.dataset.strategy, books: k.textContent, cut: k.scrollWidth > k.clientWidth + 1, badge: (c.querySelector('[data-badge]') || {}).textContent || '',
+                   over: c.scrollWidth > c.clientWidth + 1, mtm: m.textContent }; })""")
+        check("TC-CALM-0034" if w == 1440 else "TC-CALM-0036",
+              len(heads) == 4 and not any(h["cut"] or h["over"] for h in heads) and all(h["badge"] for h in heads)
+              and any(h["id"] == "IC_V2" and h["books"].startswith("Paper") for h in heads),
+              f"card header at {w} px: the book label is never cut ('Paper · carried' whole) and the state badge is still on the card ({[(h['id'], h['books'], h['cut']) for h in heads]})")
+        if w == 1440:
+            lab = pg.evaluate("""(() => { const r = (t) => { const e = [...document.querySelectorAll('[data-testid=calm-chart] span')].find(x => x.textContent === t && getComputedStyle(x).position === 'absolute'); return e ? e.getBoundingClientRect() : null; };
+              const a = r('Live'), c = r('Paper');
+              if (!a || !c) return { missing: true, a: !!a, c: !!c };
+              const hit = !(a.right <= c.left || c.right <= a.left || a.bottom <= c.top || c.bottom <= a.top);
+              return { hit, a: [a.top, a.bottom], c: [c.top, c.bottom] }; })()""")
+            check("TC-CALM-0035", not lab.get("missing") and not lab["hit"],
+                  f"Live and Paper end labels do not touch each other when Paper ends above Live ({lab})")
+        errs += pg._errors
+        ctx.close()
     check("TC-CALM-0023", not errs, f"no page errors ({errs[:2]})")
     b.close()
 

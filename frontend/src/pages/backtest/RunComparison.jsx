@@ -131,6 +131,7 @@ const PARAM_DEFS = [
   // runs with identical legs differ ONLY here; without this row the compare
   // matrix hides the one knob that changed.
   { key: "ic_expiry_contract", label: "IC expiry day", get: (r) => r.config?.expiry_day_contract === "next" ? "next week, carried" : (r.config?.exit_mode === "NEXT_OPEN" ? "this week, closed that day" : null) },   // ── IC2_EXPIRY_NEXT_20261103 ──
+  { key: "ic_hedge_flat", label: "IC hedges when flat", get: (r) => r.config?.exit_mode === "NEXT_OPEN" ? (r.config?.hedge_close_when_flat ? "sold" : "held") : null },   // ── IC2_HEDGE_FLAT_20261117 ──
   { key: "ic_short_tp_exp",  label: "IC short TP expiry", get: (r) => r.config?.short_tp_skip_expiry ? "off on expiry day" : (Array.isArray(r.config?.legs) && r.config.legs.some((l) => l.action === "SELL" && Number(l.tp_val) > 0) ? "all days" : null) },   // ── IC2_SHORT_TP_SKIP_EXP_20261015 ──
   { key: "ic_exec",          label: "IC execution",   get: (r) => r.config?.adjust_only ? "ADJ-only" : (r.config?.adjust_on_sl ? "Full condor" : null) },
   // ── IC_V2 END ──
@@ -286,6 +287,7 @@ const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "SPOT_TG", "SPOT_SL"
   "DAILY_MAX_LOSS", "DAILY_MAX_PROFIT", "MONTHLY_MAX_LOSS", "MONTHLY_MAX_PROFIT",
   // ── IC_V1 / IC_V2 ── condor exits: MTC scratch, carry close, range end
   "MTC_COST", "EOD_MTC", "NEXT_OPEN", "NEXT_OPEN_MTC", "EOR",
+  "HEDGE_FLAT",   // ── IC2_HEDGE_FLAT_20261117 ── IC_V2 wings sold once no short was open
   // ── TSG_V1 ── combined-MTM basket exits + per-leg IV SL + trailing lock
   "MTM_TARGET", "MTM_SL", "MTM_TRAIL", "IV_SL", "IV_SL_HEDGE",
   // ── BRK_V1_UI_20260830 ── BRK_V1 raised-stop exit

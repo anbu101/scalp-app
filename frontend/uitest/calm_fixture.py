@@ -78,3 +78,45 @@ MARKET = {"NIFTY": {"ltp": 25492.70, "prev_close": 25291.10, "change": 201.6, "c
           "SENSEX": {"ltp": None, "prev_close": None, "change": None, "change_pct": None}}
 PRE_INDICES = {"ok": True, "day": "2026-11-17", "now_min": 533, "indices": {
     k: dict(v, path=[], source="none", ltp=v["prev_close"]) for k, v in INDICES["indices"].items()}}
+
+
+# ── CARD_HEAD_20261117 / END_LABELS_20261117 ── 17 Nov mock-up scene: Tigris Live, Timberwolf Paper+Live,
+# Icarus + Velvet Paper (the book lines end within ~₹3,000 of each other, Paper above Live)
+def mix_scene():
+    import dash_fixture as D
+    R = D.row
+    rows = [
+        R("TSG_V1", "LIVE", "LIVE", "OPEN", 7480, 0, 7480, 0, 4, 0, stop=-35000, text="Strangle 24600 PE / 25700 CE + wings @ 09:16", seed=21, start=556),
+        R("TMA_V2", "LIVE", "PAPER_LIVE", "OPEN", 6240, 0, 6240, 0, 2, 0, carried=True, text="Holding 25050 CE short + 26100 CE wing", seed=12),
+        R("TMA_V2", "PAPER", "PAPER_LIVE", "OPEN", 6410, 0, 6410, 0, 2, 0, carried=True, text="Paper twin of the live spread", seed=13),
+        R("IC_V2", "PAPER", "PAPER", "OPEN", 11860, 9240, 2620, 0, 4, 1, carried=True, text="Bought back 24950 PE ×195 @ 21.10 · +₹9,240", seed=24),
+        R("VET_V1", "PAPER", "PAPER", "OPEN", -1340, 0, -1340, 0, 2, 0, carried=True, text="Holding 24700 PE short + 24300 PE wing (positional)", seed=25),
+    ]
+
+    def book_path(book):
+        out = []
+        for m in range(D.OPEN_MIN, D.NOW_MIN + 1):
+            v = 0.0
+            for r in rows:
+                if r["book"] != book:
+                    continue
+                last = None
+                for pt in r["path"]:
+                    if pt[0] > m:
+                        break
+                    last = pt[1]
+                v += last or 0.0
+            out.append([m, round(v, 2)])
+        return out
+    paths = {"LIVE": book_path("LIVE"), "PAPER": book_path("PAPER")}
+
+    def totals(book, week, month):
+        g = round(sum(r["gross"] for r in rows if r["book"] == book), 2)
+        c = round(sum(r["charges"] for r in rows if r["book"] == book), 2)
+        pk = max(paths[book], key=lambda x: x[1])
+        return {"rows": sum(1 for r in rows if r["book"] == book), "gross": g, "realised": round(sum(r["realised"] for r in rows if r["book"] == book), 2),
+                "unrealised": round(sum(r["unrealised"] for r in rows if r["book"] == book), 2), "charges": c, "net": round(g - c, 2),
+                "peak": pk[1], "peak_min": pk[0], "approx": False, "marks_stale": 0, "week_net": week, "week_trades": 9, "week_from": "11 Nov",
+                "month_net": month, "month_trades": 31, "month_from": "17 Oct"}
+    return {"ok": True, "server_ts": D.FLEET["server_ts"], "day": "2026-11-17", "session": D.FLEET["session"], "strategies": rows, "idle": [],
+            "totals": {"LIVE": totals("LIVE", 28650, 1.12e5), "PAPER": totals("PAPER", 21480, 78900)}, "paths": paths, "fleet": 4, "active": 4}

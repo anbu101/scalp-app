@@ -724,6 +724,7 @@ export function describeConfig(cfg) {
       if (cfg.adjust_fill) add("ADJ fill", cfg.adjust_fill === "close" ? "minute close (older runs)" : "minute open (live)");   // ── IC_ADJ_FILL_OPEN_20261101 ──
       if (cfg.expiry_day_contract === "next") add("Expiry day", "next week's contract, carried");   // ── IC2_EXPIRY_NEXT_20261103 ──
     }
+    if (cfg.hedge_close_when_flat) add("Hedges", "sold when flat");   // ── IC2_HEDGE_FLAT_20261117 ──
   } else if (cfg.exit_time) add("EOD", cfg.exit_time);
   // ── TSG_V1 ── combined-MTM target + skews (keys unique to TSG configs)
   if (Number(cfg.mtm_target) > 0) add("MTM target", `₹${cfg.mtm_target}`);
@@ -1381,6 +1382,8 @@ export default function Backtest() {
   const [icAdjFill, setIcAdjFill] = useState(icSaved.adjFill === "close" ? "close" : "open");
   // ── IC2_EXPIRY_NEXT_20261103 ── expiry day: this week's contract (squared off that day) | next week's (carried)
   const [icExpiryContract, setIcExpiryContract] = useState(icSaved.expiryContract === "next" ? "next" : "current");
+  // ── IC2_HEDGE_FLAT_20261117 ── sell the L3/L4 wings once every other leg is closed (default ON, as live)
+  const [icHedgeFlat, setIcHedgeFlat] = useState(icSaved.hedgeFlat !== false);
   const [icAdjust, setIcAdjust] = useState(
     icSaved.adjust && icSaved.adjust.L1 && icSaved.adjust.L2 ? icSaved.adjust : DEFAULT_IC_ADJUST);
   const setIcAdj = useCallback((legId, key, val) => {
@@ -1388,8 +1391,8 @@ export default function Backtest() {
   }, []);
   // ── IC_V2 END ──
   useEffect(() => {
-    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust, adjustOnly: icAdjustOnly, workers: icWorkers, minEntryIv: icMinEntryIv, shortTpSkipExp: icShortTpSkipExp, adjFill: icAdjFill, expiryContract: icExpiryContract })); } catch { /* ignore */ }   // ── IC_ADJ_FILL_OPEN_20261101 / IC2_EXPIRY_NEXT_20261103 ──
-  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly, icWorkers, icMinEntryIv, icShortTpSkipExp, icAdjFill, icExpiryContract]);
+    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust, adjustOnly: icAdjustOnly, workers: icWorkers, minEntryIv: icMinEntryIv, shortTpSkipExp: icShortTpSkipExp, adjFill: icAdjFill, expiryContract: icExpiryContract, hedgeFlat: icHedgeFlat })); } catch { /* ignore */ }   // ── IC_ADJ_FILL_OPEN_20261101 / IC2_EXPIRY_NEXT_20261103 / IC2_HEDGE_FLAT_20261117 ──
+  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly, icWorkers, icMinEntryIv, icShortTpSkipExp, icAdjFill, icExpiryContract, icHedgeFlat]);
   const setIcLeg = useCallback((idx, key, val) => {
     setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -2671,6 +2674,7 @@ export default function Backtest() {
         adjust_fill: icAdjFill === "close" ? "close" : "open",   // ── IC_ADJ_FILL_OPEN_20261101 ──
         // ── IC2_EXPIRY_NEXT_20261103 ── emitted ONLY when "next": every saved config reproduces exactly
         ...(icExpiryContract === "next" ? { expiry_day_contract: "next" } : {}),
+        hedge_close_when_flat: !!icHedgeFlat,   // ── IC2_HEDGE_FLAT_20261117 ── always sent: the runner treats absent as OFF (old runs reproduce)
       };
     }
     if (ha) {
@@ -2788,7 +2792,7 @@ export default function Backtest() {
       maxTradesDay,   // ── HA_DAILY_CAP ── stale-closure rule
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
-      icWorkers, icMinEntryIv, icShortTpSkipExp, icAdjFill, icExpiryContract,   // ── IC2_EXPIRY_NEXT_20261103 ── ── IC_PARALLEL / IC_MIN_ENTRY_IV / IC2_SHORT_TP_SKIP_EXP_20261015 / IC_ADJ_FILL_OPEN_20261101 ── stale-closure rule: buildConfig reads them, so they land here
+      icWorkers, icMinEntryIv, icShortTpSkipExp, icAdjFill, icExpiryContract, icHedgeFlat,   // ── IC2_HEDGE_FLAT_20261117 ── ── IC2_EXPIRY_NEXT_20261103 ── ── IC_PARALLEL / IC_MIN_ENTRY_IV / IC2_SHORT_TP_SKIP_EXP_20261015 / IC_ADJ_FILL_OPEN_20261101 ── stale-closure rule: buildConfig reads them, so they land here
       tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult,   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ── stale-closure rule
       tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgMtmCheck, tsgHardMult, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
@@ -4518,6 +4522,12 @@ export default function Backtest() {
                       Open legs carry overnight. A new condor is only entered once everything is flat.
                     </div>
                   </div>
+                  {/* ── IC2_HEDGE_FLAT_20261117 ── */}
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 12, color: colors.text.secondary, cursor: "pointer", width: "fit-content" }}
+                    title="When both shorts (L1/L2) are closed, sell the L3/L4 hedge buys at the next minute's OPEN (an open ·ADJ buy does not keep them) (exit reason HEDGE_FLAT) instead of holding them alone to the expiry close or the next morning. Matches paper/live (Settings → Close Hedges When Flat). Untick to reproduce older runs.">
+                    <input type="checkbox" checked={!!icHedgeFlat} onChange={(e) => setIcHedgeFlat(e.target.checked)} />
+                    Close hedge buys (L3/L4) when no short is open
+                  </label>
                   <div style={{ ...typography.label, color: colors.text.muted, fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Adjustment on short SL</div>
                   <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", marginBottom: 8 }}>
                     <Field label="Adjustment">
@@ -5748,7 +5758,7 @@ export default function Backtest() {
                               const R = t.exit_reason;
                               const good = R === "TP" || R === "SIG_TP";
                               const neutral = R === "EOD" || R === "EOD_MTC" || R === "EOR"
-                                || R === "NEXT_OPEN" || R === "NEXT_OPEN_MTC" || R === "MTC_COST";
+                                || R === "NEXT_OPEN" || R === "NEXT_OPEN_MTC" || R === "MTC_COST" || R === "HEDGE_FLAT";   // ── IC2_HEDGE_FLAT_20261117 ──
                               return (
                                 <span style={{ padding: "2px 6px", borderRadius: 4, fontSize: 11, fontWeight: 600,
                                   background: good ? colors.successBg : neutral ? colors.warningBg : colors.lossBg,
@@ -5959,7 +5969,7 @@ export default function Backtest() {
                               const R = r.reason;
                               const good = R === "TP" || R === "SIG_TP";
                               const neutral = R === "EOD" || R === "EOD_MTC" || R === "EOR"
-                                || R === "NEXT_OPEN" || R === "NEXT_OPEN_MTC" || R === "MTC_COST";
+                                || R === "NEXT_OPEN" || R === "NEXT_OPEN_MTC" || R === "MTC_COST" || R === "HEDGE_FLAT";   // ── IC2_HEDGE_FLAT_20261117 ──
                               return (
                                 <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
                                   background: good ? colors.successBg : neutral ? colors.warningBg : colors.lossBg,

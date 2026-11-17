@@ -200,6 +200,11 @@ _EXIT_REALERT_S         = 300     # stuck leg: re-page cadence
 # (session candles end 15:29); live mirrors it with a clock cutoff.
 ADJ_CUTOFF_MIN = 15 * 60 + 29
 
+# ── IC2_HEDGE_FLAT_20261117 ── orphaned wings are sold only while the market
+# takes orders (09:15–15:30 IST); outside it they stay for the morning close.
+HEDGE_FLAT_FROM_MIN  = 9 * 60 + 15
+HEDGE_FLAT_UNTIL_MIN = 15 * 60 + 30
+
 STATE_DIR  = Path.home() / ".scalp-app" / "state"
 
 
@@ -349,6 +354,14 @@ class ICGroupManager:
 
     def _adjust_enabled(self, cfg) -> bool:
         return bool(cfg.get("adjust_on_sl", False))
+
+    # ── IC2_HEDGE_FLAT_20261117 ── default ON for the carry model (IC_V2);
+    # IC_V1 (EOD) keeps its wings to the daily square-off unless set.
+    def _hedge_flat_enabled(self, cfg) -> bool:
+        v = cfg.get("hedge_close_when_flat")
+        if v is None:
+            return str(cfg.get("exit_mode", "NEXT_OPEN") or "NEXT_OPEN").upper() == "NEXT_OPEN"
+        return bool(v)
 
     def _adjust_delay_s(self, cfg) -> int:
         return int(cfg.get("adjust_delay_s", 60) or 60)
@@ -1129,6 +1142,53 @@ class ICGroupManager:
                 continue
             del self._pending_adjust[src]
             self._activate_adjust(src)
+
+        self._close_orphan_hedges()   # ── IC2_HEDGE_FLAT_20261117 ──
+
+    # ── IC2_HEDGE_FLAT_20261117 BEGIN ─────────────────────────────────
+    def _close_orphan_hedges(self) -> int:
+        """The BUY wings (L3/L4) only hedge the shorts. When no SHORT is open
+        any more — closed by SL/TP/MTC — and no adjustment is waiting to open,
+        sell them now (reason HEDGE_FLAT), even while an ·ADJ buy is OPEN
+        (── IC2_HEDGE_FLAT2_20261117 ──: a long needs no hedge). A PENDING
+        adjustment still holds them: selling the last legs first would
+        finalize the condor and the engine would never open it. Replaces
+        holding them to the expiry close or the next morning. Backtest parity: hedge_close_when_flat. Market hours
+        only; never on a carried book (the 09:16 morning close owns it).
+        STRICT close: a failed sell leaves the wing open and is retried on
+        the next engine iteration. Returns the number of wings closed."""
+        core = self._core
+        if core is None or core.state != G_OPEN:
+            return 0
+        open_legs = core.open_legs()
+        wings = [l for l in open_legs if not l.is_short and not l.is_adjust]
+        if not wings or any(l.is_short for l in open_legs):   # ── IC2_HEDGE_FLAT2_20261117 ──
+            return 0
+        if self._pending_adjust or self._carry_committed or any(l.carried for l in open_legs):
+            return 0
+        if not self._hedge_flat_enabled(self._cfg()):
+            return 0
+        if not (HEDGE_FLAT_FROM_MIN <= _min_of_day(_now_ist()) < HEDGE_FLAT_UNTIL_MIN):
+            return 0
+        if getattr(self, "_hedge_flat_group", None) != self._group_id:
+            self._hedge_flat_group = self._group_id
+            write_audit_log(f"[IC][{self.strategy_id}][HEDGE_FLAT] no short open — "
+                            f"selling wing(s) {[l.leg_id for l in wings]} "
+                            f"{[l.symbol for l in wings]}")
+        n = 0
+        for leg in sorted(wings, key=lambda l: l.leg_id):
+            if self._close_leg(leg.leg_id, reason="HEDGE_FLAT", force=True, strict=True):
+                n += 1
+        core.finalize_if_done()
+        self._after_close_housekeeping()
+        if n:
+            record_alert("IC_HEDGE_FLAT",
+                         f"{self.strategy_id}: no short open — {n} hedge wing(s) sold "
+                         f"({', '.join(l.symbol for l in wings if l.state == L_CLOSED)})",
+                         severity="info", strategy_id=self.strategy_id,
+                         mode="paper" if self._paper else "live")
+        return n
+    # ── IC2_HEDGE_FLAT_20261117 END ───────────────────────────────────
 
     # ── MTC activation (decision AT activation, D2=a) ──────────────────
     def _activate_mtc(self, partner_id: str):

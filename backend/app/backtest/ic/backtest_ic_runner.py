@@ -890,6 +890,14 @@ def _run_ic_backtest_impl(
                         of this week's contracts squared off at expiry_exit_time.
                         Days whose next-week chain is not in the corpus are
                         skipped and counted (diag expiry_next_uncovered).
+      hedge_close_when_flat bool (default False) ── IC2_HEDGE_FLAT_20261117 ──
+                        True → once no SELL leg is open and no adjustment is
+                        pending (an open ·ADJ buy does not count,
+                        ── IC2_HEDGE_FLAT2_20261117 ──) the BUY wings L3/L4 are sold at
+                        the next minute's OPEN (reason HEDGE_FLAT) instead of
+                        riding alone to the expiry close / next morning.
+                        NEXT_OPEN only; absent → byte-identical to the old runner.
+                        The Backtest form sends it explicitly (default ON there).
       adjust_fill       "open" | "close"  (default "open") ── IC_ADJ_FILL_OPEN_20261101 ──
                         price an adjustment's strike pick AND fill at the OPEN
                         of the activation minute (where paper/live buy) or at
@@ -980,6 +988,8 @@ def _run_ic_backtest_impl(
     # V2 (NEXT_OPEN) only; absent / "current" → byte-identical to the old runner.
     expiry_day_next = (exit_mode == "NEXT_OPEN"
                        and str(cfg.get("expiry_day_contract", "current") or "current").strip().lower() == "next")
+    # ── IC2_HEDGE_FLAT_20261117 ── sell the wings once no short is open (IC2_HEDGE_FLAT2_20261117).
+    hedge_flat = exit_mode == "NEXT_OPEN" and bool(cfg.get("hedge_close_when_flat", False))
 
     raw_legs = cfg.get("legs") or DEFAULT_LEGS
     legs_cfg = [norm_leg(l) for l in raw_legs if int(l.get("lots") or 0) > 0]
@@ -1195,6 +1205,11 @@ def _run_ic_backtest_impl(
         diag["expiry_day_contract"] = "next"
         diag["expiry_next_days"] = 0          # expiry sessions entered on next week's chain
         diag["expiry_next_uncovered"] = 0     # …skipped: next week's chain not in the corpus
+    # ── IC2_HEDGE_FLAT_20261117 ── keys only when ON (OFF ≡ ORIGINAL)
+    if hedge_flat:
+        diag["hedge_close_when_flat"] = True
+        diag["hedge_flat_closes"] = 0         # wing legs sold because no short was open
+        diag["hedge_flat_days"] = 0           # sessions where that happened
     trades: List[ICTrade] = []
 
     carry: Dict[str, dict] = {}
@@ -1285,6 +1300,9 @@ def _run_ic_backtest_impl(
         # ── IC_IV_SL ──
         diag["iv_sl_exits"] += f.get("iv_sl_exits", 0)
         diag["iv_leg_mtc_pinned"] += f.get("iv_leg_mtc_pinned", 0)
+        if f.get("hedge_flat_closes"):        # ── IC2_HEDGE_FLAT_20261117 ──
+            diag["hedge_flat_closes"] = diag.get("hedge_flat_closes", 0) + f["hedge_flat_closes"]
+            diag["hedge_flat_days"] = diag.get("hedge_flat_days", 0) + 1
 
     def _day_candles(sym: str, day_start: int) -> List[dict]:
         return [{"ts": x.ts, "open": x.open, "high": x.high,
@@ -1999,7 +2017,8 @@ def _run_ic_backtest_impl(
                 is_carry_day=False,
                 entry_overrides=entry_overrides,
                 iv_by_minute=ic_iv_by_min, iv_thresholds=ic_iv_thr,
-                adjust_fill=adjust_fill)   # ── IC_ADJ_FILL_OPEN_20261101 ──
+                adjust_fill=adjust_fill,   # ── IC_ADJ_FILL_OPEN_20261101 ──
+                hedge_close_when_flat=hedge_flat)   # ── IC2_HEDGE_FLAT_20261117 ──
             diag["days_entered"] += 1
             if expiry_next_today:                     # ── IC2_EXPIRY_NEXT_20261103 ──
                 diag["expiry_next_days"] += 1
@@ -2010,7 +2029,8 @@ def _run_ic_backtest_impl(
                 # the bound is the hard close when there is one, else the
                 # session's own EOD minute.
                 _mark_synth_exit(lt, week, meta_by_sym, day_start,
-                                 expiry_ts, (hard_ts or eod_ts))
+                                 expiry_ts, (int(lt["exit_ts"]) if lt.get("exit_reason") == "HEDGE_FLAT"   # ── IC2_HEDGE_FLAT_20261117 ── priced where it was sold
+                                             else (hard_ts or eod_ts)))
                 _emit(lt, meta_by_sym)
                 if lt["exit_reason"] == "EOD" and hard_ts is not None:
                     diag["expiry_closes"] += 1

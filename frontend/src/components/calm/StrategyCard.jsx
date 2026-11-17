@@ -108,11 +108,16 @@ export function StrategyCard({ id, name, accent, row, twin, books, meter, expand
         <span style={{ display: "flex", alignItems: "center", gap: SP.sm, width: "100%", minWidth: 0 }}>
           <span data-accent="" aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 5, background: accent || C.line, flexShrink: 0 }} />
           <span style={{ ...T.title, whiteSpace: "nowrap", flexShrink: 0, maxWidth: "70%", overflow: "hidden", textOverflow: "ellipsis" }}>{name}</span>
-          <span style={{ ...T.meta, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{books}{row.carried && row.state === "OPEN" ? " · carried" : ""}</span>
-          {!compact && <span style={{ marginLeft: "auto" }}>{stateBadge(row, mv)}</span>}
+          <span data-testid="calm-card-books" style={{ ...T.meta, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{books}{row.carried && row.state === "OPEN" ? " · carried" : ""}</span>
           {compact && <span data-testid="calm-card-mtm" style={{ marginLeft: "auto", fontSize: 18, fontWeight: 700, color: tone(row.gross), ...T.num }}>{fmtInr(row.gross)}</span>}
         </span>
-        {!compact && <span data-testid="calm-card-mtm" style={{ ...T.card, color: tone(row.gross) }}>{row.approx ? "≈" : ""}{fmtInr(row.gross)}</span>}
+        {/* ── CARD_HEAD_20261117 ── the state badge sits beside the figure, so the header's room goes to the name and the book ("Paper · carried" is no longer cut) */}
+        {!compact && (
+          <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: `${SP.xs}px ${SP.sm}px`, width: "100%" }}>
+            <span data-testid="calm-card-mtm" style={{ ...T.card, color: tone(row.gross) }}>{row.approx ? "≈" : ""}{fmtInr(row.gross)}</span>
+            {stateBadge(row, mv)}
+          </span>
+        )}
         {twin && <span style={{ ...T.meta, color: C.muted, marginTop: compact ? 0 : -SP.sm }}>{bookLabel(twin.book)} twin <b style={{ color: C.sub, ...T.num }}>{fmtInr(twin.gross)}</b></span>}
         {compact && <span style={{ display: "flex", gap: SP.sm, alignItems: "center", ...T.meta, color: C.muted }}>{stateBadge(row, mv)}</span>}
         {!compact && <Spark path={row.path} />}
@@ -141,7 +146,7 @@ export function IdleCard({ id, name, accent, mode, meter, expanded, onToggle, se
         boxShadow: selected ? `inset 0 0 0 2px ${C.accent}` : "none" }}>
       <button type="button" onClick={() => onFocus && onFocus(id)} title={`Show ${name}'s panel`}
         style={{ display: "flex", flexDirection: "column", gap: SP.sm, textAlign: "left", background: "transparent", border: 0, padding: 0, font: "inherit", color: "inherit", cursor: "pointer", minWidth: 0 }}>
-        <span style={{ display: "flex", alignItems: "center", gap: SP.sm, width: "100%" }}>
+        <span style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: SP.sm, width: "100%" }}>   {/* CARD_HEAD_20261117: wraps instead of overflowing */}
           <span data-accent="" aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 5, background: accent || C.line, flexShrink: 0 }} />
           <span style={{ ...T.title, color: C.sub }}>{name}</span>
           <span style={{ ...T.meta, color: C.muted }}>{modeTxt}</span>

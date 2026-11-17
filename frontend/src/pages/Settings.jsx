@@ -351,6 +351,7 @@ const DEFAULT_IC_V2_CONFIG = {
   adjust_on_sl: true,
   adjust_delay_s: 60,
   adjust_only: false,
+  hedge_close_when_flat: true,     // ── IC2_HEDGE_FLAT_20261117 ── sell L3/L4 once no short is open
   adjust: {
     L1: { enabled: true, lots: 24, premium_max: 85,
           sl_val: 25, sl_mode: "pct", tp_val: 0, tp_mode: "pct" },
@@ -383,6 +384,7 @@ const DEFAULT_IC_V1_CONFIG = {
   exit_mode: "EOD",
   adjust_on_sl: false,
   adjust_only: false,
+  hedge_close_when_flat: false,    // ── IC2_HEDGE_FLAT_20261117 ── IC_V1 keeps wings to its EOD square-off
 };
 
 const IC_DEFAULTS = { IC_V1: DEFAULT_IC_V1_CONFIG, IC_V2: DEFAULT_IC_V2_CONFIG };
@@ -2959,6 +2961,12 @@ function AdminSettings() {
                     <Input value={icV1Config.expiry_exit_time || "15:28"}
                       onChange={(e) => updateICV1(["expiry_exit_time"], e.target.value)}
                       style={{ maxWidth: 90 }} />
+                  </Field>
+                  {/* ── IC2_HEDGE_FLAT_20261117 ── default ON (absent = ON) */}
+                  <Field label="Close Hedges When Flat" indent
+                    helper="When both shorts (L1/L2) are closed by SL/TP, sell the L3/L4 hedge buys straight away — even if an adjustment buy is still open — instead of holding them to the expiry close or next morning. Market hours only.">
+                    <input type="checkbox" checked={icV1Config.hedge_close_when_flat !== false}
+                      onChange={(e) => updateICV1(["hedge_close_when_flat"], e.target.checked)} />
                   </Field>
                 </>) : (
                   <Field label="Exit Time" indent helper="Legacy EOD square-off for anything still open">
