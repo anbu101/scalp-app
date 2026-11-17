@@ -13,9 +13,13 @@
  */
 
 import { useAppSettings } from "../context/NotificationProvider";
-import { colors, spacing } from "../tokens";
+import { colors, spacing, alpha } from "../tokens";   // ── SETTINGS_OTHERS_20261117 ── alpha
 import { THEMES, normalizeTheme } from "../theme";   // ── THEME_PHASE1_20260831 ──
 import { DASHBOARD_LAYOUTS, normalizeLayout } from "./fleet/dashboardLayout";   // ── DASH_MODERN_20260925 ──
+import { useEntitlements } from "../hooks/useEntitlements";   // ── PAGE_VISIBILITY_20261117 ──
+import { entitledPages, pageEnabled } from "../hooks/usePageVisibility";   // ── PAGE_VISIBILITY_20261117 ──
+import { useStrategyVisibility, splitOthers } from "../hooks/useStrategyVisibility";   // ── SETTINGS_OTHERS_20261117 ──
+import { DotCluster, Chevron, Collapse, useOthersOpen } from "./OthersGroup";   // ── SETTINGS_OTHERS_20261117 ──
 
 const STRATEGIES = [
   { id: "BB_V1",    name: "BB V1", accent: "#3b82f6" },
@@ -36,24 +40,25 @@ const STRATEGIES = [
   { id: "TSG_V1",   name: "TSG V1",        accent: "#d946ef" },   // ── TSG_V1 ──
 ];
 
-function Toggle({ checked, onChange, disabled, size = "md" }) {
+function Toggle({ checked, onChange, disabled, size = "md", mixed = false, testid }) {   // ── SETTINGS_OTHERS_20261117 ── mixed: knob centred
   const w = size === "sm" ? 36 : 44;
   const h = size === "sm" ? 20 : 24;
   const knob = h - 4;
   return (
     <button
       onClick={() => !disabled && onChange(!checked)}
-      role="switch" aria-checked={checked}
+      role="switch" aria-checked={mixed ? "mixed" : checked} data-testid={testid}
       style={{
         width: w, height: h, borderRadius: h / 2, border: "none",
         cursor: disabled ? "default" : "pointer",
-        background: checked && !disabled ? (colors.success ?? "#10b981") : (colors.border?.light ?? "#374151"),
+        background: mixed && !disabled ? alpha(colors.success ?? "#10b981", 45)
+          : checked && !disabled ? (colors.success ?? "#10b981") : (colors.border?.light ?? "#374151"),
         position: "relative", transition: "background 0.2s ease", flexShrink: 0,
         opacity: disabled ? 0.4 : 1, padding: 0,
       }}
     >
       <span style={{
-        position: "absolute", top: 2, left: checked ? w - knob - 2 : 2,
+        position: "absolute", top: 2, left: mixed ? (w - knob) / 2 : checked ? w - knob - 2 : 2,
         width: knob, height: knob, borderRadius: "50%",
         background: "#fff", transition: "left 0.2s ease", boxShadow: "0 1px 3px var(--c-shadow)",
       }} />
@@ -172,6 +177,36 @@ function DashboardRow({ value, onChange, loading }) {
   );
 }
 
+// ── PAGE_VISIBILITY_20261117 ── optional pages (Backtest, Crypto Lab, TV Alerts):
+// off by default for everyone; one switch per page this user is entitled to.
+// Same persistence path as the theme row (saveSettings → backend).
+function PagesRows({ settings, saveSettings, loading }) {
+  const { loaded, isAdminUi } = useEntitlements();
+  const list = loaded ? entitledPages(isAdminUi) : [];
+  if (!list.length) return null;
+  const setPage = (key, v) => saveSettings({ ...settings,
+    pages: { ...((settings.pages && typeof settings.pages === "object") ? settings.pages : {}), [key]: v } });
+  return (
+    <div data-testid="pages-rows" style={{ borderTop: `1px solid ${colors.border?.dark ?? "#1f2937"}` }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: colors.text?.secondary ?? "#d1d5db",
+        textTransform: "uppercase", letterSpacing: "0.5px", padding: `${spacing.md}px 0 0` }}>
+        Pages
+      </div>
+      {list.map((pg) => (
+        <GlobalRow
+          key={pg.key}
+          icon={pg.icon}
+          title={`Show ${pg.label}`}
+          desc={`${pg.desc} Adds it to the navigation bar; hidden by default.`}
+          checked={pageEnabled(settings, pg.key)}
+          onChange={(v) => setPage(pg.key, v)}
+          loading={loading}
+        />
+      ))}
+    </div>
+  );
+}
+
 // ── THEME_NONADMIN_20260908 ── theme picker alone, for the non-admin Settings surface.
 // Deliberately excludes the notification/sound matrix (it lists strategies —
 // UI_MASK). Same persistence path as the admin row: saveSettings -> backend ->
@@ -206,6 +241,7 @@ export function AppearanceSection() {
           onChange={(id) => saveSettings({ ...settings, dashboard_layout: id })}
           loading={loading}
         />
+        <PagesRows settings={settings} saveSettings={saveSettings} loading={loading} />   {/* ── PAGE_VISIBILITY_20261117 ── */}
       </div>
     </div>
   );
@@ -233,6 +269,45 @@ export default function AppSettingsSection() {
   };
 
   const gridDisabled = loading || !audioMaster;
+
+  // ── SETTINGS_OTHERS_20261117 ── switched-off strategies (OFF + flat + no trade today) fold into
+  // one "Others" row from two up; its Paper / Live switches set the whole group (centred knob = mixed).
+  const offVis = useStrategyVisibility();
+  const [shownStrats, otherStrats] = splitOthers(STRATEGIES, offVis.isHidden, (x) => x.id);
+  const [othersOpen, toggleOthers] = useOthersOpen("scalp.appSettings.soundOthersOpen");
+  const groupState = (mode) => {
+    const on = otherStrats.filter((x) => cell(x.id, mode)).length;
+    return { all: on === otherStrats.length, none: on === 0, on };
+  };
+  const setGroup = (mode, v) => {
+    const next = { ...rules };
+    otherStrats.forEach((x) => { next[x.id] = { ...(next[x.id] || { PAPER: true, LIVE: true }), [mode]: v }; });
+    saveSettings({ ...settings, audio_rules: next });
+  };
+  const renderRow = (s, nested = false) => (
+          <div key={s.id} data-sound-row={s.id} style={{
+            display: "grid", gridTemplateColumns: "1fr 70px 70px",
+            alignItems: "center", gap: spacing.sm,
+            padding: `${spacing.sm}px 0`,
+            borderBottom: `1px solid ${colors.border?.dark ?? "#1f2937"}`,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, minWidth: 0, opacity: nested ? 0.8 : 1 }}>
+              <span style={{ width: 3, height: 20, borderRadius: 2, background: s.accent, flexShrink: 0 }} />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: colors.text?.primary ?? "#f9fafb", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {s.name}
+                </div>
+                <div style={{ fontSize: 9, color: colors.text?.muted ?? "#6b7280", letterSpacing: "0.4px" }}>{s.id}</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "center" }}>
+              <Toggle size="sm" checked={cell(s.id, "PAPER")} disabled={gridDisabled} onChange={(v) => setCell(s.id, "PAPER", v)} />
+            </div>
+            <div style={{ display: "flex", justifyContent: "center" }}>
+              <Toggle size="sm" checked={cell(s.id, "LIVE")} disabled={gridDisabled} onChange={(v) => setCell(s.id, "LIVE", v)} />
+            </div>
+          </div>
+  );
 
   return (
     <div style={{ maxWidth: 720 }}>
@@ -286,6 +361,7 @@ export default function AppSettingsSection() {
           onChange={(id) => saveSettings({ ...settings, dashboard_layout: id })}
           loading={loading}
         />
+        <PagesRows settings={settings} saveSettings={saveSettings} loading={loading} />   {/* ── PAGE_VISIBILITY_20261117 ── */}
       </div>
 
       {/* Per-strategy / per-mode sound matrix */}
@@ -319,31 +395,44 @@ export default function AppSettingsSection() {
           <span style={{ fontSize: 10, color: colors.text?.muted ?? "#6b7280", textAlign: "center", textTransform: "uppercase", letterSpacing: "0.5px", fontWeight: 600 }}>Live</span>
         </div>
 
-        {/* Rows */}
-        {STRATEGIES.map((s) => (
-          <div key={s.id} style={{
-            display: "grid", gridTemplateColumns: "1fr 70px 70px",
-            alignItems: "center", gap: spacing.sm,
-            padding: `${spacing.sm}px 0`,
-            borderBottom: `1px solid ${colors.border?.dark ?? "#1f2937"}`,
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, minWidth: 0 }}>
-              <span style={{ width: 3, height: 20, borderRadius: 2, background: s.accent, flexShrink: 0 }} />
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: colors.text?.primary ?? "#f9fafb", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {s.name}
+        {/* Rows — ── SETTINGS_OTHERS_20261117 ── shown strategies, then the Others group */}
+        {shownStrats.map((x) => renderRow(x))}
+        {otherStrats.length > 0 && (() => {
+          const gp = groupState("PAPER"), gl = groupState("LIVE");
+          return (<>
+            <div data-testid="sound-others" style={{
+              display: "grid", gridTemplateColumns: "1fr 70px 70px", alignItems: "center", gap: spacing.sm,
+              padding: `${spacing.sm}px 0`, borderBottom: `1px solid ${colors.border?.dark ?? "#1f2937"}`,
+            }}>
+              <button type="button" data-testid="sound-others-toggle" aria-expanded={othersOpen} onClick={toggleOthers}
+                title={otherStrats.map((x) => x.name).join(", ")}
+                style={{ display: "flex", alignItems: "center", gap: spacing.sm, minWidth: 0, padding: 0, border: "none",
+                  background: "transparent", cursor: "pointer", textAlign: "left", font: "inherit" }}>
+                <Chevron open={othersOpen} />
+                <DotCluster accents={otherStrats.map((x) => x.accent)} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: colors.text?.secondary ?? "#d1d5db" }}>Others</div>
+                  <div style={{ fontSize: 9, color: colors.text?.muted ?? "#6b7280", letterSpacing: "0.4px" }}>
+                    {otherStrats.length} switched off · switches set all of them
+                  </div>
                 </div>
-                <div style={{ fontSize: 9, color: colors.text?.muted ?? "#6b7280", letterSpacing: "0.4px" }}>{s.id}</div>
+              </button>
+              <div style={{ display: "flex", justifyContent: "center" }} title={`${gp.on} of ${otherStrats.length} on`}>
+                <Toggle size="sm" testid="sound-others-paper" checked={gp.all} mixed={!gp.all && !gp.none}
+                  disabled={gridDisabled} onChange={() => setGroup("PAPER", !gp.all)} />
+              </div>
+              <div style={{ display: "flex", justifyContent: "center" }} title={`${gl.on} of ${otherStrats.length} on`}>
+                <Toggle size="sm" testid="sound-others-live" checked={gl.all} mixed={!gl.all && !gl.none}
+                  disabled={gridDisabled} onChange={() => setGroup("LIVE", !gl.all)} />
               </div>
             </div>
-            <div style={{ display: "flex", justifyContent: "center" }}>
-              <Toggle size="sm" checked={cell(s.id, "PAPER")} disabled={gridDisabled} onChange={(v) => setCell(s.id, "PAPER", v)} />
-            </div>
-            <div style={{ display: "flex", justifyContent: "center" }}>
-              <Toggle size="sm" checked={cell(s.id, "LIVE")} disabled={gridDisabled} onChange={(v) => setCell(s.id, "LIVE", v)} />
-            </div>
-          </div>
-        ))}
+            <Collapse open={othersOpen} testid="sound-others-list">
+              <div style={{ marginLeft: 6, paddingLeft: 10, borderLeft: `1px solid ${colors.border?.light ?? "#374151"}` }}>
+                {otherStrats.map((x) => renderRow(x, true))}
+              </div>
+            </Collapse>
+          </>);
+        })()}
       </div>
 
       <p style={{ marginTop: spacing.md, fontSize: 11, color: colors.text?.muted ?? "#6b7280" }}>

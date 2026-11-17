@@ -12,6 +12,7 @@ import MarketBadge from "../components/MarketBadge";
 import TradeReplay from "../components/replay/TradeReplay";   // ── TRADE_REPLAY_LIVE_20261017 ──
 import LiveSizer from "../components/LiveSizer";   // ── LIVE_SIZER_20261024 ── suggest-only lot sizer
 import MarginLog from "../components/MarginLog";   // ── MARGIN_LOG_20261016 ──            // ── INDEX_BADGES_20260827 ──
+import { useStrategyVisibility, splitOthers } from "../hooks/useStrategyVisibility";   // ── OFF_HIDDEN_20261117 ── (TD-009)
 
 // ── TRADE_REPLAY_LIVE_20261017 ── the page's own row id (same fallback as the row keys below)
 const replayRowKey = (t) => String(t.paper_trade_id ?? `${t.entry_time}_${t.symbol}`);
@@ -294,8 +295,71 @@ function ExitReasonBadge({ reason }) {
 // selected = Set of canonical names; empty Set = All.
 // Plain click = only this one (the old single-select behaviour);
 // ⌘/Ctrl-click, or any click while "Multi" is on, adds/removes it.
-function StrategyTabs({ options, selected, multi, onSelectOnly, onToggle, onClear, onMultiChange }) {
+function StrategyTabs({ options, selected, multi, onSelectOnly, onToggle, onClear, onMultiChange,
+                        others = [], onSelectSet = null }) {   // ── OFF_HIDDEN_20261117 ── others: values grouped under OTHERS
   const allActive = selected.size === 0;
+  // ── OFF_HIDDEN_20261117 ── (TD-009) two or more OFF strategies (flat, no trade today) collapse
+  // into ONE "Others" chip that expands only when clicked; "All" still counts their history.
+  const otherSet = new Set(others);
+  const otherOpts = options.filter((o) => otherSet.has(o.value));
+  const anyOtherSel = otherOpts.some((o) => selected.has(o.value));
+  const [othersOpen, setOthersOpen] = useState(false);
+  const showOthers = othersOpen || anyOtherSel;
+  const allOthersSel = otherOpts.length > 0 && otherOpts.every((o) => selected.has(o.value))
+    && selected.size === otherOpts.length;
+  const pickAllOthers = (e) => {
+    const vals = otherOpts.map((o) => o.value);
+    if (multi || e.metaKey || e.ctrlKey) vals.forEach((v) => { if (!selected.has(v)) onToggle(v); });
+    else if (onSelectSet) onSelectSet(allOthersSel ? [] : vals);
+  };
+  const renderTab = (opt) => {   // ── OFF_HIDDEN_20261117 ── one tab (shared by the main row and the Others group)
+    const isAll    = opt.value === "ALL";
+    const isActive = isAll ? allActive : selected.has(opt.value);
+    return (
+      <button key={opt.value}
+        aria-pressed={isActive}
+        data-strat={opt.value}
+        title={isAll ? "Show all strategies"
+          : multi ? "Click to add / remove"
+          : "Click: show only this · ⌘/Ctrl-click: add to selection"}
+        onClick={(e) => {
+          if (isAll) { onClear(); return; }
+          if (multi || e.metaKey || e.ctrlKey) onToggle(opt.value);
+          else onSelectOnly(opt.value);
+        }}
+        style={{
+          padding: "6px 16px", borderRadius: 5, border: "none",
+          background: isActive ? colors.bg.tertiary : "transparent",
+          color:      isActive ? colors.text.primary : colors.text.muted,
+          fontSize: 12, fontWeight: isActive ? 600 : 400, cursor: "pointer",
+          boxShadow: isActive ? "0 1px 3px var(--c-shadow)" : "none",
+          transition: "all 0.15s ease",
+          borderBottom: isActive ? `2px solid ${colors.primary}` : "2px solid transparent",
+          display: "inline-flex", alignItems: "center",
+        }}
+      >
+        {multi && !isAll && (
+          <span aria-hidden="true" style={{
+            width: 11, height: 11, marginRight: 6, borderRadius: 3, flexShrink: 0,
+            border: `1px solid ${isActive ? colors.primary : colors.border.light}`,
+            background: isActive ? colors.primary : "transparent",
+            color: colors.bg.secondary, fontSize: 9, lineHeight: "10px",
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+          }}>{isActive ? "✓" : ""}</span>
+        )}
+        {opt.label}
+        {opt.count != null && (
+          <span style={{
+            marginLeft: 6, fontSize: 10, padding: "1px 5px", borderRadius: 10,
+            background: isActive ? colors.primaryBg : alpha(colors.text.primary, 6),
+            color:      isActive ? colors.primary   : colors.text.muted,
+          }}>
+            {opt.count}
+          </span>
+        )}
+      </button>
+    );
+  };
   return (
     <div style={{
       display: "inline-flex", flexWrap: "wrap", alignItems: "center", gap: 3,
@@ -303,54 +367,36 @@ function StrategyTabs({ options, selected, multi, onSelectOnly, onToggle, onClea
       padding: 3, borderRadius: 8,
       border: `1px solid ${colors.border.dark}`,
     }} data-testid="strat-tabs">
-      {options.map((opt) => {
-        const isAll    = opt.value === "ALL";
-        const isActive = isAll ? allActive : selected.has(opt.value);
-        return (
-          <button key={opt.value}
-            aria-pressed={isActive}
-            data-strat={opt.value}
-            title={isAll ? "Show all strategies"
-              : multi ? "Click to add / remove"
-              : "Click: show only this · ⌘/Ctrl-click: add to selection"}
-            onClick={(e) => {
-              if (isAll) { onClear(); return; }
-              if (multi || e.metaKey || e.ctrlKey) onToggle(opt.value);
-              else onSelectOnly(opt.value);
-            }}
-            style={{
-              padding: "6px 16px", borderRadius: 5, border: "none",
-              background: isActive ? colors.bg.tertiary : "transparent",
-              color:      isActive ? colors.text.primary : colors.text.muted,
-              fontSize: 12, fontWeight: isActive ? 600 : 400, cursor: "pointer",
-              boxShadow: isActive ? "0 1px 3px var(--c-shadow)" : "none",
-              transition: "all 0.15s ease",
-              borderBottom: isActive ? `2px solid ${colors.primary}` : "2px solid transparent",
-              display: "inline-flex", alignItems: "center",
-            }}
-          >
-            {multi && !isAll && (
-              <span aria-hidden="true" style={{
-                width: 11, height: 11, marginRight: 6, borderRadius: 3, flexShrink: 0,
-                border: `1px solid ${isActive ? colors.primary : colors.border.light}`,
-                background: isActive ? colors.primary : "transparent",
-                color: colors.bg.secondary, fontSize: 9, lineHeight: "10px",
-                display: "inline-flex", alignItems: "center", justifyContent: "center",
-              }}>{isActive ? "✓" : ""}</span>
-            )}
-            {opt.label}
-            {opt.count != null && (
-              <span style={{
-                marginLeft: 6, fontSize: 10, padding: "1px 5px", borderRadius: 10,
-                background: isActive ? colors.primaryBg : alpha(colors.text.primary, 6),
-                color:      isActive ? colors.primary   : colors.text.muted,
-              }}>
-                {opt.count}
-              </span>
-            )}
-          </button>
-        );
-      })}
+      {options.filter((o) => !otherSet.has(o.value)).map(renderTab)}
+      {otherOpts.length > 0 && (   /* ── OFF_HIDDEN_20261117 ── the collapsed group */
+        <button data-testid="strat-others" aria-expanded={showOthers}
+          title={`Strategies switched OFF: ${otherOpts.map((o) => o.label).join(", ")}`}
+          onClick={() => setOthersOpen((o) => (anyOtherSel ? true : !o))}
+          style={{ padding: "6px 14px", borderRadius: 5, cursor: "pointer",
+            border: `1px solid ${anyOtherSel ? colors.primary : colors.border.light}`,
+            background: anyOtherSel ? colors.primaryBg : "transparent",
+            color: anyOtherSel ? colors.primary : colors.text.muted, fontSize: 12, fontWeight: 600,
+            display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span style={{ display: "inline-block", transform: showOthers ? "rotate(90deg)" : "none", transition: "transform .15s" }}>▸</span>
+          Others · {otherOpts.length}
+          <span style={{ fontSize: 10, padding: "1px 5px", borderRadius: 10, background: alpha(colors.text.primary, 6) }}>
+            {otherOpts.reduce((n, o) => n + (o.count || 0), 0)}
+          </span>
+        </button>
+      )}
+      {otherOpts.length > 0 && showOthers && (
+        <span data-testid="strat-others-group" style={{ display: "inline-flex", flexWrap: "wrap", alignItems: "center", gap: 3,
+          padding: 2, borderRadius: 6, border: `1px dashed ${colors.border.light}` }}>
+          <button key="__ALL_OTHERS__" data-testid="strat-others-all" aria-pressed={allOthersSel} onClick={pickAllOthers}
+              title="Show every strategy in Others"
+              style={{ padding: "6px 12px", borderRadius: 5, border: `1px dashed ${colors.border.light}`, cursor: "pointer",
+                background: allOthersSel ? colors.bg.tertiary : "transparent", fontSize: 12,
+                color: allOthersSel ? colors.text.primary : colors.text.muted, fontWeight: allOthersSel ? 600 : 400 }}>
+              All others
+            </button>
+          {otherOpts.map(renderTab)}
+        </span>
+      )}
       <span style={{ width: 1, height: 18, background: colors.border.light, margin: "0 4px" }} />
       <button
         data-testid="strat-multi"
@@ -949,6 +995,11 @@ export default function PaperTrades() {
     })),
   ], [dateFiltered, strategies, showParams]);              // ── UI_MASK ── dep added
 
+  // ── OFF_HIDDEN_20261117 ── (TD-009) 2+ hidden OFF strategies → one "Others" chip
+  const sv = useStrategyVisibility();
+  const otherValues = useMemo(() => splitOthers(tabOptions.filter((o) => o.value !== "ALL"),
+    sv.isHidden, (o) => CANON_TO_ID[o.value])[1].map((o) => o.value), [tabOptions, sv.hidden]);   // sv.isHidden reads sv.hidden
+
   const filtered = useMemo(() =>          // ── TRADES_MULTI_STRAT_20261011 ──
     stratSel.size === 0
       ? dateFiltered
@@ -1142,6 +1193,8 @@ export default function PaperTrades() {
             onToggle={toggleStrat}
             onClear={clearStrat}
             onMultiChange={setStratMulti}
+            others={otherValues}                                  /* ── OFF_HIDDEN_20261117 ── */
+            onSelectSet={(vals) => setStratSel(new Set(vals))}    /* ── OFF_HIDDEN_20261117 ── */
           />
         )}
 

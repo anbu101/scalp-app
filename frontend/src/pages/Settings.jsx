@@ -1,5 +1,8 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";   // ── SETTINGS_OTHERS_20261117 ── useRef
 import { getStrategyConfig, saveStrategyConfig } from "../api";
+import { getApiBase } from "../api/base";   // ── LVB_SETTINGS_20261117 ──
+import { useStrategyVisibility, refreshStrategyVisibility, splitOthers } from "../hooks/useStrategyVisibility";   // ── LVB_SETTINGS_20261117 ── ── SETTINGS_OTHERS_20261117 ── splitOthers
+import { DotCluster, Chevron, Collapse } from "../components/OthersGroup";   // ── SETTINGS_OTHERS_20261117 ──
 import { colors, spacing, typography, alpha } from "../tokens";   // ── THEME_PHASE1_20260831 ── alpha()
 import { useIsMobile } from "../hooks/useIsMobile";
 import AppSettingsSection from "../components/AppSettingsSection";
@@ -38,6 +41,16 @@ const STRATEGY_ACCENT = {
   HA_V1:    "#14b8a6",
   IC_V1:    "#14b8a6",   // ── IC_SPLIT ──
   IC_V2:    "#6366f1",   // ── IC_SPLIT ── was "IC_V1"
+  LVB_V1:   "#0ea5e9",   // ── LVB_SETTINGS_20261117 ──
+  // ── SETTINGS_OTHERS_20261117 ── the rest get the Dashboard's accents (StrategyHost META), so the
+  // rail and the Others dot cluster are not a row of identical blue
+  TMA_V1:   "#8b5cf6",
+  TMA_V2:   "#c084fc",
+  VET_V1:   "#34d399",
+  ORB_V1:   "#f59e0b",
+  EMC_V1:   "#e11d48",
+  BRK_V1:   "#fb923c",
+  TSG_V1:   "#d946ef",
   APP:      colors.text.muted,
 };
 
@@ -672,7 +685,8 @@ const STRATEGY_META = {
   BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
   BB_V2:    { name: "BB V2",        sub: "BANKNIFTY options" },
   HA_V1:    { name: "Heikin Ashi",  sub: "NIFTY options" },
-  APP:      { name: "App Settings", sub: "Notifications · sounds · pop-ups" },
+  LVB_V1:   { name: "LVB V1",       sub: "Tripwire · your spot levels · conditions on the Levels page" },   // ── LVB_SETTINGS_20261117 ──
+  APP:      { name: "App Settings", sub: "Notifications · sounds · pages" },   // ── PAGE_VISIBILITY_20261117 ── was "… · pop-ups"
 };
 
 /* ─────────────────────────────────────────────
@@ -906,6 +920,17 @@ function AdminSettings() {
   // ── ORB_V1 END ──
   // ── EMC_V1_LIVE_20261011 BEGIN ──
   const [emcConfig, setEmcConfig] = useState(null);
+  // ── LVB_SETTINGS_20261117 ── Tripwire's mode here too: with TD-009 its Levels page is hidden
+  // while it is OFF and flat, so Settings must be able to switch it back on. Mode only — levels,
+  // lots and SL/TP stay on the Levels page. Saved through POST /api/lvb_v1/config (same audit line).
+  const [lvbConfig, setLvbConfig] = useState(null);   // null = not loaded / not reachable → no rail row
+  const [lvbStatus, setLvbStatus] = useState("");
+  const [lvbSaving, setLvbSaving] = useState(false);
+  const lvbVis = useStrategyVisibility();
+  // ── SETTINGS_OTHERS_20261117 ── rail "Others" group open state (declared here, above the
+  // first-paint early return, so the hook order never changes)
+  const railPickedRef = useRef(false);   // the user clicked a rail row (vs. the "SCALP_V1" default)
+  const [railOthersOpen, setRailOthersOpen] = useState(() => { try { return localStorage.getItem("scalp.settings.othersOpen") === "1"; } catch { return false; } });
   const [emcStatus, setEmcStatus] = useState("");
   const [emcSaving, setEmcSaving] = useState(false);
   // ── EMC_V1_LIVE_20261011 END ──
@@ -1217,6 +1242,30 @@ function AdminSettings() {
     } finally { setEmcSaving(false); }
   }
   // ── EMC_V1_LIVE_20261011 END ──
+  // ── LVB_SETTINGS_20261117 BEGIN ──
+  async function loadLVB() {
+    try {
+      const d = await getStrategyConfig("LVB_V1");
+      setLvbConfig({ trade_execution_mode: String(d?.trade_execution_mode || "PAPER").toUpperCase() });
+    } catch { setLvbConfig(null); }
+  }
+  async function saveLVB() {
+    setLvbSaving(true);
+    try {
+      const r = await fetch(`${getApiBase()}/api/lvb_v1/config`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trade_execution_mode: lvbConfig.trade_execution_mode }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${r.status}`);
+      setLvbStatus("success"); setTimeout(() => setLvbStatus(""), 3000);
+      refreshStrategyVisibility();   // the Levels page appears / disappears at once
+    } catch {
+      setLvbStatus("error"); setTimeout(() => setLvbStatus(""), 3000);
+    } finally { setLvbSaving(false); }
+  }
+  useEffect(() => { loadLVB(); }, []);
+  // ── LVB_SETTINGS_20261117 END ──
   // ── VET_V1 BEGIN ── load / update / save. Saved payload merged OVER
   // defaults so backend-only frozen keys (signal_tf, range_len, EMA pair,
   // warmup_sessions, wing_mode) survive every save untouched.
@@ -1442,8 +1491,31 @@ function AdminSettings() {
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
     { id: "BB_V2",    mode: bbV2Config.trade_execution_mode },
     { id: "HA_V1",    mode: haConfig.trade_execution_mode },
+    ...(lvbConfig ? [{ id: "LVB_V1", mode: lvbConfig.trade_execution_mode }] : []),   // ── LVB_SETTINGS_20261117 ──
     { id: "APP",      mode: null },
   ].filter((s) => s.id === "APP" || allowsStrategy(s.id));
+
+  // ── SETTINGS_OTHERS_20261117 BEGIN ── switched-off strategies (OFF + flat + no trade today, saved
+  // state — never the unsaved toggle, so a row does not jump while you edit) fold into ONE "Others"
+  // group from two up; App Settings stays last. The group opens while the selection is inside it.
+  const [railShown, railOthers] = splitOthers(RAIL.filter((s) => s.id !== "APP"), lvbVis.isHidden, (s) => s.id);
+  const railApp = RAIL.filter((s) => s.id === "APP");
+  const othersHasActive = railOthers.some((s) => s.id === primaryId);
+  const othersOpen = railOthersOpen || othersHasActive;
+  const toggleRailOthers = () => setRailOthersOpen((o) => {
+    const next = othersHasActive ? true : !o;
+    try { localStorage.setItem("scalp.settings.othersOpen", next ? "1" : "0"); } catch {}
+    return next;
+  });
+  const othersAccents = railOthers.map((x) => STRATEGY_ACCENT[x.id] || colors.text.muted);
+  const othersSub = `${railOthers.length} switched off`
+    + (othersHasActive && !railOthersOpen ? ` · ${STRATEGY_META[primaryId]?.name || primaryId}` : "");
+  // the default selection never lands inside Others — only a click puts it there
+  if (!railPickedRef.current && othersHasActive && railShown.length > 0) {
+    setPrimaryId(railShown[0].id);
+  }
+  const pickRail = (id) => { railPickedRef.current = true; setPrimaryId(id); };
+  // ── SETTINGS_OTHERS_20261117 END ──
 
   if (!RAIL.some((s) => s.id === primaryId)) {
     setPrimaryId(RAIL[0]?.id ?? "APP");
@@ -1466,6 +1538,7 @@ function AdminSettings() {
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
     BB_V2:    { mode: bbV2Config.trade_execution_mode,   onSave: saveBBV2,    saving: bbV2Saving,   status: bbV2Status },
     HA_V1:    { mode: haConfig.trade_execution_mode,     onSave: saveHA,      saving: haSaving,     status: haStatus },
+    LVB_V1:   { mode: lvbConfig?.trade_execution_mode,    onSave: saveLVB,     saving: lvbSaving,    status: lvbStatus },   // ── LVB_SETTINGS_20261117 ──
   };
 
   function renderDetailBody(id) {
@@ -2342,6 +2415,21 @@ function AdminSettings() {
               </div>
               {/* ── ORB_V1 END ── */}
             </>);
+      case "LVB_V1": return (<>
+              {/* ── LVB_SETTINGS_20261117 ── mode only; everything else lives on the Levels page */}
+              <Group title="Execution">
+                <Field label="Mode" helper="OFF = no new entries (open trades still managed to their exit) · LIVE = real orders">
+                  <ModeToggle value={lvbConfig?.trade_execution_mode}
+                    onChange={(v) => setLvbConfig((c) => ({ ...(c || {}), trade_execution_mode: v }))} />
+                </Field>
+              </Group>
+              <div data-testid="lvb-settings-note" style={{ fontSize: 12, color: colors.text.secondary, lineHeight: 1.5 }}>
+                Levels, lots, SL / TP and square-off are on the Levels page.{" "}
+                {lvbVis.isHidden("LVB_V1")
+                  ? "The Levels page is hidden while Tripwire is OFF with no open trade and no trade today — set Paper or Live and save to bring it back."
+                  : <a href="#/levels" style={{ color: colors.primary }}>Open the Levels page →</a>}
+              </div>
+            </>);
       case "EMC_V1": return (<>
               {/* ── EMC_V1_LIVE_20261011 BEGIN ── sealed strategy — mode, lots, DTE × lots only. */}
               <div style={{ fontSize: 12, marginBottom: 10, opacity: 0.85 }}>
@@ -3204,13 +3292,14 @@ function AdminSettings() {
             display: "flex", gap: spacing.sm, overflowX: "auto",
             paddingBottom: spacing.xs,
           }}>
-            {RAIL.map((s) => {
+            {(() => {   /* ── SETTINGS_OTHERS_20261117 ── chips: shown · Others · (open group) · App */
+              const chip = (s) => {
               const active = primaryId === s.id;
               const isLive = isLiveMode(s.mode);   // ── FLEET_MODES_20260923 ──
               const isOff  = s.mode === "OFF";
               const ac     = STRATEGY_ACCENT[s.id] || colors.primary;
               return (
-                <button key={s.id} onClick={() => setPrimaryId(s.id)}
+                <button key={s.id} onClick={() => pickRail(s.id)}
                   style={{
                     flexShrink: 0,
                     display: "flex", alignItems: "center", gap: 6,
@@ -3231,7 +3320,29 @@ function AdminSettings() {
                   {STRATEGY_META[s.id]?.name || s.id}
                 </button>
               );
-            })}
+              };
+              return (<>
+                {railShown.map(chip)}
+                {railOthers.length > 0 && (
+                  <button data-testid="settings-others" aria-expanded={othersOpen} onClick={toggleRailOthers}
+                    style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", borderRadius: 8,
+                      border: `1px dashed ${othersHasActive ? colors.primary : colors.border.medium}`, background: "transparent",
+                      color: othersHasActive ? colors.text.primary : colors.text.muted, fontSize: 12, fontWeight: 600,
+                      cursor: "pointer", whiteSpace: "nowrap" }}>
+                    <DotCluster accents={othersAccents} max={4} size={8} />
+                    Others · {railOthers.length}
+                    <Chevron open={othersOpen} />
+                  </button>
+                )}
+                {railOthers.length > 0 && othersOpen && (
+                  <div data-testid="settings-others-list" style={{ display: "flex", gap: spacing.sm, flexShrink: 0, padding: 3,
+                    borderRadius: 10, border: `1px dashed ${colors.border.medium}` }}>
+                    {railOthers.map(chip)}
+                  </div>
+                )}
+                {railApp.map(chip)}
+              </>);
+            })()}
           </div>
         ) : (
           <div style={{
@@ -3247,18 +3358,56 @@ function AdminSettings() {
             <div style={{ ...label, padding: `${spacing.sm}px ${spacing.md}px 4px` }}>
               Strategies
             </div>
-            {RAIL.map((s) => (
-              <StrategyRailItem
-                key={s.id}
-                id={s.id}
-                name={STRATEGY_META[s.id]?.name || s.id}
-                mode={s.mode}
-                accent={STRATEGY_ACCENT[s.id]}
-                active={primaryId === s.id}
-                dirty={false}
-                onClick={() => setPrimaryId(s.id)}
-              />
-            ))}
+            {(() => {   /* ── SETTINGS_OTHERS_20261117 ── shown · Others group · App Settings */
+              const item = (s) => (
+                <StrategyRailItem
+                  key={s.id}
+                  id={s.id}
+                  name={STRATEGY_META[s.id]?.name || s.id}
+                  mode={s.mode}
+                  accent={STRATEGY_ACCENT[s.id]}
+                  active={primaryId === s.id}
+                  dirty={false}
+                  onClick={() => pickRail(s.id)}
+                />
+              );
+              return (<>
+                {railShown.map(item)}
+                {railOthers.length > 0 && (<>
+                  <button data-testid="settings-others" aria-expanded={othersOpen} onClick={toggleRailOthers}
+                    title={railOthers.map((x) => STRATEGY_META[x.id]?.name || x.id).join(", ")}
+                    style={{
+                      display: "flex", alignItems: "center", gap: spacing.sm, width: "100%", textAlign: "left",
+                      marginTop: 6, padding: `${spacing.sm}px ${spacing.md}px`, borderRadius: 8, cursor: "pointer",
+                      border: `1px dashed ${othersHasActive && !railOthersOpen ? colors.primary : colors.border.medium}`,
+                      background: othersOpen ? alpha(colors.bg.tertiary, 60) : "transparent",
+                      transition: "background 0.15s ease, border-color 0.15s ease",
+                    }}
+                    onMouseEnter={(e) => { if (!othersOpen) e.currentTarget.style.background = alpha(colors.bg.secondary, 50); }}
+                    onMouseLeave={(e) => { if (!othersOpen) e.currentTarget.style.background = "transparent"; }}>
+                    <DotCluster accents={othersAccents} />
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: colors.text.secondary }}>Others</div>
+                      <div style={{ ...label, marginTop: 2, fontSize: 9, color: colors.text.muted, whiteSpace: "nowrap",
+                        overflow: "hidden", textOverflow: "ellipsis" }}>{othersSub}</div>
+                    </div>
+                    <Chevron open={othersOpen} />
+                  </button>
+                  <Collapse open={othersOpen} testid="settings-others-list">
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2, margin: "4px 0 2px 16px",
+                      paddingLeft: 8, borderLeft: `1px solid ${colors.border.medium}` }}>
+                      {railOthers.map((x) => (
+                        <div key={x.id} style={{ opacity: primaryId === x.id ? 1 : 0.78 }}>{item(x)}</div>
+                      ))}
+                    </div>
+                  </Collapse>
+                </>)}
+                {railApp.length > 0 && (
+                  <div style={{ height: 1, background: colors.border.medium, margin: "6px 8px" }} />
+                )}
+                {railApp.map(item)}
+              </>);
+            })()}
           </div>
         )}
 
@@ -3279,7 +3428,9 @@ function AdminSettings() {
             name={activeMeta.name || primaryId}
             meta={activeMeta.sub || ""}
             mode={activeProps.mode}
-            onSave={activeProps.onSave}
+            onSave={activeProps.onSave && (async () => {   /* ── SETTINGS_OTHERS_20261117 ── regroup right after a save */
+              try { await activeProps.onSave(); } finally { refreshStrategyVisibility(); }
+            })}
             saving={activeProps.saving}
             status={activeProps.status}
             extra={paperExtra}

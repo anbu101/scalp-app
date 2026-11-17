@@ -38,6 +38,7 @@ import FleetBlotter from "../components/fleet/FleetBlotter";
 import TodayStrip from "../components/fleet/TodayStrip";   // ── FLEET_TODAY_STRIP_20261015 ──
 import { useBrokerCheck, BrokerBadge, BrokerIssues } from "../components/fleet/SystemChecks";   // ── SYSTEM_CHECKS_UI_20261029 ── ── CHECKS_LAYOUT_20261029 ── badge + on-demand card
 import { useFleetToday } from "../components/fleet/useFleetToday";
+import { useStrategyVisibility } from "../hooks/useStrategyVisibility";   // ── OFF_HIDDEN_20261117 ── (TD-009)
 import { nowMinIst, bookLabel } from "../components/fleet/fleetFormat";
 import { stratName } from "../strategies/displayNames";
 import { colors, spacing, typography } from "../tokens";
@@ -126,6 +127,11 @@ export default function ModernDashboard() {
   };
 
   const rows = data?.strategies || [];
+  // ── OFF_HIDDEN_20261117 ── OFF strategies that are flat and did not trade today get no idle
+  // chip; a remembered focus on one falls back to the first row (rows are always visible).
+  const sv = useStrategyVisibility();
+  const idle = (data?.idle || []).filter((r) => !sv.isHidden(r.id));
+  const shownFocus = sv.isHidden(focusId) ? (rows[0]?.id || idle[0]?.id || null) : focusId;
   const series = [
     { key: "__LIVE__", name: "Live", color: "var(--c-text-primary)", width: 2.2, fill: true, path: data?.paths?.LIVE || [], value: data?.totals?.LIVE?.gross },
     { key: "__PAPER__", name: "Paper", color: "var(--c-text-secondary)", width: 2, dash: true, path: data?.paths?.PAPER || [], value: data?.totals?.PAPER?.gross },
@@ -186,7 +192,7 @@ export default function ModernDashboard() {
           positions differ, or the header badge was clicked (admin; hidden without the recon patch) */}
       <BrokerIssues {...broker} isAdminUi={isAdminUi} meta={META} compact={isMobile} />
 
-      <FleetKpis totals={data?.totals} paths={data?.paths} active={data?.active} fleet={data?.fleet} nowMin={nowMin} compact={isMobile} />   {/* ── DASH_MODERN_MOBILE_20261007 ── compact */}
+      <FleetKpis totals={data?.totals} paths={data?.paths} active={data?.active} fleet={data ? (data.active ?? 0) + idle.length : undefined} nowMin={nowMin} compact={isMobile} />   {/* ── DASH_MODERN_MOBILE_20261007 ── compact   ── OFF_HIDDEN_20261117 ── "of N" excludes hidden OFF strategies */}
 
       <Card style={isMobile ? { padding: chartOpen ? `${spacing.sm + 2}px ${spacing.md}px` : `${spacing.sm}px ${spacing.md}px` }   /* ── DASH_MODERN_MOBILE_20261007 ── */
         : chartOpen ? undefined : { padding: `${spacing.sm}px ${spacing.lg}px` }}>   {/* ── FLEET_CHART_COLLAPSE_20260925 ── */}
@@ -194,15 +200,15 @@ export default function ModernDashboard() {
       </Card>
 
       <Card style={{ padding: isMobile ? `${spacing.md}px ${spacing.md}px` : `${spacing.md}px ${spacing.lg}px ${spacing.xs}px` }}>
-        <FleetBlotter rows={rows} idle={data?.idle} focusId={focusId} onFocus={pick} isAdminUi={isAdminUi} meta={META} compact={isMobile} />   {/* ── DASH_MODERN_MOBILE_20261007 ── compact */}
+        <FleetBlotter rows={rows} idle={idle} focusId={shownFocus} onFocus={pick} isAdminUi={isAdminUi} meta={META} compact={isMobile} />   {/* ── DASH_MODERN_MOBILE_20261007 ── compact */}
       </Card>
 
       {/* ── DASH_MODERN_MOBILE_20261007 ── scroll target on a phone; a panel wider than the
           phone (TSG's legs table) scrolls sideways inside its own box instead of widening the page */}
       <div ref={hostRef} style={{ scrollMarginTop: 12, minWidth: 0, overflowX: isMobile ? "auto" : undefined }}>
         {/* ── FLEET_TODAY_STRIP_20261015 ── the row's own numbers + what the panel below measures */}
-        <TodayStrip rows={rows.filter((r) => r.id === focusId)} name={stratName(focusId, isAdminUi, META[focusId]?.name)} compact={isMobile} />
-        <StrategyHost ltpMap={ltpMap} focus={focusId} onFocus={pick} rail={false} recent="collapsed" />
+        <TodayStrip rows={rows.filter((r) => r.id === shownFocus)} name={stratName(shownFocus, isAdminUi, META[shownFocus]?.name)} compact={isMobile} />
+        <StrategyHost ltpMap={ltpMap} focus={shownFocus} onFocus={pick} rail={false} recent="collapsed" />
       </div>
 
       {/* Global, all-strategy debug tool — admin licenses only */}

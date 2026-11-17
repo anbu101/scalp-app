@@ -337,6 +337,8 @@ if lvb_router is not None:   # ── LVB_V1_20261023 ── Levels page API (ad
 app.include_router(vet_state_router)
 app.include_router(closed_recent_router)   # ── CLOSED_RECENT_FLEET_20260921 ──
 app.include_router(fleet_today_router)   # ── DASH_MODERN_20260925 ── GET /api/fleet/today
+from app.api.strategy_visibility_routes import router as strategy_visibility_router   # ── OFF_HIDDEN_20261117 ── (TD-009)
+app.include_router(strategy_visibility_router)   # ── OFF_HIDDEN_20261117 ── GET /api/strategies/visibility
 app.include_router(margin_log_router)    # ── MARGIN_LOG_20261016 ── /api/margin-log/*
 app.include_router(live_sizer_router)    # ── LIVE_SIZER_20261024 ── /api/live-sizer/*
 from app.api.system_restart_routes import router as system_restart_router   # ── APP_RESTART_20261028 ──
@@ -373,7 +375,7 @@ app.include_router(backtest_portfolio_router, dependencies=[Depends(_require_adm
 # can reach the port — keep the app OFF the public Funnel (same rule as the
 # Backtest routes; see the auth-audit note in Backtest.jsx).
 from app.api.crypto_lab_routes import crypto_router
-CRYPTO_LAB_OPEN_TO_ALL = True
+CRYPTO_LAB_OPEN_TO_ALL = False   # ── CRYPTO_ADMIN_20261117 ── admin-only (Anbu 17 Nov); was True
 if CRYPTO_LAB_OPEN_TO_ALL:
     app.include_router(crypto_router, prefix="/api/backtest")
 else:

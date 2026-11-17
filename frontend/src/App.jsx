@@ -1,5 +1,5 @@
 import { HashRouter, Routes, Route, Link, useLocation, useNavigate } from "react-router-dom";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useLayoutEffect, useRef } from "react";   // ── NAV_CENTER_20261117 ── useLayoutEffect, useRef
 
 import Dashboard    from "./pages/Dashboard";
 import Settings     from "./pages/Settings";
@@ -21,6 +21,8 @@ import StatusBar        from "./components/StatusBar";
 import NotificationCenter from "./components/NotificationCenter";
 import { useIsMobile }  from "./hooks/useIsMobile";
 import { useEntitlements } from "./hooks/useEntitlements";   // ── UI_MASK ──
+import { usePageVisibility, CRYPTO_LAB_OPEN_TO_ALL } from "./hooks/usePageVisibility";   // ── PAGE_VISIBILITY_20261117 ──
+import { useStrategyVisibility } from "./hooks/useStrategyVisibility";   // ── OFF_HIDDEN_20261117 ── (TD-009)
 
 import { MarketDataProvider, useMarketData } from "./context/MarketDataContext";
 import { NotificationProvider } from "./context/NotificationProvider";
@@ -105,6 +107,8 @@ function NavPnLPill() {
 function BottomTabBar({ health }) {
   const location = useLocation();
   const { isAdminUi } = useEntitlements();                         // ── TVX_MOBILE_20261011 ──
+  const { isVisible } = usePageVisibility();                       // ── PAGE_VISIBILITY_20261117 ──
+  const sv = useStrategyVisibility();                               // ── OFF_HIDDEN_20261117 ── Levels = LVB_V1
   const dotColor = !health.backendUp ? colors.danger
     : !health.zerodhaConnected ? colors.warning
     : health.trading || health.engineRunning ? colors.success : colors.primary;
@@ -115,8 +119,8 @@ function BottomTabBar({ health }) {
     { path: "/settings",     label: "Settings",  icon: "⚙️" },
     { path: "/connections",  label: "Connect",   icon: "🔗" },
   ];
-  if (isAdminUi) tabs.splice(3, 0, { path: "/tv-alerts", label: "TV Alerts", icon: "📡" });   // ── TVX_MOBILE_20261011 ── admin only
-  if (isAdminUi) tabs.splice(4, 0, { path: "/levels", label: "Levels", icon: "🎯" });   // ── LVB_V1_20261023 ── admin only
+  if (isAdminUi && isVisible("/tv-alerts")) tabs.splice(3, 0, { path: "/tv-alerts", label: "TV Alerts", icon: "📡" });   // ── TVX_MOBILE_20261011 ── admin only   ── PAGE_VISIBILITY_20261117 ── and switched on
+  if (isAdminUi && sv.loaded && !sv.isHidden("LVB_V1")) tabs.splice(tabs.length - 2, 0, { path: "/levels", label: "Levels", icon: "🎯" });   // ── LVB_V1_20261023 ── admin only   ── PAGE_VISIBILITY_20261117 ── before Settings, with or without TV Alerts
   return (
     <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
       background: colors.bg.secondary, borderTop: `1px solid ${colors.border.light}`,
@@ -171,22 +175,23 @@ function MobilePnLStrip() {
 // same rationale as the Settings fork). Non-admin lands on the Dashboard.
 function AdminOnlyBacktest() {
   const { loaded, isAdminUi } = useEntitlements();
-  if (!loaded) return null;
-  if (!isAdminUi) return <Dashboard />;
+  const pv = usePageVisibility();   // ── PAGE_VISIBILITY_20261117 ── off by default; App Settings → Pages
+  if (!loaded || !pv.ready) return null;
+  if (!isAdminUi || !pv.isVisible("/backtest")) return <Dashboard />;
   return <Backtest />;
 }
 // ── UI_MASK END ──
 
 // ── CRYPTO_LAB BEGIN ── same admin-only, fail-closed rationale as Backtest:
 // the lab exposes strategy mechanics and research tooling.
-// ── CRYPTO_LAB_OPEN ── TEMPORARY: true opens the lab to ALL licensed users.
-// Must match CRYPTO_LAB_OPEN_TO_ALL in api_server.py (backend gate), or
-// non-admins see the page but every call 403s. REVERT: false in both places.
-const CRYPTO_LAB_OPEN_TO_ALL = true;
+// ── CRYPTO_LAB_OPEN ── CRYPTO_LAB_OPEN_TO_ALL now lives in hooks/usePageVisibility.js
+// (PAGE_VISIBILITY_20261117). Must still match api_server.py.
 function AdminOnlyCryptoLab() {
   const { loaded, isAdminUi } = useEntitlements();
-  if (!loaded) return null;
+  const pv = usePageVisibility();   // ── PAGE_VISIBILITY_20261117 ──
+  if (!loaded || !pv.ready) return null;
   if (!isAdminUi && !CRYPTO_LAB_OPEN_TO_ALL) return <Dashboard />;
+  if (!pv.isVisible("/crypto-lab")) return <Dashboard />;
   return <CryptoLab />;
 }
 // ── CRYPTO_LAB END ──
@@ -195,15 +200,17 @@ function AdminOnlyCryptoLab() {
 // fail-closed while loading, same rationale as Backtest.
 function AdminOnlyTvAlerts() {
   const { loaded, isAdminUi } = useEntitlements();
-  if (!loaded) return null;
-  if (!isAdminUi) return <Dashboard />;
+  const pv = usePageVisibility();   // ── PAGE_VISIBILITY_20261117 ──
+  if (!loaded || !pv.ready) return null;
+  if (!isAdminUi || !pv.isVisible("/tv-alerts")) return <Dashboard />;
   return <TvAlerts />;
 }
 // ── LVB_V1_20261023 ── Levels ("Tripwire" level-break alerts): admin-only, experimental.
 function AdminOnlyLevels() {
   const { loaded, isAdminUi } = useEntitlements();
-  if (!loaded) return null;
-  if (!isAdminUi) return <Dashboard />;
+  const sv = useStrategyVisibility();   // ── OFF_HIDDEN_20261117 ── LVB_V1 OFF, flat, no trade today → no page
+  if (!loaded || !sv.loaded) return null;
+  if (!isAdminUi || sv.isHidden("LVB_V1")) return <Dashboard />;
   return <LevelBreak />;
 }
 
@@ -222,6 +229,35 @@ function Navigation({ health }) {
     : null;
     
   const { isAdminUi } = useEntitlements();   // ── UI_MASK ──
+  const { isVisible } = usePageVisibility();   // ── PAGE_VISIBILITY_20261117 ──
+  const sv = useStrategyVisibility();   // ── OFF_HIDDEN_20261117 ──
+  // ── NAV_CENTER_20261117 ── measured centring. EXACT: the menu's centre is the window's centre
+  // (brand | menu | right on 1fr auto 1fr) — used whenever both side clusters fit in their half.
+  // Otherwise BALANCED: the menu is centred in the free space between brand and right cluster
+  // (brand | 1fr | menu | 1fr | right), so it never jams against either side or overlaps them.
+  const barRef = useRef(null), brandRef = useRef(null), menuRef = useRef(null), rightRef = useRef(null);
+  const [navExact, setNavExact] = useState(true);
+  useLayoutEffect(() => {
+    const bar = barRef.current;
+    if (!bar || !brandRef.current || !menuRef.current || !rightRef.current) return undefined;
+    const measure = () => {
+      try {
+        const cs = getComputedStyle(bar);
+        const inner = bar.clientWidth - parseFloat(cs.paddingLeft || 0) - parseFloat(cs.paddingRight || 0);
+        const gap = Math.max(parseFloat(cs.columnGap || 0) || 0, compact ? 24 : 32);   // a comfortable gap, not just a non-overlap
+        const side = Math.max(brandRef.current.offsetWidth, rightRef.current.offsetWidth);
+        const need = menuRef.current.offsetWidth + 2 * side + 2 * gap;
+        // hysteresis: enter EXACT only with 48 px to spare, leave it only when it truly no longer
+        // fits — a P&L figure growing a digit near the threshold must not make the menu jump
+        setNavExact((was) => (was ? need <= inner : need + 48 <= inner));
+      } catch { /* keep the current layout */ }
+    };
+    measure();
+    let ro = null;
+    try { ro = new ResizeObserver(measure); [bar, brandRef.current, menuRef.current, rightRef.current].forEach((e) => ro.observe(e)); } catch {}
+    window.addEventListener("resize", measure);
+    return () => { if (ro) ro.disconnect(); window.removeEventListener("resize", measure); };
+  }, [isMobile, compact]);
   useEffect(() => { const t = setInterval(() => setProgress(getMarketProgress()), 30000); return () => clearInterval(t); }, []);
   if (isMobile) return null;
 
@@ -241,7 +277,9 @@ const navItems = [
   ].filter((it) => isAdminUi
     || (it.path !== "/backtest" && it.path !== "/tv-alerts"   /* ── TVX_V1_20261007 ── admin-only */
         && it.path !== "/levels"   /* ── LVB_V1_20261023 ── admin-only */
-        && (it.path !== "/crypto-lab" || CRYPTO_LAB_OPEN_TO_ALL)));
+        && (it.path !== "/crypto-lab" || CRYPTO_LAB_OPEN_TO_ALL)))
+    .filter((it) => isVisible(it.path))
+    .filter((it) => it.path !== "/levels" || (sv.loaded && !sv.isHidden("LVB_V1")));   // ── OFF_HIDDEN_20261117 ── Levels hidden while LVB_V1 is OFF   // ── PAGE_VISIBILITY_20261117 ── Backtest / Crypto Lab / TV Alerts off unless switched on
 
   const inMarketHours = isMarketOpen();   // ── CAS_2026 ── was inline 555..930
 
@@ -262,21 +300,28 @@ const navItems = [
   return (
     <nav style={{ background: colors.bg.secondary, borderBottom: `1px solid ${colors.border.light}`,
       boxShadow: "0 1px 3px var(--c-shadow)", position: "sticky", top: 0, zIndex: 100 }}>
-      {/* ── THEME_HEADER_FIX_20260831 ── LEFT-ANCHORED header. The nav sits right after the
+      {/* ── THEME_HEADER_FIX_20260831 ── (SUPERSEDED by NAV_CENTER_20261117 below) LEFT-ANCHORED header. The nav sits right after the
           brand at a fixed gap; the right cluster is pushed to the edge with
           marginLeft:auto. The nav's x therefore depends on the brand width
           ONLY — P&L digits, balance digits, chip count or bell badge can
           never move it. (Centring was tried twice and cannot work at this
           width: 7 nav items + two account chips leave no equal half-share,
           so any centring scheme degrades to "nav follows the right cluster".) */}
-      <div style={{ padding: compact ? "0 14px" : "0 24px",
-        display: "flex", alignItems: "center", height: 54, gap: compact ? 8 : 16 }}>
-        <div style={{ fontSize: 17, fontWeight: 700, color: colors.text.primary, display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+      {/* ── NAV_CENTER_20261117 ── CENTRED menu (Anbu 17 Nov): a 3-column grid — brand | menu | right
+          cluster — whose two side columns are equal 1fr tracks, so the menu sits at the exact centre of
+          the window and P&L digits / chips / bell badge cannot move it. When a side cluster is wider than
+          its half (both account chips, every optional page on), the measured switch above centres the menu
+          in the free space between the clusters instead — no overlap, no jamming (the case that sank the
+          earlier centring attempts). */}
+      <div data-testid="nav-bar" data-centring={navExact ? "exact" : "balanced"} ref={barRef} style={{ padding: compact ? "0 14px" : "0 24px",
+        display: "grid", gridTemplateColumns: navExact ? "1fr auto 1fr" : "max-content minmax(0, 1fr) auto minmax(0, 1fr) max-content",
+        alignItems: "center", height: 54, columnGap: navExact ? (compact ? 8 : 16) : 0 }}>
+        <div ref={brandRef} style={{ gridColumn: 1, gridRow: 1, marginRight: navExact ? 0 : (compact ? 8 : 16), fontSize: 17, fontWeight: 700, color: colors.text.primary, display: "flex", alignItems: "center", gap: 8, flexShrink: 0, justifySelf: "start" }}>
           <span style={{ fontSize: 22 }}>⚡</span> Scalp Terminal
         </div>
 
 
-        <div style={{ display: "flex", gap: 2, flexShrink: 0, marginLeft: compact ? 8 : 40 }}>   {/* ── THEME_HEADER_FIX_20260831 ── */}
+        <div data-testid="nav-menu" ref={menuRef} style={{ gridColumn: navExact ? 2 : 3, gridRow: 1, display: "flex", gap: 2, flexShrink: 0, justifySelf: "center" }}>   {/* ── THEME_HEADER_FIX_20260831 ── ── NAV_CENTER_20261117 ── centred column */}
           {navItems.map((item) => {
             const isActive = location.pathname === item.path;
             return (
@@ -303,7 +348,7 @@ const navItems = [
         </div>
 
         {/* Right cluster: P&L pill + notification bell + status dot */}
-        <div style={{ display: "flex", alignItems: "center", gap: compact ? 8 : 14, flexShrink: 0, marginLeft: "auto" }}>
+        <div data-testid="nav-right" ref={rightRef} style={{ gridColumn: navExact ? 3 : 5, gridRow: 1, marginLeft: navExact ? 0 : (compact ? 8 : 16), display: "flex", alignItems: "center", gap: compact ? 8 : 14, flexShrink: 0, justifySelf: "end" }}>   {/* ── NAV_CENTER_20261117 ── */}
           <NavPnLPill />
           <NotificationCenter />
           {/* ── ACC2_D9/W3 ── Account chips, rendered only when Account 2 is

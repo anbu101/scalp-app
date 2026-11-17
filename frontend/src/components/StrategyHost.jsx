@@ -48,6 +48,7 @@ import { stratName, stratIdTag } from "../strategies/displayNames";   // ── 
 import { getStrategyConfig } from "../api";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useEntitlements } from "../hooks/useEntitlements";
+import { useStrategyVisibility } from "../hooks/useStrategyVisibility";   // ── OFF_HIDDEN_20261117 ── (TD-009)
 import { colors, spacing } from "../tokens";
 import ScalpV3Panel from "../strategies/scalp_v3/ScalpV3Panel.jsx";
 import ScalpV5Panel from "../strategies/scalpv5/ScalpV5Panel.jsx";
@@ -285,6 +286,7 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
   const isMobile = useIsMobile();
   const { loaded: licenseLoaded, allowsStrategy, isAdminUi } = useEntitlements();   // ── UI_MASK ──
   const [modes, setModes] = useState({});
+  const { hidden: offHidden } = useStrategyVisibility();   // ── OFF_HIDDEN_20261117 ──
 
   // PERSIST_FOCUS BEGIN — initialise focus from localStorage so the last
   // strategy the user was viewing is restored after leaving and returning to
@@ -303,9 +305,9 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
     () => ACTIVE_STRATEGY_IDS.filter((id) => {
       const found = getStrategyById(id);
       if (!found) console.warn(`[StrategyHost] Unknown strategy id "${id}" — skipping.`);
-      return !!found && allowsStrategy(id);
+      return !!found && allowsStrategy(id) && !offHidden.has(id);   // ── OFF_HIDDEN_20261117 ── OFF + flat + no trade today
     }).slice(0, MAX_PANELS),
-    [allowsStrategy]
+    [allowsStrategy, offHidden]
   );
 
   const loadModes = useCallback(async () => {
@@ -356,7 +358,7 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
   // panel (LVB_V1 lives on its own Levels page) used to fall back silently to the previous
   // strategy's panel AND live chart (LVB showed EMC). Show its own live chart + closed
   // positions and say it has no panel here, instead of someone else's.
-  const outsider = focus && !ordered.includes(focus) ? focus : null;
+  const outsider = focus && !ordered.includes(focus) && !offHidden.has(focus) ? focus : null;   // ── OFF_HIDDEN_20261117 ── a hidden pick falls back, no note
   const outsiderNote = outsider ? (
     <div style={{ margin: `0 0 ${spacing.sm}px`, padding: "10px 14px", border: `1px solid ${C.border}`, borderRadius: 8,
                   fontSize: 12.5, color: C.textMuted }}>

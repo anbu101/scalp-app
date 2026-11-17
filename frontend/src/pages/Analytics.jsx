@@ -46,6 +46,7 @@ import { useEntitlements } from "../hooks/useEntitlements";
 import { stratName } from "../strategies/displayNames";   // ── UI_MASK ──
 import { colors as T, alpha } from "../tokens";   // ── THEME_PHASE2B_20260831 ──
 import TradeReplay from "../components/replay/TradeReplay";   // ── TRADE_REPLAY_LIVE_20261017 ──
+import { useStrategyVisibility, splitOthers } from "../hooks/useStrategyVisibility";   // ── OFF_HIDDEN_20261117 ── (TD-009)
 
 /* ── TRADE_REPLAY_LIVE_20261017 ── ▶ Trade replay, ADMIN ONLY.
    The page root provides { open(key) } only when the licence read has
@@ -1392,8 +1393,21 @@ function TradeTable({ trades }) {
 /* ─────────────────────────────────────────────────────────────
    Strategy Multi-Select Chips
 ───────────────────────────────────────────────────────────── */
-function StrategyFilter({ selected, onChange, strategies = STRATEGIES }) {
+function StrategyFilter({ selected, onChange, strategies = STRATEGIES, others = [] }) {   // ── OFF_HIDDEN_20261117 ── others: ids grouped
   const allSelected = selected.length === 0;
+  // ── OFF_HIDDEN_20261117 ── (TD-009) 2+ OFF strategies (flat, no trade today) sit under ONE
+  // "Others" chip that expands only when clicked. "All" still loads their history.
+  const otherSet = new Set(others);
+  const otherList = strategies.filter((s) => otherSet.has(s.id));
+  const anyOtherSel = otherList.some((s) => selected.includes(s.id));
+  const [othersOpen, setOthersOpen] = useState(false);
+  const showOthers = othersOpen || anyOtherSel;
+  const allOthersSel = otherList.length > 0 && otherList.every((s) => selected.includes(s.id));
+  function toggleAllOthers() {
+    const ids = otherList.map((s) => s.id);
+    onChange(allOthersSel ? selected.filter((id) => !otherSet.has(id))
+      : [...selected, ...ids.filter((id) => !selected.includes(id))]);
+  }
 
   function toggleAll() { onChange([]); }
 
@@ -1421,7 +1435,7 @@ function StrategyFilter({ selected, onChange, strategies = STRATEGIES }) {
         All
       </button>
 
-      {strategies.map(s => {
+      {strategies.filter((s) => !otherSet.has(s.id)).map(s => {
         const active = selected.includes(s.id);
         return (
           <button
@@ -1442,6 +1456,40 @@ function StrategyFilter({ selected, onChange, strategies = STRATEGIES }) {
           </button>
         );
       })}
+      {otherList.length > 0 && (   /* ── OFF_HIDDEN_20261117 ── */
+        <button data-testid="an-others" aria-expanded={showOthers}
+          onClick={() => setOthersOpen((o) => (anyOtherSel ? true : !o))}
+          title={`Strategies switched OFF: ${otherList.map((s) => s.label).join(", ")}`}
+          style={{ padding: "5px 13px", borderRadius: 20, cursor: "pointer", fontSize: 12, fontFamily: FONT,
+            border: `1px solid ${anyOtherSel ? C.text : C.borderDim}`, fontWeight: anyOtherSel ? 700 : 500,
+            background: anyOtherSel ? C.bgSurface : "transparent", color: anyOtherSel ? C.text : C.textMuted }}>
+          <span style={{ display: "inline-block", marginRight: 5, transform: showOthers ? "rotate(90deg)" : "none", transition: "transform .15s" }}>▸</span>
+          Others · {otherList.length}
+        </button>
+      )}
+      {otherList.length > 0 && showOthers && (
+        <span data-testid="an-others-group" style={{ display: "inline-flex", gap: 4, flexWrap: "wrap", alignItems: "center",
+          padding: 3, borderRadius: 22, border: `1px dashed ${C.borderDim}` }}>
+          <button data-testid="an-others-all" aria-pressed={allOthersSel} onClick={toggleAllOthers}
+            style={{ padding: "5px 13px", borderRadius: 20, cursor: "pointer", fontSize: 12, fontFamily: FONT,
+              border: `1px dashed ${allOthersSel ? C.text : C.borderDim}`, background: allOthersSel ? C.bgSurface : "transparent",
+              color: allOthersSel ? C.text : C.textMuted, fontWeight: allOthersSel ? 700 : 400 }}>
+            {allOthersSel && <span style={{ marginRight: 4 }}>✓</span>}All others
+          </button>
+          {otherList.map((s) => {
+            const active = selected.includes(s.id);
+            return (
+              <button key={s.id} onClick={() => toggleStrategy(s.id)} title={s.desc}
+                style={{ padding: "5px 13px", borderRadius: 20, cursor: "pointer", fontSize: 12, fontFamily: FONT,
+                  border: `1px solid ${active ? s.color : C.borderDim}`, fontWeight: active ? 700 : 400,
+                  background: active ? `${s.color}20` : "transparent", color: active ? s.color : C.textMuted }}>
+                {active && <span style={{ marginRight: 4 }}>✓</span>}
+                {s.label}
+              </button>
+            );
+          })}
+        </span>
+      )}
     </div>
   );
 }
@@ -1467,6 +1515,7 @@ export default function Analytics() {
     .filter((s) => allowsStrategy(s.id))
     .map((s) => showParams ? s : { ...s, label: stratName(s.id, false), desc: stratName(s.id, false) });
 
+  const offVis = useStrategyVisibility();   // ── OFF_HIDDEN_20261117 ── (TD-009)
   const [trades,           setTrades]           = useState([]);
   const [loading,          setLoading]          = useState(true);
   const [error,            setError]            = useState(null);
@@ -1767,7 +1816,8 @@ export default function Analytics() {
             Strategy:
           </span>
           <StrategyFilter selected={selectedStrategies} onChange={setSelectedStrategies}
-                strategies={visibleStrategies} />
+                strategies={visibleStrategies}
+                others={splitOthers(visibleStrategies, offVis.isHidden, (x) => x.id)[1].map((x) => x.id)} />   {/* ── OFF_HIDDEN_20261117 ── */}
           {selectedStrategies.length > 0 && (
             <button
               onClick={() => setSelectedStrategies([])}

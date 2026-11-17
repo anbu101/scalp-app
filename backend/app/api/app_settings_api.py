@@ -29,7 +29,7 @@ WIRING (same pattern as the telegram router):
 
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -64,6 +64,16 @@ DASHBOARD_LAYOUTS = ("modern", "legacy")
 DASHBOARD_LAYOUT_DEFAULT = "modern"
 
 
+# ── PAGE_VISIBILITY_20261117 ── optional pages, OFF by default for every user
+# (admin included). Only an explicit true turns a page on; unknown keys dropped.
+OPTIONAL_PAGES = ("backtest", "crypto_lab", "tv_alerts")
+
+
+def _norm_pages(v) -> dict:
+    v = v if isinstance(v, dict) else {}
+    return {k: v.get(k) is True for k in OPTIONAL_PAGES}
+
+
 def _norm_layout(v) -> str:
     return v if isinstance(v, str) and v in DASHBOARD_LAYOUTS else DASHBOARD_LAYOUT_DEFAULT
 
@@ -79,6 +89,7 @@ _DEFAULTS = {
     "show_account_balance": True,          # show Zerodha balance in header
     "theme": THEME_DEFAULT,                # ── THEME_PHASE1_20260831 ──
     "dashboard_layout": DASHBOARD_LAYOUT_DEFAULT,   # ── DASH_MODERN_20260925 ──
+    "pages": _norm_pages({}),              # ── PAGE_VISIBILITY_20261117 ── all off
 }
 
 
@@ -91,6 +102,7 @@ def _merge_defaults(data: dict) -> dict:
         "show_account_balance": data.get("show_account_balance", True) is not False,
         "theme": _norm_theme(data.get("theme")),   # ── THEME_PHASE1_20260831 ──
         "dashboard_layout": _norm_layout(data.get("dashboard_layout")),   # ── DASH_MODERN_20260925 ──
+        "pages": _norm_pages(data.get("pages")),   # ── PAGE_VISIBILITY_20261117 ──
     }
     rules_in = data.get("audio_rules", {}) or {}
     rules_out = _default_audio_rules()
@@ -141,6 +153,9 @@ class AppSettings(BaseModel):
     show_account_balance: bool = True
     theme: str = THEME_DEFAULT   # ── THEME_PHASE1_20260831 ──
     dashboard_layout: str = DASHBOARD_LAYOUT_DEFAULT   # ── DASH_MODERN_20260925 ──
+    # ── PAGE_VISIBILITY_20261117 ── None = the client did not send it (an older
+    # frontend): keep the stored value instead of switching the pages off.
+    pages: Optional[Dict[str, bool]] = None
     # audio_rules is a free-form { strategy: {PAPER, LIVE} } map
     audio_rules: Dict[str, ModeRule] = {}
 
@@ -165,6 +180,7 @@ async def save_app_settings(settings: AppSettings):
         "theme": settings.theme,   # ── THEME_PHASE1_20260831 ── normalised in _merge_defaults
         "dashboard_layout": settings.dashboard_layout,   # ── DASH_MODERN_20260925 ── normalised in _merge_defaults
         "audio_rules": {sid: rule.dict() for sid, rule in settings.audio_rules.items()},
+        "pages": settings.pages if settings.pages is not None else _load().get("pages"),   # ── PAGE_VISIBILITY_20261117 ──
     }
     merged = _merge_defaults(raw)
     _save(merged)

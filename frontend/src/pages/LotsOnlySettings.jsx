@@ -216,7 +216,7 @@ function AppearanceRailItem({ active, onClick }) {
         <div style={{ fontSize: 13, fontWeight: 600, color: active ? colors.text.primary : colors.text.secondary }}>
           App Settings
         </div>
-        <div style={{ ...microLabel, marginTop: 2, fontSize: 9 }}>Appearance · theme</div>
+        <div style={{ ...microLabel, marginTop: 2, fontSize: 9 }}>Appearance · theme · pages</div>{/* ── PAGE_VISIBILITY_20261117 ── */}
       </div>
     </button>
   );

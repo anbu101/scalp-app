@@ -1,0 +1,300 @@
+"""
+test_ui_off_hidden.py — OFF_HIDDEN_20261117 (TD-009) + CRYPTO_ADMIN_20261117,
+headless Chrome on the BUILT frontend.
+
+TD-009: a strategy switched OFF (and flat, no trade today) is not shown on the
+Dashboard and its own page (Levels for LVB_V1) is hidden; on Trades and
+Analytics two or more such strategies sit under one "Others" chip that opens on
+click; one alone keeps its own chip; "All" still counts their history.
+Crypto Lab: admin only.
+
+The real GET /api/strategies/visibility route runs (its two seams — config
+mode and today's activity — are set by the test). Trades / history / fleet
+feed answers are fixtures. Throw-away HOME, port 47321 (close the app).
+
+    cd frontend && CI=false npm run build
+    PYTHONPATH=../backend python3 uitest/test_ui_off_hidden.py   [CHROME=/path/to/chrome]
+"""
+import json
+import os
+import sys
+import time
+from urllib.parse import parse_qs, urlparse
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ui_server as U                                                  # noqa: E402
+import app.api.strategy_visibility_routes as V                         # noqa: E402
+
+# the real route, ahead of ui_server's catch-all
+U.app.include_router(V.router)
+_r = U.app.router.routes.pop()
+U.app.router.routes.insert(0, _r)
+
+MODES = {}
+ACT = {"open": set(), "today": set()}
+V._mode_of = lambda sid: MODES.get(sid, "PAPER")
+V._activity = lambda: {"open": set(ACT["open"]), "today": set(ACT["today"])}
+
+U.start()
+from playwright.sync_api import sync_playwright                        # noqa: E402
+
+CHROME = os.environ.get("CHROME") or next((p for p in ("/usr/bin/google-chrome",
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") if os.path.exists(p)), None)
+BASE = "http://127.0.0.1:47321/"
+SETTINGS = U.app_settings_api.SETTINGS_FILE
+NOW = int(time.time())
+fails = []
+N = [0]
+
+
+def check(tc, cond, msg):
+    N[0] += 1
+    print(("  ✓ " if cond else "  ✗ ") + f"{tc}  {msg}")
+    if not cond:
+        fails.append(tc)
+
+
+def wait_for(fn, timeout=12.0):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            if fn():
+                return True
+        except Exception:
+            pass
+        time.sleep(0.25)
+    return False
+
+
+def settings(**kw):
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS.write_text(json.dumps({"pages": {"backtest": True, "crypto_lab": True, "tv_alerts": True}, **kw}))
+
+
+def scenario_many():
+    """SCALP_V1, BB_V1, LVB_V1 OFF and idle → hidden. TMA_V2 OFF but holds a carried
+    position, HA_V1 OFF but traded today → visible. IC_V2 LIVE and open."""
+    MODES.clear()
+    MODES.update({"SCALP_V1": "OFF", "BB_V1": "OFF", "LVB_V1": "OFF", "TMA_V2": "OFF", "HA_V1": "OFF", "IC_V2": "LIVE"})
+    ACT["open"] = {"IC_V2", "TMA_V2"}
+    ACT["today"] = {"IC_V2", "TMA_V2", "HA_V1"}
+
+
+def scenario_one():
+    MODES.clear()
+    MODES.update({"SCALP_V1": "OFF", "IC_V2": "LIVE"})
+    ACT["open"], ACT["today"] = {"IC_V2"}, {"IC_V2"}
+
+
+def row(sid, book, state, mode):
+    return {"id": sid, "book": book, "key": f"{sid}:{book}", "mode": mode, "state": state,
+            "open_legs": 1 if state == "OPEN" else 0, "closed_trades": 1 if state == "CLOSED" else 0,
+            "carried": False, "realised": 0.0, "unrealised": 100.0, "gross": 100.0, "charges": 0.0, "net": 100.0,
+            "ltp_missing": 0, "approx": False, "marks_stale": 0, "mark_asof": None, "stop": None,
+            "first_entry_ts": NOW - 600, "last_event": None, "peak": 100.0, "trough": 0.0, "path": [],
+            "week": {"net": 0, "trades": 0, "approx": False}, "month": {"net": 0, "trades": 0, "approx": False}}
+
+
+FLEET = {"ok": True, "server_ts": NOW, "day": "x",
+         "session": {"open_min": 555, "close_min": 930, "now_min": 600, "market_open": False},
+         "strategies": [row("IC_V2", "LIVE", "OPEN", "LIVE"), row("TMA_V2", "PAPER", "OPEN", "OFF"),
+                        row("HA_V1", "PAPER", "CLOSED", "OFF")],
+         "idle": [{"id": "SCALP_V1", "mode": "OFF"}, {"id": "BB_V1", "mode": "OFF"},
+                  {"id": "LVB_V1", "mode": "OFF"}, {"id": "TSG_V1", "mode": "PAPER"}],
+         "totals": {}, "paths": {}, "fleet": 7, "active": 3}
+
+
+def trade(i, name, state="CLOSED"):
+    return {"paper_trade_id": f"T{i}", "strategy_name": name, "trade_mode": "PAPER", "symbol": f"NIFTY{i}CE",
+            "trade_direction": "SELL", "qty": 65, "lots": 1, "entry_price": 100.0, "exit_price": 90.0,
+            "exit_reason": "TP", "entry_time": NOW - 3600, "exit_time": NOW - 1800 if state == "CLOSED" else None,
+            "state": state, "pnl_value": 650.0, "total_charges": 50.0, "net_pnl": 600.0}
+
+
+TRADES = [trade(1, "SCALP_V1"), trade(2, "SCALP_V1"), trade(3, "BB_V1"), trade(4, "LVB_V1"),
+          trade(5, "IC_V2", "OPEN"), trade(6, "HA_V1")]
+HISTORY_CALLS = []
+
+
+def open_app(browser, *, admin=True, path="", focus=None):
+    U.LICENSE["ui_level"] = "admin" if admin else "user"
+    U.LICENSE["strategies"] = ["*"] if admin else ["IC_V2", "TMA_V2", "TSG_V1", "VET_V1"]
+    ctx = browser.new_context(viewport={"width": 1500, "height": 950})
+    pg = ctx.new_page()
+    pg._errors = []
+    pg.on("pageerror", lambda e: pg._errors.append(str(e)[:300]))
+    if focus:
+        pg.add_init_script(f"localStorage.setItem('scalp.strategyHost.focusId','{focus}')")
+    pg.route("**/api/fleet/today", lambda r: r.fulfill(json=FLEET))
+    pg.route("**/paper_trades", lambda r: r.fulfill(json={"open": [t for t in TRADES if t["state"] == "OPEN"],
+                                                         "closed": [t for t in TRADES if t["state"] == "CLOSED"]}))
+
+    def hist(r):
+        HISTORY_CALLS.append(parse_qs(urlparse(r.request.url).query).get("strategy_id", [None])[0])
+        r.fulfill(json=[])
+    pg.route("**/trades/history*", hist)
+    pg.goto(BASE + path, wait_until="domcontentloaded")
+    wait_for(lambda: pg.locator("nav a[href='#/settings']").count() > 0, 20)
+    wait_for(lambda: pg.locator("nav a[href='#/settings']").first.inner_text().strip() != "", 30)   # boot overlay gone
+    time.sleep(1.5)
+    return ctx, pg
+
+
+def nav(pg):
+    return [a.get_attribute("href") for a in pg.locator("nav a").all()]
+
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
+    errs = []
+
+    # ── backend route through the app ──────────────────────────────────
+    scenario_many()
+    settings()
+    ctx, pg = open_app(browser)
+    vis = pg.evaluate("fetch('/api/strategies/visibility').then(r => r.json())")
+    check("TC-OFFH-0008", sorted(vis["hidden"]) == ["BB_V1", "LVB_V1", "SCALP_V1"]
+          and vis["strategies"]["TMA_V2"]["off"] and not vis["strategies"]["TMA_V2"]["hidden"]
+          and vis["strategies"]["HA_V1"]["off"] and not vis["strategies"]["HA_V1"]["hidden"],
+          f"route: hidden = OFF + flat + no trade today ({vis['hidden']}); OFF with a position / a trade today stays visible")
+
+    # ── Modern dashboard ───────────────────────────────────────────────
+    wait_for(lambda: "Time Strangle" in pg.locator(".flb-chip").first.inner_text())
+    chips = [c.inner_text().replace("\n", " ") for c in pg.locator(".flb-chip").all()]
+    names = " | ".join(chips)
+    check("TC-OFFH-0009", "Time Strangle" in names
+          and not any(x in names for x in ("Scalp V1", "BB V1", "LVB")),
+          f"Modern dashboard idle chips: no Scalp V1 / BB V1 / LVB (OFF, flat); TSG (paper) kept ({chips})")
+    body = pg.locator("body").inner_text()
+    check("TC-OFFH-0010", "of 4 traded today" in body.replace("\n", " ") or " of 4" in body,
+          "traded-today count is 'of 4' (3 active + 1 idle), hidden strategies not counted")
+    check("TC-OFFH-0011", "/levels" not in " ".join(nav(pg)),
+          f"Levels (LVB_V1, OFF and flat) not in the nav ({nav(pg)})")
+    pg.goto(BASE + "#/levels")
+    time.sleep(1.5)
+    check("TC-OFFH-0012", wait_for(lambda: pg.locator(".flb-chip").count() > 0) and "#/levels" in pg.url,
+          "typed #/levels while LVB_V1 is hidden → lands on the Dashboard")
+    errs += pg._errors
+    ctx.close()
+
+    ctx, pg = open_app(browser, focus="SCALP_V1")
+    time.sleep(1.0)
+    body = pg.locator("body").inner_text()
+    check("TC-OFFH-0013", "has no panel on the Dashboard" not in body and "Scalp V1" not in body,
+          "remembered focus on a hidden strategy falls back to a visible one, no 'no panel' note")
+    errs += pg._errors
+    ctx.close()
+
+    # ── Legacy dashboard rail ──────────────────────────────────────────
+    settings(dashboard_layout="legacy")
+    ctx, pg = open_app(browser)
+    wait_for(lambda: "IC_V2 · " in pg.locator("body").inner_text())
+    body = pg.locator("body").inner_text()
+    check("TC-OFFH-0014", "IC_V2 · " in body and "TMA_V2 · " in body and "HA_V1 · " in body
+          and "SCALP_V1 · " not in body and "BB_V1 · " not in body,
+          "Legacy rail: Scalp V1 and BB V1 (OFF, flat) gone; TMA V2 (OFF, open) and HA (OFF, traded today) kept")
+    errs += pg._errors
+    ctx.close()
+    settings()
+
+    # ── Trades page ────────────────────────────────────────────────────
+    ctx, pg = open_app(browser, path="#/paper-trades")
+    wait_for(lambda: pg.locator("[data-testid=strat-others]").count() == 1)
+    tabs = [b.get_attribute("data-strat") for b in pg.locator("[data-testid=strat-tabs] [data-strat]").all()]
+    oth = pg.locator("[data-testid=strat-others]")
+    check("TC-OFFH-0015", oth.count() == 1 and "Others · 3" in oth.inner_text() and oth.get_attribute("aria-expanded") == "false"
+          and set(tabs) == {"ALL", "IC V2", "HA"},
+          f"Trades: SCALP V1, BB, LVB V1 under one closed 'Others · 3'; IC V2 and HA (traded today) keep their tabs ({tabs})")
+    all_cnt = pg.locator("[data-strat=ALL]").inner_text()
+    check("TC-OFFH-0016", all_cnt.strip().endswith("6") and oth.inner_text().strip().endswith("4"),
+          f"'All' still counts the OFF strategies' trades (6); Others shows 4 ({all_cnt!r} / {oth.inner_text()!r})")
+    oth.click()
+    ok = wait_for(lambda: pg.locator("[data-testid=strat-others-group] [data-strat]").count() == 3)
+    grp = [b.get_attribute("data-strat") for b in pg.locator("[data-testid=strat-others-group] [data-strat]").all()]
+    check("TC-OFFH-0017", ok and set(grp) == {"SCALP V1", "BB", "LVB V1"},
+          f"click Others → its three strategies appear ({grp})")
+    pg.locator("[data-testid=strat-others-all]").click()
+    time.sleep(0.8)
+    txt = pg.locator("body").inner_text()
+    check("TC-OFFH-0018", "4 trades" in txt and pg.locator("[data-testid=strat-others-all]").get_attribute("aria-pressed") == "true",
+          "'All others' selects the three → 4 trades shown")
+    pg.locator("[data-testid=strat-others-group] [data-strat='BB']").click()
+    time.sleep(0.8)
+    txt = pg.locator("body").inner_text()
+    check("TC-OFFH-0019", "1 trade" in txt and pg.locator("[data-testid=strat-others]").get_attribute("aria-expanded") == "true",
+          "pick one strategy inside Others (BB) → 1 trade; the group stays open while it is selected")
+    errs += pg._errors
+    ctx.close()
+
+    scenario_one()
+    ctx, pg = open_app(browser, path="#/paper-trades")
+    wait_for(lambda: pg.locator("[data-testid=strat-tabs]").count() == 1)
+    tabs = [b.get_attribute("data-strat") for b in pg.locator("[data-testid=strat-tabs] [data-strat]").all()]
+    check("TC-OFFH-0020", pg.locator("[data-testid=strat-others]").count() == 0 and "SCALP V1" in tabs,
+          f"only ONE OFF strategy (Scalp V1) → no Others chip, it keeps its own tab ({tabs})")
+    errs += pg._errors
+    ctx.close()
+
+    # ── Analytics ──────────────────────────────────────────────────────
+    scenario_many()
+    HISTORY_CALLS.clear()
+    ctx, pg = open_app(browser, path="#/analytics")
+    ok = wait_for(lambda: pg.locator("[data-testid=an-others]").count() == 1)
+    check("TC-OFFH-0021", ok and "Others · 3" in pg.locator("[data-testid=an-others]").inner_text()
+          and pg.get_by_role("button", name="Scalp V1", exact=True).count() == 0
+          and pg.get_by_role("button", name="HA V1", exact=True).count() == 1,
+          "Analytics: Scalp V1, BB V1, LVB V1 under 'Others · 3'; HA V1 (traded today) keeps its chip")
+    check("TC-OFFH-0022", None in HISTORY_CALLS,
+          f"Analytics 'All' loads history with no strategy filter, so OFF history still counts ({HISTORY_CALLS[:4]})")
+    pg.locator("[data-testid=an-others]").click()
+    wait_for(lambda: pg.locator("[data-testid=an-others-all]").count() == 1)
+    HISTORY_CALLS.clear()
+    pg.locator("[data-testid=an-others-all]").click()
+    wait_for(lambda: len(set(HISTORY_CALLS)) >= 3)
+    check("TC-OFFH-0023", {"SCALP_V1", "BB_V1", "LVB_V1"} <= set(HISTORY_CALLS),
+          f"'All others' loads exactly those strategies' history ({sorted(set(x for x in HISTORY_CALLS if x))})")
+    errs += pg._errors
+    ctx.close()
+
+    # ── fail-open: route missing → nothing hidden ──────────────────────
+    ctx, pg = open_app(browser, path="#/paper-trades")
+    ctx.close()
+    U.LICENSE["ui_level"] = "admin"
+    ctx = browser.new_context(viewport={"width": 1500, "height": 950})
+    pg = ctx.new_page()
+    pg.route("**/api/strategies/visibility", lambda r: r.fulfill(status=404, body="{}"))
+    pg.route("**/api/fleet/today", lambda r: r.fulfill(json=FLEET))
+    pg.goto(BASE, wait_until="domcontentloaded")
+    wait_for(lambda: "Scalp V1" in " ".join(c.inner_text() for c in pg.locator(".flb-chip").all()), 20)
+    names = " | ".join(c.inner_text() for c in pg.locator(".flb-chip").all())
+    check("TC-OFFH-0024", "Scalp V1" in names and "#/levels" in nav(pg),
+          "older backend without the route → nothing hidden (fail-open): Scalp V1 chip and Levels shown")
+    ctx.close()
+
+    # ── Crypto Lab admin-only ──────────────────────────────────────────
+    settings()   # every page switched on
+    ctx, pg = open_app(browser, admin=False)
+    check("TC-CRYPTO-0001", "#/crypto-lab" not in nav(pg),
+          f"non-admin with Crypto Lab switched on → not in the nav ({nav(pg)})")
+    pg.goto(BASE + "#/crypto-lab")
+    time.sleep(1.5)
+    check("TC-CRYPTO-0002", pg.locator("nav a[href='#/crypto-lab']").count() == 0 and "Crypto" not in pg.locator("body").inner_text()[:400],
+          "non-admin types #/crypto-lab → Dashboard, lab not rendered")
+    pg.goto(BASE + "#/settings")
+    time.sleep(1.5)
+    pg.get_by_text("App Settings", exact=True).first.click()
+    time.sleep(1.0)
+    check("TC-CRYPTO-0003", pg.locator("[data-testid=pages-rows]").count() == 0,
+          "non-admin App Settings has no Pages switches at all (no page is open to non-admins)")
+    errs += pg._errors
+    ctx.close()
+    ctx, pg = open_app(browser, admin=True)
+    check("TC-CRYPTO-0004", "#/crypto-lab" in nav(pg), "admin with Crypto Lab switched on → shown")
+    errs += pg._errors
+    ctx.close()
+
+    check("TC-OFFH-0025", not errs, f"no page errors ({errs[:2]})")
+    browser.close()
+
+print(f"\n{'FAIL' if fails else 'OK'}: {N[0] - len(fails)}/{N[0]} checks")
+sys.exit(1 if fails else 0)
