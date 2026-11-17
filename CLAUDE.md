@@ -22,3 +22,16 @@ code. Use it to check the Test Cases tab against the code.
 
 If the Sheet cannot be reached in a session (no Claude Docs connector), say so in that
 session, and list the rows that still need adding.
+
+<!-- REPO_MAP_20261117 -->
+## Start here: REPO_MAP.md
+
+Open `REPO_MAP.md` first. Per strategy (by codename) it names the engine, backtest runner, defaults / Settings / Backtest-form line ranges, panel and test suites, plus the dual tree, shared modules and fences. After adding or moving files run `python3 scripts/gen_repo_map.py` (`--check` says if it is stale). Tests: `python3 scripts/run_suites.py PATH` (failures + summary only).
+
+## Rules
+
+- Every change ships as ONE self-contained, idempotent `apply_<name>.py`: dated fence `NAME_YYYYMMDD`, `.bak-<FENCE>` backups, `--rollback`. Deliver the script alone ("run only the script").
+- Dual tree: edit `backend/` and `frontend/`; the script also writes the `desktop/src-tauri/` build copies when they exist.
+- `git status` on every target before patching (an `M` is a stop sign); assert the parent fence.
+- Read the latest `main`, never a file rebuilt from memory.
+- No live deploys Mon–Fri 09:00–15:30 IST.
