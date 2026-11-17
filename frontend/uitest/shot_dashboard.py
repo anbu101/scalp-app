@@ -33,7 +33,7 @@ CHROME = os.environ.get("CHROME") or "/usr/bin/google-chrome"
 BASE = "http://127.0.0.1:47321/"
 SET = U.app_settings_api.SETTINGS_FILE
 SET.parent.mkdir(parents=True, exist_ok=True)
-SET.write_text(json.dumps({"dashboard_layout": "modern"}))
+SET.write_text(json.dumps({"dashboard_layout": "classic"}))
 U.LICENSE.update(ui_level="admin", strategies=["*"])
 
 METRICS_JS = """

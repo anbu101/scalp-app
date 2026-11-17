@@ -68,7 +68,7 @@ def wait_for(fn, timeout=12.0):
 
 def settings(**kw):
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS.write_text(json.dumps({"pages": {"backtest": True, "crypto_lab": True, "tv_alerts": True}, **kw}))
+    SETTINGS.write_text(json.dumps({"pages": {"backtest": True, "crypto_lab": True, "tv_alerts": True}, "dashboard_layout": "classic", **kw}))
 
 
 def scenario_many():

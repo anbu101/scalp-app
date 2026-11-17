@@ -27,6 +27,7 @@ import StrategyHost from "../components/StrategyHost";
 import ModernDashboard from "./ModernDashboard";   // ── DASH_MODERN_20260925 ──
 import { useAppSettings } from "../context/NotificationProvider";   // ── DASH_MODERN_20260925 ──
 import { normalizeLayout } from "../components/fleet/dashboardLayout";   // ── DASH_MODERN_20260925 ──
+import CalmDashboard from "./CalmDashboard";   // ── DASH_CALM_20261117 ──
 import DebugPanel from "../components/DebugPanel";
 import { ReplayHostProvider } from "../components/replay/ReplayHost";   // ── TRADE_REPLAY_STREAM_20261017 ── admin ▶ replay launchers
 import { useEntitlements } from "../hooks/useEntitlements";
@@ -322,7 +323,10 @@ export default function Dashboard() {
     return (<><LoadingAnimations /><FullPageLoader message="Loading dashboard..." /></>);
   }
   // ── TRADE_REPLAY_STREAM_20261017 ── both layouts get the (admin, desktop) replay launchers
-  if (normalizeLayout(settings?.dashboard_layout) === "modern") return <ReplayHostProvider><ModernDashboard /></ReplayHostProvider>;   // ── DASH_MODERN_MOBILE_20261007 ── phones included
+  // ── DASH_CALM_20261117 ── modern = the redesigned page; classic = the previous Modern page
+  const layout = normalizeLayout(settings?.dashboard_layout);
+  if (layout === "modern") return <ReplayHostProvider><CalmDashboard /></ReplayHostProvider>;
+  if (layout === "classic") return <ReplayHostProvider><ModernDashboard /></ReplayHostProvider>;   // ── DASH_MODERN_MOBILE_20261007 ── phones included
   return <ReplayHostProvider><LegacyDashboard /></ReplayHostProvider>;
 }
 // ── DASH_MODERN_20260925 END ──

@@ -106,7 +106,7 @@ export default function ModernDashboard() {
       const aim = (smooth) => {
         if (ctl.stop) return;
         try {
-          const target = (!isMobile && host.querySelector("[data-testid=live-chart-card]")) || host;
+          const target = host;   // ── CHART_BELOW_PANEL_20261117 ── the panel (legs) first; the live chart sits below it
           const nav = document.querySelector("nav");
           const navH = nav && getComputedStyle(nav).position === "sticky" ? nav.getBoundingClientRect().height : 0;
           const want = Math.round(navH + 10);

@@ -48,7 +48,7 @@ def wait_for(fn, timeout=12.0):
 
 def open_dash(browser, width=1470, height=1400, theme="dark", fleet=None):
     SET.parent.mkdir(parents=True, exist_ok=True)
-    SET.write_text(json.dumps({"dashboard_layout": "modern", "theme": theme}))
+    SET.write_text(json.dumps({"dashboard_layout": "classic", "theme": theme}))
     ctx = browser.new_context(viewport={"width": width, "height": height}, timezone_id="Asia/Kolkata")
     pg = ctx.new_page()
     pg._errors = []

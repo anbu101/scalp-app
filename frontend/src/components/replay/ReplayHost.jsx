@@ -21,11 +21,17 @@ import { getApiBase } from "../../api/base";
 import { useEntitlements } from "../../hooks/useEntitlements";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { colors } from "../../tokens";
-import TradeReplay, { MeterChip, WaitingPanel } from "./TradeReplay";   // ── PHONE_METER_20261117 ──
+import TradeReplay, { MeterChip, WaitingPanel } from "./TradeReplay";
+import { fmtInr } from "../fleet/fleetFormat";   // ── CHART_SAME_MTM_20261117 ──   // ── PHONE_METER_20261117 ──
 import { SPACE, COLOR, TYPE } from "../fleet/dash";   // ── LIVE_CHART_SYSTEM_20261117 ──
 
 const Ctx = createContext(null);
-const PhoneCtx = createContext(false);   // ── PHONE_METER_20261117 ── admin + phone: the meter only
+const PhoneCtx = createContext(false);
+// ── CHART_SAME_MTM_20261117 ── the redesigned Dashboard provides today's fleet rows; the live chart
+// card then shows the SAME MTM-today figure as the strategy's card (open P&L and closed today
+// as its parts) and leaves the Entry/Exit meter to the card above. Absent (Classic page,
+// Trades / Analytics): the chart keeps its own hero and meter.
+export const TodayRowsContext = createContext(null);   // ── PHONE_METER_20261117 ── admin + phone: the meter only
 
 const compositeUrl = (k) => {
   const s = String(k);
@@ -132,14 +138,24 @@ export function LiveChartCard({ strategyId }) {
         if (dead) return;
         if (!r.ok || !d.ok) { setErr(d.detail || `HTTP ${r.status}`); return; }
         setErr(null);
-        setRes((prev) => (prev && prev.key === d.key && (prev.nav || []).join() === (d.nav || []).join())
-          ? prev : { key: d.key, nav: d.nav || [d.key], watch: !!d.watch });
+        setRes((prev) => (prev && prev.key === d.key && prev.book === d.book && (prev.nav || []).join() === (d.nav || []).join())
+          ? prev : { key: d.key, nav: d.nav || [d.key], watch: !!d.watch, book: d.book || null });   // ── CHART_SAME_MTM_20261117 ── book
       } catch (e) { if (!dead) setErr(String(e.message || e)); }
     };
     resolve();
     const t = setInterval(resolve, 30000);
     return () => { dead = true; clearInterval(t); };
   }, [host, open, strategyId]);
+  // ── CHART_SAME_MTM_20261117 ──
+  const todayRows = useContext(TodayRowsContext);
+  const mine = (todayRows || []).filter((r) => r.id === strategyId);
+  const row = res ? (mine.find((r) => r.book === res.book) || (mine.length === 1 ? mine[0] : null)) : null;
+  const heroOverride = row ? {
+    key: res.key, v: row.gross,
+    label: `${row.book === "LIVE" ? "Live" : "Paper"} MTM today · same as the card above`,
+    sub: [row.open_legs > 0 ? `open position ${fmtInr(row.unrealised)}` : null,
+          row.closed_trades > 0 ? `closed today ${fmtInr(row.realised)}` : null].filter(Boolean).join(" · "),
+  } : null;
   if (!host || !strategyId) return null;
   const toggle = () => setOpen((o) => { try { localStorage.setItem(CARD_OPEN_KEY, o ? "0" : "1"); } catch {} return !o; });
   return (
@@ -161,7 +177,7 @@ export function LiveChartCard({ strategyId }) {
       {open && !err && !res && <div style={{ ...TYPE.body, color: COLOR.muted }}>Loading live chart…</div>}
       {open && res && (
         <TradeReplay key={`${strategyId}:${res.key}`} embedded runId="live:card" tradeId={res.key} navKeys={res.nav}
-          fetchUrl={compositeUrl} toNavKey={toNavKey} />
+          fetchUrl={compositeUrl} toNavKey={toNavKey} heroOverride={heroOverride} hideMeter={todayRows != null} />
       )}
     </div>
   );

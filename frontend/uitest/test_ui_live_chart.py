@@ -111,14 +111,14 @@ with sync_playwright() as p:
     # light theme: tokens follow the theme (no hard-coded dark colours in the frame)
     import livechart_scene as S
     import json as _j
-    S.SET.write_text(_j.dumps({"dashboard_layout": "modern", "theme": "light"}))
+    S.SET.write_text(_j.dumps({"dashboard_layout": "classic", "theme": "light"}))
     ctx, pg = page(b, {"width": 1470, "height": 2600})
     wait_chart(pg)
     bg = pg.evaluate(f"(() => getComputedStyle(document.querySelector('{CARD} [role=region] > div')).backgroundColor)()")
     check("TC-LCHT-0014", bg in ("rgba(0, 0, 0, 0)", "transparent"), f"light theme: the card has no fill of its own ({bg})")
     errs += pg._errors
     ctx.close()
-    S.SET.write_text(_j.dumps({"dashboard_layout": "modern"}))
+    S.SET.write_text(_j.dumps({"dashboard_layout": "classic"}))
 
     check("TC-LCHT-0015", not errs, f"no page errors ({errs[:2]})")
 

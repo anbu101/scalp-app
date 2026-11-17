@@ -282,7 +282,7 @@ function RailChip({ id, name, accent, mode, active, onClick }) {
 // ── DASH_MODERN_20260925 ── focus/onFocus: controlled focus from the Modern
 // dashboard's blotter; rail=false hides the 14-card sidebar; recent="collapsed"
 // folds the closed-recent card. Defaults reproduce the legacy host exactly.
-export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rail = true, recent = "open" }) {
+export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rail = true, recent = "open", meter = true }) {   // ── DASH_CALM_20261117 ── meter=false: the page shows meters itself
   const isMobile = useIsMobile();
   const { loaded: licenseLoaded, allowsStrategy, isAdminUi } = useEntitlements();   // ── UI_MASK ──
   const [modes, setModes] = useState({});
@@ -405,10 +405,10 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
           key={outsider || effectiveFocus}
           style={{ width: "100%", animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}
         >
-          {outsider ? (<><MeterCard strategyId={outsider} />{outsiderNote}<RecentSlot mode={recent} strategyId={outsider} /></>) : (<>   {/* ── TRADE_REPLAY_LVB_20261030 ── ── PHONE_METER_20261117 ── */}
+          {outsider ? (<>{meter && <MeterCard strategyId={outsider} />}{outsiderNote}<RecentSlot mode={recent} strategyId={outsider} /></>) : (<>   {/* ── TRADE_REPLAY_LVB_20261030 ── ── PHONE_METER_20261117 ── */}
           <KillSwitch strategyId={effectiveFocus} />
           {/* ── PHONE_METER_20261117 ── phones get the Entry/Exit meter alone (admin, Dashboard only; the Live chart stays desktop) */}
-          <MeterCard strategyId={effectiveFocus} />
+          {meter && <MeterCard strategyId={effectiveFocus} />}
           {renderPanel(effectiveFocus, ltpMap)}
           <RecentSlot mode={recent} strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── */}
           </>)}
@@ -460,11 +460,12 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
           <RecentSlot mode={recent} strategyId={outsider} />
         </>) : (<>
         <KillSwitch strategyId={effectiveFocus} />
+        <PanelBox id={effectiveFocus}>{renderPanel(effectiveFocus, ltpMap)}</PanelBox>   {/* ── HOST_PANEL_FIT_20260921 ── */}
         {/* ── TRADE_REPLAY_WATCH_20261021 ── the focused strategy's live chart inline: its open position
             live, else spot + its indicators (watching for the next entry); "Full screen" opens the modal.
-            Renders nothing for non-admin, on a phone, or outside a Dashboard ReplayHostProvider */}
+            Renders nothing for non-admin, on a phone, or outside a Dashboard ReplayHostProvider.
+            ── CHART_BELOW_PANEL_20261117 ── below the strategy's panel (its legs), not above it */}
         <LiveChartCard strategyId={effectiveFocus} />
-        <PanelBox id={effectiveFocus}>{renderPanel(effectiveFocus, ltpMap)}</PanelBox>   {/* ── HOST_PANEL_FIT_20260921 ── */}
           <RecentSlot mode={recent} strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── */}
         </>)}
       </div>

@@ -644,7 +644,8 @@ function Chip({ on, children, onClick, title }) {
 
 /* ───────────────────────── modal ───────────────────────── */
 export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, navKeys = null, sourceLabel = null,
-                                      toNavKey = null, embedded = false }) {   // ── TRADE_REPLAY_STREAM_20261017 ── toNavKey ── TRADE_REPLAY_WATCH_20261021 ── embedded   // ── TRADE_REPLAY_LIVE_20261017 ── fetchUrl/navKeys/sourceLabel
+                                      toNavKey = null, embedded = false,
+                                      heroOverride = null, hideMeter = false }) {   // ── CHART_SAME_MTM_20261117 ──   // ── TRADE_REPLAY_STREAM_20261017 ── toNavKey ── TRADE_REPLAY_WATCH_20261021 ── embedded   // ── TRADE_REPLAY_LIVE_20261017 ── fetchUrl/navKeys/sourceLabel
   const [tid, setTid] = useState(tradeId);
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
@@ -977,7 +978,10 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
         {(() => {
           const openPnl = g && g.open_legs > 0 && (data.live?.legs || []).some((l) => l.pnl != null)
             ? data.live.legs.reduce((a, l) => a + (l.pnl || 0), 0) : null;
-          const hero = !g || g.watch ? null : openPnl != null ? { v: openPnl, label: "open P&L at LTP · gross" } : { v: g.net, label: "net" };
+          // ── CHART_SAME_MTM_20261117 ── on the Dashboard, today's trade shows the Dashboard's own
+          // MTM-today figure (the card above), not a second number; older trades keep their own
+          const ov = heroOverride && tid === heroOverride.key ? heroOverride : null;
+          const hero = ov ? ov : !g || g.watch ? null : openPnl != null ? { v: openPnl, label: "open P&L at LTP · gross" } : { v: g.net, label: "net" };
           const ctx = [];
           if (g && !g.watch && firstDay) ctx.push(`${longDay(firstDay)}${data.window.days.length > 1 ? ` → ${dayLabel(data.window.days[data.window.days.length - 1])}` : ""}`);
           if (g && g.watch && firstDay) ctx.push(`${longDay(data.window.days[data.window.days.length - 1])}${data.waiting?.mode === "hold" ? " · open position" : ` · no open position${data.waiting ? "" : " — watching for the next entry"}`}`);
@@ -985,7 +989,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
             if (g.dte != null) ctx.push(`DTE ${g.dte}`);
             ctx.push(`${legs.length} leg${legs.length > 1 ? "s" : ""}`);
             if (g.exit_reasons?.length) ctx.push(g.exit_reasons.join(", "));
-            if (openPnl != null) ctx.push(`realised ${inr(g.net)} net`);
+            if (openPnl != null && !ov) ctx.push(`realised ${inr(g.net)} net`);
           }
           const tier = data ? `indicators ${data.parity?.tier}` : null;
           return (
@@ -1002,6 +1006,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                   <div style={{ display: "flex", alignItems: "baseline", gap: SPACE.md, flexWrap: "wrap" }} data-testid="replay-hero">
                     <span style={{ ...TYPE.figure, color: hero.v > 0 ? colors.profit : hero.v < 0 ? colors.loss : COLOR.ink }}>{inr(hero.v)}</span>
                     <span style={{ ...TYPE.meta, color: COLOR.muted }}>{hero.label}</span>
+                    {hero.sub ? <span data-testid="replay-hero-sub" style={{ ...TYPE.meta, color: COLOR.muted }}>{hero.sub}</span> : null}
                   </div>
                 )}
                 {data && (
@@ -1030,14 +1035,15 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
         {/* ── TRADE_REPLAY_STREAM_20261017 ── live strip */}
         {/* ── TRADE_REPLAY_METER_20261030 ── meter chip in the LIVE row; checklist only when opened */}
         {(() => {
-          const chip = data?.waiting?.meter ? <MeterChip m={data.waiting.meter} open={meterOpen} onToggle={toggleMeter} /> : null;
+          // ── CHART_SAME_MTM_20261117 ── hideMeter: the Dashboard card above already shows the meter
+          const chip = data?.waiting?.meter && !hideMeter ? <MeterChip m={data.waiting.meter} open={meterOpen} onToggle={toggleMeter} /> : null;
           const stripShows = !!data?.live && (data.live.active || data.live.open || data.live.watch || chip);
           return (<>
             {data?.live && <LiveStrip live={data.live} okAt={liveOkAt} nowMs={clock} viewSym={vSym} extra={chip} />}
             {chip && !stripShows && (
               <div style={{ padding: `${SPACE.md}px ${SPACE.xl}px`, borderBottom: `1px solid ${COLOR.line}` }}>{chip}</div>
             )}
-            {data?.waiting && (meterOpen || !data.waiting.meter) && <WaitingPanel w={data.waiting} />}
+            {data?.waiting && (hideMeter ? !data.waiting.meter : (meterOpen || !data.waiting.meter)) && <WaitingPanel w={data.waiting} />}
           </>);
         })()}
 

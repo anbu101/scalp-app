@@ -1,0 +1,137 @@
+// frontend/src/components/calm/CalmHero.jsx — ── DASH_CALM_20261117 ──
+// The top of the Dashboard: ONE big number (the hero book's MTM), a plain sentence
+// saying what it means, Today / This week / This month tabs that each show their
+// own figure, and the day's chart. Live is the hero when it traded today, Paper
+// otherwise; with both, the other book sits beside it, smaller — never summed.
+// Phone: a Live | Paper switch picks the hero book.
+import { useState } from "react";
+import { C, T, SP, RADIUS, tone } from "./calm";
+import { fmtInr } from "../fleet/fleetFormat";
+import CalmChart from "./CalmChart";
+
+const BOOK_NAME = { LIVE: "Live", PAPER: "Paper" };
+const PERIODS = [["today", "Today"], ["week", "This week"], ["month", "This month"]];
+
+function value(t, period) {
+  if (!t) return 0;
+  return period === "week" ? t.week_net ?? 0 : period === "month" ? t.month_net ?? 0 : t.gross ?? 0;
+}
+
+function sentence(book, t, period, both) {
+  if (period !== "today") {
+    const n = period === "week" ? t.week_trades : t.month_trades;
+    const from = period === "week" ? t.week_from : t.month_from;
+    return `${n ?? 0} trade${n === 1 ? "" : "s"} exited since ${from || "—"}, after charges.`;
+  }
+  const parts = [];
+  if (t.peak != null) {
+    const off = (t.peak ?? 0) - (t.gross ?? 0);
+    parts.push(off > 0.5 ? `${BOOK_NAME[book]} is ₹${Math.round(off).toLocaleString("en-IN")} below today's high.` : `${BOOK_NAME[book]} is at today's high.`);
+  }
+  const r = Math.round(t.realised || 0), u = Math.round(t.unrealised || 0);
+  const bits = [];
+  if (r) bits.push(`closed trades ${r > 0 ? "made" : "lost"} ₹${Math.abs(r).toLocaleString("en-IN")}`);
+  if (u) bits.push(`open positions are ${u > 0 ? "up" : "down"} ₹${Math.abs(u).toLocaleString("en-IN")}`);
+  if (bits.length) { const s = bits.join("; "); parts.push(s[0].toUpperCase() + s.slice(1) + "."); }
+  if (both) parts.push("Live and Paper are never added together.");
+  return parts.join(" ");
+}
+
+function LiveTag() {
+  return <span style={{ ...T.meta, fontWeight: 600, letterSpacing: "0.06em", color: C.ink, border: `1px solid ${C.ink}`, borderRadius: 4, padding: `0 ${SP.xs}px` }}>LIVE</span>;
+}
+
+export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0, compact = false, dateLine }) {
+  const traded = ["LIVE", "PAPER"].filter((b) => totals?.[b]?.rows > 0);
+  const [period, setPeriod] = useState("today");
+  const [pick, setPick] = useState(null);
+  const heroBook = traded.includes(pick) ? pick : traded[0] || null;
+  const other = traded.find((b) => b !== heroBook) || null;
+  const both = !!other;
+  const t = heroBook ? totals[heroBook] : null;
+  const big = t ? value(t, period) : 0;
+
+  const lines = traded.map((b) => ({
+    key: b, label: BOOK_NAME[b], path: paths?.[b] || [], primary: b === heroBook,
+    color: b === heroBook ? tone(totals[b].gross) : C.muted, dash: b !== heroBook,
+  }));
+
+  const bigStyle = compact ? T.heroSm : T.hero;
+  const tabs = (
+    <div role="tablist" aria-label="Period" style={{ display: "flex", gap: SP.sm, flexWrap: compact ? "nowrap" : "wrap" }}>
+      {PERIODS.map(([id, label]) => {
+        const on = id === period;
+        return (
+          <button key={id} type="button" role="tab" aria-selected={on} data-period={id} onClick={() => setPeriod(id)}
+            style={{ flex: compact ? 1 : "0 0 auto", minWidth: compact ? 0 : 136, minHeight: 44, textAlign: "left", cursor: "pointer", font: "inherit",
+              background: on ? C.surface : "transparent", border: `1px solid ${on ? C.ink : C.line}`, borderRadius: RADIUS.inner,
+              padding: `${SP.sm}px ${compact ? SP.md : SP.lg}px`, color: C.ink }}>
+            <span style={{ display: "block", ...T.meta, color: C.muted }}>{compact ? label.replace("This w", "W").replace("This m", "M") : label}</span>
+            <span style={{ display: "block", ...T.body, fontWeight: 600, ...T.num }}>
+              {t ? <span style={{ color: tone(value(t, id)) }}>{fmtInr(value(t, id))}</span> : "—"}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  if (!heroBook) {
+    return (
+      <section aria-label="Today" data-testid="calm-hero" data-book="none" style={{ display: "flex", flexDirection: "column", gap: SP.lg }}>
+        {dateLine}
+        <div style={{ ...bigStyle, color: C.muted }}>₹0</div>
+        <p style={{ margin: 0, ...T.lead, color: C.sub, maxWidth: 520 }}>
+          No trades yet today.{armed ? ` ${armed} strateg${armed === 1 ? "y is" : "ies are"} armed.` : ""}{carried ? ` ${carried} carried position${carried === 1 ? "" : "s"} from earlier sessions.` : ""}
+        </p>
+      </section>
+    );
+  }
+
+  const left = (
+    <div style={{ flex: compact ? "1 1 auto" : "1 1 460px", minWidth: compact ? 0 : 300, maxWidth: compact ? undefined : 620, display: "flex", flexDirection: "column", gap: compact ? SP.md : SP.lg }}>
+      {dateLine}
+      {compact && both && (
+        <div role="group" aria-label="Book" style={{ display: "flex", gap: SP.sm }}>
+          {traded.map((b) => (
+            <button key={b} type="button" aria-pressed={b === heroBook} onClick={() => setPick(b)}
+              style={{ flex: 1, minHeight: 44, textAlign: "left", font: "inherit", cursor: "pointer", borderRadius: RADIUS.inner, padding: `${SP.sm}px ${SP.md}px`,
+                background: b === heroBook ? C.surface : "transparent", border: `1px solid ${b === heroBook ? C.ink : C.line}`, color: C.ink }}>
+              <span style={{ display: "block", ...T.meta, color: C.muted }}>{BOOK_NAME[b]}</span>
+              <span style={{ ...T.body, fontWeight: 600, color: tone(totals[b].gross), ...T.num }}>{fmtInr(totals[b].gross)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", alignItems: "flex-end", gap: SP.xxl, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: SP.sm, ...T.meta, color: C.muted }}>
+            {heroBook === "LIVE" ? <LiveTag /> : <span>Paper</span>}
+            <span>{period === "today" ? "MTM today" : period === "week" ? "this week, net" : "this month, net"}</span>
+            {t.approx ? <span title="some legs are priced at their last seen mark">≈</span> : null}
+          </div>
+          <div data-testid="calm-hero-figure" style={{ ...bigStyle, color: tone(big), whiteSpace: "nowrap" }}>{fmtInr(big)}</div>
+        </div>
+        {both && !compact && (
+          <button type="button" onClick={() => setPick(other)} title={`Make ${BOOK_NAME[other]} the big number`} data-testid="calm-hero-other"
+            style={{ background: "transparent", border: 0, padding: `0 0 ${SP.xs}px`, textAlign: "left", cursor: "pointer", font: "inherit", color: C.ink }}>
+            <span style={{ display: "block", ...T.meta, color: C.muted }}>{BOOK_NAME[other]}</span>
+            <span style={{ ...T.second, color: C.sub }}>{fmtInr(value(totals[other], period))}</span>
+          </button>
+        )}
+      </div>
+      <p data-testid="calm-hero-sentence" style={{ margin: 0, ...(compact ? T.body : T.lead), color: C.sub, maxWidth: 480 }}>{sentence(heroBook, t, period, both)}</p>
+      {!compact && tabs}
+    </div>
+  );
+
+  return (
+    <section aria-label="Today" data-testid="calm-hero" data-book={heroBook} style={{ display: "flex", flexDirection: compact ? "column" : "row", flexWrap: "wrap", gap: compact ? SP.lg : SP.xxxl }}>
+      {left}
+      {compact && tabs}
+      <div style={{ flex: compact ? "1 1 auto" : "999 1 480px", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+        <CalmChart lines={lines} nowMin={nowMin} height={compact ? 120 : 220} compact={compact} />
+      </div>
+    </section>
+  );
+}

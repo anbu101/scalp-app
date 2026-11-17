@@ -60,7 +60,9 @@ THEME_DEFAULT = "dark"
 # ── DASH_MODERN_20260925 ── Dashboard layout: "modern" (fleet MTM chart + blotter)
 # or "legacy" (the previous rail + Today's Performance page). Anything else
 # (typo, older file) falls back to modern.
-DASHBOARD_LAYOUTS = ("modern", "legacy")
+DASHBOARD_LAYOUTS = ("modern", "classic", "legacy")   # ── DASH_CALM_20261117 ── "modern" now renders the
+# redesigned Dashboard (hero + strategy cards); "classic" keeps the previous Modern
+# page (book summary + Fleet MTM chart + Traded-today table) one click away.
 DASHBOARD_LAYOUT_DEFAULT = "modern"
 
 
