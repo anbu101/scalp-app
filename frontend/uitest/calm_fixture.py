@@ -50,3 +50,31 @@ def pre_open():
     f["active"] = 0
     f["idle"] = [{"id": "EMC_V1", "mode": "PAPER"}, {"id": "BRK_V1", "mode": "PAPER"}, {"id": "TMA_V2", "mode": "PAPER_LIVE"}]
     return f
+
+
+# ── INDEX_PATH_20261117 ── today's index lines (09:15 → 13:05) in the /api/fleet/indices shape,
+# and the live badge feed (/market_indices) with the same last price
+def _walk(start, end, n, vol, seed):
+    import random
+    rnd = random.Random(seed)
+    x, out = start, []
+    for i in range(n):
+        tgt = start + (end - start) * i / (n - 1)
+        x += (tgt - x) * 0.2 + rnd.gauss(0, vol)
+        out.append(round(x, 2))
+    out[-1] = end
+    return out
+
+
+NOW_MIN_IDX = 785
+_N = NOW_MIN_IDX - 555 + 1
+NIFTY_PATH = [[555 + i, v] for i, v in enumerate(_walk(25310.0, 25492.70, _N, 3.0, 5))]
+BANK_PATH = [[555 + i, v] for i, v in enumerate(_walk(61640.0, 61982.40, _N, 9.0, 6))]
+INDICES = {"ok": True, "day": "2026-11-17", "now_min": NOW_MIN_IDX, "indices": {
+    "NIFTY": {"ltp": 25492.70, "prev_close": 25291.10, "path": NIFTY_PATH, "source": "kite+live", "note": None},
+    "BANKNIFTY": {"ltp": 61982.40, "prev_close": 61575.85, "path": BANK_PATH, "source": "kite+live", "note": None}}}
+MARKET = {"NIFTY": {"ltp": 25492.70, "prev_close": 25291.10, "change": 201.6, "change_pct": 0.8},
+          "BANKNIFTY": {"ltp": 61982.40, "prev_close": 61575.85, "change": 406.55, "change_pct": 0.66},
+          "SENSEX": {"ltp": None, "prev_close": None, "change": None, "change_pct": None}}
+PRE_INDICES = {"ok": True, "day": "2026-11-17", "now_min": 533, "indices": {
+    k: dict(v, path=[], source="none", ltp=v["prev_close"]) for k, v in INDICES["indices"].items()}}

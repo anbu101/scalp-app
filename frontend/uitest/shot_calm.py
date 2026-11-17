@@ -12,7 +12,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_server as U                                                  # noqa: E402
 from dash_fixture import FLEET                                         # noqa: E402
-from calm_fixture import METERS, paper_only, pre_open                  # noqa: E402
+from calm_fixture import METERS, paper_only, pre_open, INDICES, MARKET, PRE_INDICES   # noqa: E402
 
 U.start()
 from playwright.sync_api import sync_playwright                        # noqa: E402
@@ -34,7 +34,7 @@ def meters(route):
     route.fulfill(json={"ok": True, "meters": {s: METERS[s] for s in ids if s in METERS}, "errors": {}})
 
 
-def shoot(b, name, fleet, vp, clock="2026-11-17T13:05:00+05:30", expand=None, tall=2400):
+def shoot(b, name, fleet, vp, clock="2026-11-17T13:05:00+05:30", expand=None, tall=2400, indices=None):
     ctx = b.new_context(viewport=vp, timezone_id="Asia/Kolkata", device_scale_factor=1)
     pg = ctx.new_page()
     pg.clock.set_fixed_time(clock)
@@ -43,6 +43,8 @@ def shoot(b, name, fleet, vp, clock="2026-11-17T13:05:00+05:30", expand=None, ta
     pg.route("**/system/license", lambda r: r.fulfill(json=dict(U.LICENSE, status="VALID", valid=True)))
     pg.route("**/api/replay/meters*", meters)
     pg.route("**/api/replay/find*", lambda r: r.fulfill(status=404, json={"detail": "no trade"}))
+    pg.route("**/api/fleet/indices", lambda r: r.fulfill(json=indices or INDICES))      # ── INDEX_PATH_20261117 ──
+    pg.route("**/market_indices", lambda r: r.fulfill(json=MARKET))
     pg.goto(BASE, wait_until="domcontentloaded")
     pg.wait_for_selector("[data-testid=calm-hero]", timeout=60000)
     pg.wait_for_timeout(2500)
@@ -60,7 +62,7 @@ with sync_playwright() as p:
     shoot(b, "both-desktop", FLEET, {"width": W, "height": 900})
     shoot(b, "open-desktop", FLEET, {"width": W, "height": 900}, expand="TMA_V2")
     shoot(b, "paper-desktop", paper_only(), {"width": W, "height": 900})
-    shoot(b, "pre-desktop", pre_open(), {"width": W, "height": 900}, clock="2026-11-17T08:53:00+05:30", tall=1500)
+    shoot(b, "pre-desktop", pre_open(), {"width": W, "height": 900}, clock="2026-11-17T08:53:00+05:30", tall=1500, indices=PRE_INDICES)
     shoot(b, "both-phone", FLEET, {"width": 390, "height": 844}, expand="TMA_V2", tall=2600)
     b.close()
 print("ok")

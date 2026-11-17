@@ -5,6 +5,7 @@
 // otherwise; with both, the other book sits beside it, smaller — never summed.
 // Phone: a Live | Paper switch picks the hero book.
 import { useState } from "react";
+import { INDEX_KEYS } from "./useIndexPaths";   // ── INDEX_PATH_20261117 ──
 import { C, T, SP, RADIUS, tone } from "./calm";
 import { fmtInr } from "../fleet/fleetFormat";
 import CalmChart from "./CalmChart";
@@ -37,14 +38,67 @@ function sentence(book, t, period, both) {
   return parts.join(" ");
 }
 
+// ── INDEX_PATH_20261117 ── NIFTY / BANKNIFTY chips above the chart: price, % from yesterday's
+// close, today's line in miniature. Tapping one draws it behind the MTM line (remembered).
+export const INDEX_COLOR = { NIFTY: "#5FA8D3", BANKNIFTY: "#D9A441" };
+const OVERLAY_KEY = "scalp.dashboard.indexOverlay";
+const fmtPx = (v) => v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function Mini({ path, prev, up }) {
+  const pts = (path || []).map((p) => p[1]);
+  if (pts.length < 2 || !prev) return null;
+  const lo = Math.min(prev, ...pts), hi = Math.max(prev, ...pts), r = hi - lo || 1;
+  const y = (v) => 2 + 16 * (hi - v) / r;
+  const d = pts.map((v, i) => `${i ? "L" : "M"}${((i / (pts.length - 1)) * 72).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  return (
+    <svg width="72" height="20" viewBox="0 0 72 20" aria-hidden="true" style={{ flexShrink: 0 }}>
+      <line x1="0" x2="72" y1={y(prev)} y2={y(prev)} stroke={C.line} strokeDasharray="2 2" />
+      <path d={d} fill="none" stroke={up ? C.up : C.down} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function IndexChips({ market, on, toggle, compact }) {
+  return (
+    <div role="group" aria-label="Show an index on the chart" data-testid="calm-index-chips"
+      style={{ display: "flex", gap: SP.sm, flexWrap: "wrap", justifyContent: compact ? "flex-start" : "flex-end", minWidth: 0, maxWidth: "100%" }}>
+      {INDEX_KEYS.map((k) => {
+        const m = market?.[k] || {};
+        if (m.ltp == null) return null;
+        const chg = m.prev ? ((m.ltp - m.prev) / m.prev) * 100 : null;
+        const up = chg == null || chg >= 0;
+        const sel = on.includes(k);
+        return (
+          <button key={k} type="button" aria-pressed={sel} data-index={k} onClick={() => toggle(k)}
+            title={sel ? `Hide ${k} from the chart` : `Draw ${k}'s move behind your MTM line`}
+            style={{ display: "inline-flex", alignItems: "center", gap: SP.sm, flexShrink: 0, minHeight: 36, cursor: "pointer", font: "inherit",
+              ...T.meta, fontSize: 13, color: C.ink, borderRadius: RADIUS.pill, padding: `${SP.xs + 2}px ${SP.md + 2}px`,
+              background: sel ? C.surface : "transparent", border: `1px solid ${sel ? C.accent : C.line}`, boxShadow: sel ? `inset 0 0 0 1px ${C.accent}` : "none" }}>   {/* ── SELECT_ACCENT_20261117 ── theme accent, like the selected card */}
+            <span aria-hidden="true" style={{ width: 14, borderTop: `2px dashed ${sel ? INDEX_COLOR[k] : C.muted}` }} />
+            <b style={{ fontWeight: 600 }}>{k}</b>
+            <span style={{ ...T.num }}>{fmtPx(m.ltp)}</span>
+            {chg != null && <span style={{ ...T.num, fontWeight: 600, color: up ? C.up : C.down }}>{chg >= 0 ? "+" : "−"}{Math.abs(chg).toFixed(2)}%</span>}
+            {!compact && <Mini path={m.path} prev={m.prev} up={up} />}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function LiveTag() {
   return <span style={{ ...T.meta, fontWeight: 600, letterSpacing: "0.06em", color: C.ink, border: `1px solid ${C.ink}`, borderRadius: 4, padding: `0 ${SP.xs}px` }}>LIVE</span>;
 }
 
-export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0, compact = false, dateLine }) {
+export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0, compact = false, dateLine, market = null }) {
   const traded = ["LIVE", "PAPER"].filter((b) => totals?.[b]?.rows > 0);
   const [period, setPeriod] = useState("today");
   const [pick, setPick] = useState(null);
+  const [on, setOn] = useState(() => { try { const v = JSON.parse(localStorage.getItem(OVERLAY_KEY) || '["NIFTY"]'); return Array.isArray(v) ? v : ["NIFTY"]; } catch { return ["NIFTY"]; } });
+  const toggle = (k) => setOn((o) => { const n = o.includes(k) ? o.filter((x) => x !== k) : [...o, k]; try { localStorage.setItem(OVERLAY_KEY, JSON.stringify(n)); } catch {} return n; });
+  const overlays = on.filter((k) => market?.[k]?.prev && (market[k].path || []).length > 1)
+    .map((k) => ({ key: k, label: k, color: INDEX_COLOR[k], prev: market[k].prev, path: market[k].path }));
+  const chips = market ? <IndexChips market={market} on={on} toggle={toggle} compact={compact} /> : null;
   const heroBook = traded.includes(pick) ? pick : traded[0] || null;
   const other = traded.find((b) => b !== heroBook) || null;
   const both = !!other;
@@ -64,7 +118,7 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
         return (
           <button key={id} type="button" role="tab" aria-selected={on} data-period={id} onClick={() => setPeriod(id)}
             style={{ flex: compact ? 1 : "0 0 auto", minWidth: compact ? 0 : 136, minHeight: 44, textAlign: "left", cursor: "pointer", font: "inherit",
-              background: on ? C.surface : "transparent", border: `1px solid ${on ? C.ink : C.line}`, borderRadius: RADIUS.inner,
+              background: on ? C.surface : "transparent", border: `1px solid ${on ? C.accent : C.line}`, boxShadow: on ? `inset 0 0 0 1px ${C.accent}` : "none", borderRadius: RADIUS.inner,   // ── SELECT_ACCENT_20261117 ──
               padding: `${SP.sm}px ${compact ? SP.md : SP.lg}px`, color: C.ink }}>
             <span style={{ display: "block", ...T.meta, color: C.muted }}>{compact ? label.replace("This w", "W").replace("This m", "M") : label}</span>
             <span style={{ display: "block", ...T.body, fontWeight: 600, ...T.num }}>
@@ -84,6 +138,8 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
         <p style={{ margin: 0, ...T.lead, color: C.sub, maxWidth: 520 }}>
           No trades yet today.{armed ? ` ${armed} strateg${armed === 1 ? "y is" : "ies are"} armed.` : ""}{carried ? ` ${carried} carried position${carried === 1 ? "" : "s"} from earlier sessions.` : ""}
         </p>
+        {chips}
+        {overlays.length > 0 && <CalmChart lines={[]} overlays={overlays} nowMin={nowMin} height={compact ? 120 : 180} compact={compact} />}
       </section>
     );
   }
@@ -96,7 +152,7 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
           {traded.map((b) => (
             <button key={b} type="button" aria-pressed={b === heroBook} onClick={() => setPick(b)}
               style={{ flex: 1, minHeight: 44, textAlign: "left", font: "inherit", cursor: "pointer", borderRadius: RADIUS.inner, padding: `${SP.sm}px ${SP.md}px`,
-                background: b === heroBook ? C.surface : "transparent", border: `1px solid ${b === heroBook ? C.ink : C.line}`, color: C.ink }}>
+                background: b === heroBook ? C.surface : "transparent", border: `1px solid ${b === heroBook ? C.accent : C.line}`, boxShadow: b === heroBook ? `inset 0 0 0 1px ${C.accent}` : "none", color: C.ink }}>   {/* ── SELECT_ACCENT_20261117 ── */}
               <span style={{ display: "block", ...T.meta, color: C.muted }}>{BOOK_NAME[b]}</span>
               <span style={{ ...T.body, fontWeight: 600, color: tone(totals[b].gross), ...T.num }}>{fmtInr(totals[b].gross)}</span>
             </button>
@@ -129,8 +185,9 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
     <section aria-label="Today" data-testid="calm-hero" data-book={heroBook} style={{ display: "flex", flexDirection: compact ? "column" : "row", flexWrap: "wrap", gap: compact ? SP.lg : SP.xxxl }}>
       {left}
       {compact && tabs}
-      <div style={{ flex: compact ? "1 1 auto" : "999 1 480px", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
-        <CalmChart lines={lines} nowMin={nowMin} height={compact ? 120 : 220} compact={compact} />
+      <div style={{ flex: compact ? "1 1 auto" : "999 1 480px", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "flex-end", gap: SP.md }}>
+        {chips}
+        <CalmChart lines={lines} overlays={overlays} nowMin={nowMin} height={compact ? 120 : 220} compact={compact} />
       </div>
     </section>
   );

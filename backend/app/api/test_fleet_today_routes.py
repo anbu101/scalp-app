@@ -106,7 +106,7 @@ check("day key is the IST date", F._day_key(NOW) == f"{g.tm_year:04d}-{g.tm_mon:
 o = feed()
 check("ok, nothing traded → no strategy rows", o["ok"] and o["strategies"] == [], o.get("error"))
 check("every allowed strategy listed idle once", sorted(x["id"] for x in o["idle"]) == sorted(F.FLEET_IDS))
-check("fleet 14, active 0", o["fleet"] == 14 and o["active"] == 0)
+check(f"fleet {len(F.FLEET_IDS)}, active 0", o["fleet"] == len(F.FLEET_IDS) and o["active"] == 0)   # ── INDEX_PATH_20261117 ── DEF-040: was a fixed 14 (EMC_V1, LVB_V1 joined)
 check("per-book totals present and zero", o["totals"]["LIVE"]["gross"] == 0 and o["totals"]["PAPER"]["gross"] == 0)
 check("session bounds 09:15 → 15:40", o["session"]["open_min"] == 555 and o["session"]["close_min"] == 940)
 
@@ -175,7 +175,7 @@ check("trades-table LIVE close counted today, gross 390", hl and hl["state"] == 
 check("LIVE total = 650 + 390, PAPER total unchanged",
       abs(o["totals"]["LIVE"]["gross"] - 1040) < 1e-6 and abs(o["totals"]["PAPER"]["gross"] - (6662.5 + 1241.5 - 975)) < 1e-6,
       (o["totals"]["LIVE"]["gross"], o["totals"]["PAPER"]["gross"]))
-check("active counts strategies, not rows (TSG once)", o["active"] == 4 and o["fleet"] == 14)
+check("active counts strategies, not rows (TSG once)", o["active"] == 4 and o["fleet"] == len(F.FLEET_IDS))
 
 print("── 8. masking for standard licences, applied after the cache")
 F.CACHE_TTL_S = 60
@@ -192,7 +192,7 @@ F.CACHE_TTL_S = 0
 print("── 9. licence filter")
 DENY.add("ORB_V1")
 o = feed()
-check("a strategy the licence excludes is absent from rows AND idle", row(o, "ORB_V1") is None and "ORB_V1" not in [x["id"] for x in o["idle"]] and o["fleet"] == 13)
+check("a strategy the licence excludes is absent from rows AND idle", row(o, "ORB_V1") is None and "ORB_V1" not in [x["id"] for x in o["idle"]] and o["fleet"] == len(F.FLEET_IDS) - 1)
 DENY.clear()
 
 print("── 10. sampler")

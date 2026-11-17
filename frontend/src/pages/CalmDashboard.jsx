@@ -22,7 +22,6 @@ import { useMarketData } from "../context/MarketDataContext";
 import StrategyHost, { META } from "../components/StrategyHost";
 import { TodayRowsContext } from "../components/replay/ReplayHost";   // ── CHART_SAME_MTM_20261117 ──
 import DebugPanel from "../components/DebugPanel";
-import MarketBadge from "../components/MarketBadge";
 import TodayStrip from "../components/fleet/TodayStrip";
 import { useBrokerCheck, BrokerBadge, BrokerIssues } from "../components/fleet/SystemChecks";
 import { useFleetToday } from "../components/fleet/useFleetToday";
@@ -34,6 +33,7 @@ import { C, T, SP, RADIUS, inSession } from "../components/calm/calm";
 import CalmHero from "../components/calm/CalmHero";
 import { StrategyCard, IdleCard } from "../components/calm/StrategyCard";
 import { useMeters } from "../components/calm/useMeters";
+import { useIndexPaths } from "../components/calm/useIndexPaths";   // ── INDEX_PATH_20261117 ──
 
 const FOCUS_STORAGE_KEY = "scalp.strategyHost.focusId";   // shared with StrategyHost and the Classic page
 const FILTER_KEY = "scalp.dashboard.calmFilter";
@@ -71,7 +71,7 @@ function buildCards(rows, filter) {
 export default function CalmDashboard() {
   const isMobile = useIsMobile();
   const { isAdminUi } = useEntitlements();
-  const { ltpMap, indices } = useMarketData();
+  const { ltpMap } = useMarketData();
   const { data, loaded, error, ts } = useFleetToday(5000);
   const broker = useBrokerCheck(isAdminUi);
   const [nowMin, setNowMin] = useState(nowMinIst);
@@ -132,6 +132,7 @@ export default function CalmDashboard() {
 
   const meterIds = useMemo(() => [...new Set([...rows.filter((r) => r.state === "OPEN").map((r) => r.id), ...idle.map((r) => r.id)])], [rows, idle]);
   const meters = useMeters(meterIds, { enabled: isAdminUi, fast: !!open, session: inSession(nowMin) });
+  const market = useIndexPaths(nowMin, inSession(nowMin));   // ── INDEX_PATH_20261117 ── NIFTY / BANKNIFTY behind the MTM chart
   const toggle = (id) => { setOpen((o) => (o === id ? null : id)); if (open !== id) meters.refresh(); };
 
   const now = new Date();
@@ -163,12 +164,7 @@ export default function CalmDashboard() {
       <style>{`[data-testid=calm-why] [data-testid=replay-waiting] { border-bottom: 0 !important; }`}</style>
       <div style={{ maxWidth: 1360, margin: "0 auto", display: "flex", flexDirection: "column", gap: isMobile ? SP.xl : SP.xxxl }}>
 
-        {!isMobile && (
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: SP.lg, flexWrap: "wrap", marginBottom: -SP.xl }}>
-            <MarketBadge name="NIFTY" data={indices?.NIFTY} />
-            <MarketBadge name="BANKNIFTY" data={indices?.BANKNIFTY} />
-          </div>
-        )}
+        {/* ── INDEX_PATH_20261117 ── the NIFTY / BANKNIFTY badges are now chips above the MTM chart */}
 
         {error && !data && (
           <div role="alert" style={{ padding: SP.lg, borderRadius: RADIUS.inner, border: `1px solid ${C.down}`, color: C.down }}>
@@ -178,7 +174,7 @@ export default function CalmDashboard() {
 
         <BrokerIssues {...broker} isAdminUi={isAdminUi} meta={META} compact={isMobile} />
 
-        <CalmHero totals={data?.totals} paths={data?.paths} nowMin={nowMin} armed={idle.length} carried={carried} compact={isMobile} dateLine={dateLine} />
+        <CalmHero totals={data?.totals} paths={data?.paths} nowMin={nowMin} armed={idle.length} carried={carried} compact={isMobile} dateLine={dateLine} market={market} />
 
         <section aria-label="Strategies today" data-testid="calm-strategies">
           <div style={{ display: "flex", alignItems: "baseline", gap: SP.md, flexWrap: "wrap", marginBottom: SP.lg }}>
@@ -190,7 +186,7 @@ export default function CalmDashboard() {
               <div role="group" aria-label="Book" style={{ marginLeft: "auto", display: "flex", gap: SP.xs }}>
                 {[["ALL", "All"], ["LIVE", "Live"], ["PAPER", "Paper"]].map(([k, l]) => (
                   <button key={k} type="button" aria-pressed={f === k} data-filter={k} onClick={() => setFilter(k)}
-                    style={{ background: f === k ? C.surface : "transparent", border: `1px solid ${f === k ? C.line : "transparent"}`, borderRadius: RADIUS.pill,
+                    style={{ background: f === k ? C.surface : "transparent", border: `1px solid ${f === k ? C.accent : "transparent"}`, borderRadius: RADIUS.pill,   /* ── SELECT_ACCENT_20261117 ── */
                       padding: `${SP.xs + 2}px ${SP.md + 2}px`, color: f === k ? C.ink : C.muted, font: "inherit", fontSize: 13, cursor: "pointer", minHeight: 32 }}>{l}</button>
                 ))}
               </div>

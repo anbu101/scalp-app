@@ -621,6 +621,11 @@ def sample_now(now: Optional[int] = None, force: bool = False) -> dict:
 def fleet_mtm_sample_job() -> None:
     """APScheduler entry point (cron, every minute 09:00–15:59 Mon–Fri IST;
     the session gate lives in sample_now). Never raises."""
+    try:   # ── INDEX_PATH_20261117 ── the index line's own minute samples (never raises)
+        from app.api import index_path as _ip
+        _ip.sample()
+    except Exception:
+        pass
     try:
         r = sample_now()
         if not r.get("sampled") and r.get("reason") not in (None, "market closed"):
@@ -751,3 +756,17 @@ def get_fleet_today():
         out["ok"] = False
         out["error"] = repr(e)
     return out
+
+
+# ── INDEX_PATH_20261117 ── today's NIFTY / BANKNIFTY line for the Dashboard's MTM chart
+# (option C): {ok, day, now_min, indices: {NIFTY|BANKNIFTY: {ltp, prev_close, path:[[min, price]],
+# source, note}}}. Kite 1-minute history at most once a minute per index + the app's own live
+# samples; see app/api/index_path.py. Same licence wall as /api/fleet/today (none: index data).
+@router.get("/api/fleet/indices")
+def fleet_indices():
+    from app.api import index_path as _ip
+    try:
+        return _ip.build()
+    except Exception as e:
+        write_audit_log(f"[API][FLEET_INDICES][ERR] {e!r}")
+        return {"ok": False, "error": repr(e), "indices": {}}

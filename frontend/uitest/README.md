@@ -22,3 +22,7 @@ Scenes come from `calm_fixture.py` (Live + Paper day, Paper-only day, before the
 The suites written for the previous page (`test_ui_dash_system.py`, `test_ui_live_chart.py`,
 `test_ui_phone_meter.py`, `shot_dashboard.py`) now set the layout to "classic", which is
 that page.
+
+## NIFTY / BANKNIFTY behind the MTM chart (INDEX_PATH_20261117)
+
+    PYTHONPATH=../backend python3 uitest/test_ui_index.py       # 11 checks, layout "modern"
