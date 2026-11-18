@@ -82,7 +82,9 @@ def get_paper_trades():
                 net_pnl,
 
                 state,
-                created_at
+                created_at,
+                group_id,      -- IC_PAPER_GROUP_20261118 (DEF-065): legs of one condor, incl. its adjustment
+                trade_class    -- leg role (L1..L4, L2ADJ…); written by the engines, was never read back
             FROM paper_trades
             ORDER BY entry_time DESC
             """

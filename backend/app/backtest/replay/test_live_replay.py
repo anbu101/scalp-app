@@ -334,6 +334,18 @@ check("BRK LIVE row found on Analytics", r.get("ok") and r["group"]["ids"] == ["
 r = rep("trades", "BRK-L1")
 check("…and on the Trades page (it lists paper_trades of every mode)", r.get("ok"))
 check("an Analytics key is not looked up on the Trades page", rep("trades", "IC-L1").get("status") == 404)
+# ── IC_PAPER_GROUP_20261118 (DEF-065): a PAPER condor in paper_trades groups by its group_id too — opening the
+#    later adjustment leg (as the Dashboard card does) must replay the whole condor, not that leg alone
+for _k, _sym, _side, _dirn, _ts in (("PIC-L1", SYMS["atm_ce"], "CE", "SHORT", ts_of(D24, 9, 20)), ("PIC-L2", SYMS["atm_pe"], "PE", "SHORT", ts_of(D24, 9, 20)),
+                                   ("PIC-L3", SYMS["cew"], "CE", "LONG", ts_of(D24, 9, 20)), ("PIC-L4", SYMS["pew"], "PE", "LONG", ts_of(D24, 9, 20)),
+                                   ("PIC-L2ADJ", SYMS["pew"], "PE", "LONG", ts_of(D24, 11, 0))):
+    paper_row(_k, "IC_V1", _sym, _side, _dirn, _ts, px(_sym, _ts), X24, px(_sym, ts_of(D24, 15, 15)), qty=650)   # closed: keeps later open-position sections clean
+    APP.execute("UPDATE paper_trades SET group_id='PG1', trade_class=? WHERE paper_trade_id=?", (_k.split("-")[1], _k))
+APP.commit()
+r = rep("trades", "PIC-L2ADJ")
+check("Trades page: paper IC condor grouped by group_id from its 11:00 adjustment leg",
+      r.get("ok") and sorted(r["group"]["ids"]) == ["PIC-L1", "PIC-L2", "PIC-L2ADJ", "PIC-L3", "PIC-L4"], r.get("group", {}).get("ids") if r.get("ok") else r)
+check("…led by an opening leg, not the adjustment", r.get("ok") and next(l for l in r["group"]["legs"] if l["id"] == r["group"]["primary_id"])["key"] != "PIC-L2ADJ")
 
 print("── 6. open position, 'today' = 25 Feb 13:00:05 — upsert only today")
 reset_fill_memory()

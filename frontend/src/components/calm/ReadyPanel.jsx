@@ -108,7 +108,9 @@ export default function ReadyPanel({ nowMin, armed, isAdminUi = false, compact =
   };
 
   const feedRow = feed.state === "connected" ? ["ok", "connected"]
-    : feed.state === "connecting" ? ["warn", "connecting…"]
+    // ── FEED_PREOPEN_20261118 (DEF-063) ── both Kite feeds are built after the login but connect only at 09:15
+    // (they wait for is_market_open), so before the open "registered, not connected" is the expected, ready state
+    : feed.state === "connecting" ? ["ok", "ready · connects at 09:15"]
     : feed.state === "not_started" ? (zOk ? ["warn", "not started"] : ["idle", "starts after the Zerodha login"])
     : ["idle", "—"];
 

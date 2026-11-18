@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 # =====================================================================
-#  apply_ready_login_label.py  —  fence READY_LOGIN_LABEL_20261118  (DEF-062)
-#  REQUIRES: apply_ready_panel.py (READY_PANEL_20261118). Frontend only.
+#  apply_ic_paper_group.py  —  fence IC_PAPER_GROUP_20261118  (DEF-065)
+#  REQUIRES: nothing. Backend only.  (DEF-065)
 #
-#  "Ready for the open": the Log in button's label used the page-background
-#  colour, which is transparent on the Arcade and Kolam themes, so the button
-#  showed as an empty pink block. The label now uses the theme's solid
-#  background colour (readable on all five themes; the click was unaffected).
-#  Edits one line of ReadyPanel.jsx and adds TC-RDY-0019 to test_ui_ready.py.
+#  Paper Iron Condor (and any paper strategy that books legs with a group_id)
+#  showed only its NEWEST leg on the Dashboard card's in-trade panel: after an
+#  adjustment the card followed that one leg ("holding B 25000PE") instead of
+#  the whole condor. The Paper trades loader (/paper_trades) never read back
+#  group_id / trade_class, so the replay fell back to "same entry minute".
+#  Live reads the trades table with group_id, so it was not affected.
+#  Adds the two columns to the loader's SELECT; adds a check to
+#  test_live_replay.py. BACKEND — restart needed: install after 15:30.
 #
-#  Run ONLY this script (frontend only, safe any time; build after 15:30):
-#     cd ~/dev/scalp-app && python3 apply_ready_login_label.py
+#  Run ONLY this script (backend; install after 15:30 — the backend restarts):
+#     cd ~/dev/scalp-app && python3 apply_ic_paper_group.py
 #  Options: --repo PATH  --allow-dirty  --rollback
 #  Then: ./desktop/build-scalp.sh both, restart the app.
 # =====================================================================
 import base64, json, os, py_compile, subprocess, sys, zlib
 
-FENCE = "READY_LOGIN_LABEL_20261118"
-DATA = json.loads(r"""[["frontend/src/components/calm/ReadyPanel.jsx", [["eNpLSkzOTi/KL81LsVJw1ktMTk7NK9FRSM7PyS+yUlAqSyzS0NVN1k1K1y1ITE/VVNJRyC9ITM4sqbRSSCotrlSwVzDQM1OwUjBUqK21AwDP7Rfy", "eNo1js0KgkAcB1/lR6cKNz8OEnsoLC0iKejWSf6ui0m6K7tWSAg9RE/Yk9QlmOPATE7iWhp9UwXHekZCSNU5ELrWhmN0JzNmTLC8ZK2pGjL9ZORAtySqrufIb7bHEt4sBIePYVgAeLpTfN6vHzglUXzO0uN2d8jSaJWkWeAFoe/7c4zjZMO8MJj83QdZ/FNUSo7OkLItmd8QtEJkBBUSLva6psaB1eguEjXlssadVGUvssDUHb4k8ES1"]]], ["frontend/uitest/test_ui_ready.py", [["eNpLSU1TyC9IzYtPSSzO0EjSUUjLSU0tsfXLz0vVUaiyjYr399ZRSLR1jPd3c9NRKLINAguUZ6aUZNgampgY6ChkpGamZ5TYGhoaADnJOfnJ2bYBQa5ATSm5mXm2IUWlqZpWAJK4H/w=", "eNoljM0KgkAURl/lYpuCWXhFIoS7mEgjEo2hTW0Gc66N+BfTRNDTJ7X8Dud8hhuYHjxqUz3t8iag6Zk9FdPIAj501eVRQEVSl1kmwJH6gXdrvCWM41CA5fZuPSGG86j7qe7opNI5MkM70tm95iNveWAKTOW6YJUAwAJUKncXnZf7Q6FzuU1zHYXRGhE3yV//ApicLo4="], ["eNo1jbsOwjAMRXe+wvJUpKrsSB0YmBhhq1BkGqsJtHGVGMpD/DuhiMlXV9fnAADst4dqil7ZKN+1OCcJlb0OYypeaCm5k1C0pqeHXBXXgINYjgFLQHU88LeyFC/4Xi4XGQet3qGGUxV4Mq2EGXrzPI0StX7h5K26/DTfDHHsO/cF/8K7BPUDPyWw8bbGTfK02kl/ISX8CcYu87NlNozUcfHvK8MxSkzlnFvq+5SnzbGE5vgBNS5NJQ==", "eNo1jTELwjAQhXd/xZGpQqm70MHByVG3IiFtjiba5kJy2mrpfzdGnN7jcfd9AADn46WagmWUjDMXt0iu0o/Rx2IRWkXTkgpaDupFDxZ7ECNpDE6UINjgiGnKuW63m0SDjmeooa0cTrIjl5lPi5OnwPUiJqvZpJ+ciWHQ9ubL/ZW1BLYjvsmhtLoWh2jV7kTDXbESP4HvEz9ZssGrHov/XkkMgUIsc+/UMMR02lxLaK4fORJNUg=="], ["eNpTUFBQSM5ITc7WUApx1g1yidQ1MDC0UNJRyMsvUUgtKirWAQCWZgk5", "eNptVM1u2zgQvvcpZtVDyUZWJLlOE2fVRX6LAmoLtL20rmFQFC0JpkSVotykaYBee99X2Bfrk+yQlp11sYAOnPmGM998miEAwGP49fcP/ODd1dnlx0X69uWrN4v07PwqXcRhfBRF0TGQy6vrUXgU0ymYUkCqCqgakCwTEqoOtGA5y6QA1YBYC31ro2oB5ExzlgvoSvVV5MAQrVtzC23VrCCTiq/oI2QA6XkKCXieRwiF5AXcAVdNZyBDb654X4vGBF96TPxeSMGN0uTJLGeGjWzl2+Sb0Cov2Rw2TiM6U+WJw0ZSFVUzf0JPoVoC+SOjyNb0uoGml/LUlYehHO+wXiHMharb3oj8vbmVgmR4dYO3CJPOMSRdUDPDS3I4+/w5D+YHhwWF799hNqcItORNX2dC0/38sq9tBr7X40z7UPioxhwxHnSy4oKEPow3ich6iF7DYQLxZHK65b+GPxMIg3B8Eh/DXxaHKA5OYpjCa2bKoFVf8TYc2JjJhFrYHnyIg2fY0j3dZQqDOIqP4CloF/08msRoFJurz2NrZBJv7HezLJBwS3gXcCWVptjDzpMxviq06pv8wmFbBRkGLItAiqYwJbyAMRJfFrPxHElH++nTCGNRMbIsMHUaD1ZWPPC+AyNuzBSyoGoaoT+g4WO6KWw5WUrO+o2PD0y2JZsC84eaAJqZSg3SuUhCiDNqdkPSyFKgg5hWywGrmt8ximpFoZM7RMlQZ0Jxsl2djOXYxt29M5ZK45rYPSJezvTK88GTVVEaezBCY24m7XmlJKvtgblt8uh0R5qbGx9aK7tqRbPIWVeSzIdvyafF2+trf7OGiSnp7oayv6gIxJrJnhlBcPUeQNyQRhkgClc1BzXzrL7ePOiMrlq7mrikm933thFOSG+O/zIMTrZOp6V1JjjGD2wHCWamtLOudn6hdQcHjtcCz0p3/20w4FJ1gmxY8lLwFfE+XIzeXX4chWF0gsJYzpgX/7239zLtniWiWobPh29Hy2iG0/Xr5z8wnkbUvlhWfB+c9KjYILwPTnaclM0TRu6wwj316KP/53E88LC9+P8C+yWJTg=="]]]]""")
-BUILD = {"frontend/": "desktop/src-tauri/frontend/"}
+FENCE = "IC_PAPER_GROUP_20261118"
+DATA = json.loads(r"""[["backend/app/api/paper_trades_routes.py", [["eNpTUEAFxSWJJak6XGiiCslFqUDxlPjEEhQptyB/X4WCxILUoviSosSU1GIUWf8gF9cgBadIhdS8kqLK+JLM3FQFF9dgZwCZJBuc", "eNplj8FKw0AYhO8+xRxb2IQmaBE91SYVJZIQ6cHTss3+TVfT3bD719KbT+OD+SQG9RI7t5mB+RhgrMCKSVz8S9F4GnItFZ93rXeHXhotfm0U4WEpq0WV1/K+LteVTGfpPEmSa0yyfBXN5lfTG3TUBrgtnCU0zmrnBYxtuhiGA5R+PQTek+UzGnulSTadCuGPNkzBu44wKZI4Li4FinSRPX59fE5vcfSGmSw2J/COQLY1loLAUQVYeieP4ZnGRjVvI9SqLp/Qq568/CGGUVvWWV7j7mXYY3+SbPaELH9efgP4VFnb"]]], ["backend/app/backtest/replay/test_live_replay.py", [["eNodyLEKgzAQBuDdp/i5KQEtFlwdSqdCx77AkRxRIknwzsG3tzh+X1gkZEdc8Cq8nbYGRZYTq6JUw1ZrloijoRbYIvjtHEXROAn12KU5srv+os97+D7JP5KYIzW2Q8ljnjGNk+8up5khtg==", "eNqVVNtO20AQfc9XTJcHvJKD4jSgNlKEIpICFS1WEnpRhKzFniRubK/Z3QiiqhIfwTf0w/iSztrOjaqltRKv7Z3LObNzJpxhOHeYyKCbiWRp4lDDHJcQa8ikgUTKOUawyEFmYGYIIyUi1JCLKTIXFOYOM8UnemPnJ/ULj/GDKRqHaSPMQjMOnQ60Gi1e24Onxwf6wflJ4Hf9/iA4HVxe+UGz0TzyPO8NOL3+u3rj6JC3QUBhAaHMIqkgzihjjiooc8FUyUWu4YZwmuotiCMwUsLTwyPIHLM4m1rAlJWuRBhUIKJvC21SzIgXTsERuqDUE3p2I4WKILS3SKLmkJKlpZeIZWF0N5MJVnDcojRmJso4IpEZ1iYEM5i7EOhlau9xhLREscpoIZBEwXGYX5bIheHXD8MxEyYNQmTXVLuTvq3g8OxyMKIHowM5cXrNlgtvXWg2OHeh8m7ueOelt/+Sdw1evqoEr9cJQrzbwnZx+fH079Baa8+88vRf8PwPWM1u7/0/x/c8Fyg+bxcJyt5R8s6xJ0RtGnyyZ/CHo3Ihv3eqPaOJ3Rcbcf1tO8uh/dsC3Jpl5+iwwSnZHoSJ1Bi1SUdITVr2nm3Jei51bGJSksbQrppMUWQFxq7vH+A9hguDDrvye91Rf7fnh/3RutM7+/6pt09Y7FYQJkLrzjF8PusPdpys5TERJdoHOk9iUmWd8bFHlQvmnNdszlCmKW3wmoLOcz1v6s5rYTkotvTfLlORnFcyLeDRuCBdrjU5UTItVOp57UbjmQbZqgFUOTPknOaFyCLQUhmMHDVmRSB2PWZxpNl1MU3GGxltJLHTJJtGXjUmUa5ylAFd+P6jGlQ2MId4sgMCE42g1rSfHn4mJTGalKvxQgRWowC3iDH3NzoZ3hsnATsjEjsJtnlRFCJm8yeWJD0SxW2DXMWpUMvA7vExo+lMNq86u8fzCzQir4Y="]]]]""")
+BUILD = {"backend/": "desktop/src-tauri/backend/"}
 un = lambda b: zlib.decompress(base64.b64decode(b)).decode()
 
 
@@ -42,9 +45,6 @@ if not os.path.isdir(os.path.join(repo, "backend", "app")):
 say(f"repo: {repo}\nfence: {FENCE}")
 rollback = "--rollback" in args
 rd = lambda p: open(p, encoding="utf-8").read()
-rp = os.path.join(repo, "frontend/src/components/calm/ReadyPanel.jsx")
-if not rollback and (not os.path.exists(rp) or "READY_PANEL_20261118" not in rd(rp)):
-    die("run apply_ready_panel.py first — this script fixes its panel")
 
 plan, done, notes = [], 0, []
 for rel, eds in DATA:
@@ -81,7 +81,7 @@ for rel, eds in DATA:
         elif rel.endswith(".py"):
             notes.append(f"  note: {rel} differs — the UI test was left as it is (the fix still applies)")
         else:
-            die(f"{rel}: the line to fix was not found. Send me: grep -n 'ready-login' -A3 {rel}")
+            die(f"{rel}: the lines to fix were not found. Send me: grep -n -A3 'state,' {rel}")
 
 if not plan:
     for n in notes: say(n)
@@ -91,7 +91,7 @@ if not rollback and "--allow-dirty" not in args:
         st = subprocess.run(["git", "status", "--porcelain", "--"] + [os.path.relpath(p, repo) for p, *_ in plan],
                             cwd=repo, capture_output=True, text=True, timeout=30).stdout
         dirty = [l for l in st.splitlines() if l[:2].strip() and not l.startswith("??")]
-        ok = {"frontend/src/components/calm/ReadyPanel.jsx", "frontend/uitest/test_ui_ready.py"}   # apply_ready_panel.py output, maybe uncommitted
+        ok = set()
         dirty = [l for l in dirty if l[3:].strip() not in ok]
         if dirty:
             die("uncommitted changes on target files:\n  " + "\n  ".join(dirty) + "\n  (re-run with --allow-dirty to override)")
@@ -117,4 +117,4 @@ except Exception as e:
     die(f"failed ({e!r}) — everything restored")
 for n in notes: say(n)
 say(f"\n✓ {FENCE} {'rolled back' if rollback else 'applied'} ({len(written)} file(s))."
-    + ("" if rollback else " Next: ./desktop/build-scalp.sh both, then restart the app.\n  Undo: python3 apply_ready_login_label.py --rollback"))
+    + ("" if rollback else " Next: ./desktop/build-scalp.sh both, then restart the app.\n  Undo: python3 apply_ic_paper_group.py --rollback"))

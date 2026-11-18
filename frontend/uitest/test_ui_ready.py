@@ -14,7 +14,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_server as U                                                  # noqa: E402
-from calm_fixture import pre_open, mix_scene                           # noqa: E402
+from calm_fixture import pre_open, mix_scene, MARKET, PRE_INDICES                           # noqa: E402
 
 U.start()
 from playwright.sync_api import sync_playwright                        # noqa: E402
@@ -47,7 +47,7 @@ def fmt(v):
     return ("+" if n > 0 else "−" if n < 0 else "") + "₹" + s
 
 
-def open_dash(b, fleet=None, z=Z_OK, a=A_OFF, r=R_OK, width=1440, height=1100, clock=PRE, admin=True, theme="dark"):   # READY_LOGIN_LABEL_20261118: theme
+def open_dash(b, fleet=None, z=Z_OK, a=A_OFF, r=R_OK, width=1440, height=1100, clock=PRE, admin=True, theme="dark", market=False):   # READY_LOGIN_LABEL_20261118: theme; INDEX_LEFT_20261118: market
     SET.parent.mkdir(parents=True, exist_ok=True)
     SET.write_text(json.dumps({"dashboard_layout": "modern", "theme": theme}))
     ctx = b.new_context(viewport={"width": width, "height": height}, timezone_id="Asia/Kolkata")
@@ -65,6 +65,9 @@ def open_dash(b, fleet=None, z=Z_OK, a=A_OFF, r=R_OK, width=1440, height=1100, c
     pg.route("**/api/acc2/status", lambda q: q.fulfill(json=st["a"]))
     pg.route("**/api/fleet/ready", lambda q: q.fulfill(json=st["r"]))
     pg.route("**/api/replay/**", lambda q: q.fulfill(status=404, json={"detail": "none"}))
+    if market:   # INDEX_LEFT_20261118: the NIFTY / BANKNIFTY chips need the index feed
+        pg.route("**/market_indices", lambda q: q.fulfill(json=MARKET))
+        pg.route("**/api/fleet/indices", lambda q: q.fulfill(json=PRE_INDICES))
 
     def login_url(q):
         pg._calls.append("login-url")
@@ -182,6 +185,23 @@ with sync_playwright() as p:
             bad[th] = o
         errs += pg._errors
         ctx.close()
+    # ── FEED_PREOPEN_20261118 (DEF-063): before 09:15 a built-but-unconnected feed is ready, not "connecting"
+    ctx, pg = open_dash(b, r=dict(R_OK, feed={"state": "connecting", "engines": 1, "last_tick_age_s": None}))
+    rf = row(pg, "feed")
+    check("TC-RDY-0020", rf and rf["state"] == "ok" and "connects at 09:15" in rf["text"] and "connecting" not in rf["text"],
+          f"feed built, waiting for the open → green 'ready · connects at 09:15' ({rf})")
+    errs += pg._errors
+    ctx.close()
+    # ── INDEX_LEFT_20261118 (DEF-064): the NIFTY / BANKNIFTY chips sit left, under This week / This month (not floated right)
+    ctx, pg = open_dash(b, market=True)
+    pg.wait_for_selector("[data-testid=calm-index-chips] [data-index=NIFTY]", timeout=60000)
+    g = pg.evaluate("""(() => { const l = document.querySelector('[data-testid=calm-hero] p').getBoundingClientRect(),
+      c = document.querySelector('[data-testid=calm-index-chips] [data-index=NIFTY]').getBoundingClientRect(),
+      w = document.querySelector('[data-testid=calm-period-chips]').getBoundingClientRect(); return { pl: l.left, cl: c.left, wl: w.left, wb: w.bottom, ct: c.top }; })()""")
+    check("TC-RDY-0021", g and abs(g["cl"] - g["pl"]) <= 4 and abs(g["cl"] - g["wl"]) <= 4 and g["ct"] >= g["wb"] - 1,
+          f"index chips start at the left edge, under This week / This month ({g})")
+    errs += pg._errors
+    ctx.close()
     check("TC-RDY-0019", not bad, f"Log in label readable (opaque, contrast ≥ 3:1) on dark, light, terminal, kolam, arcade ({bad})")
 
     check("TC-RDY-0018", not errs, f"no page errors ({errs[:2]})")

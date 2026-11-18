@@ -58,10 +58,10 @@ function Mini({ path, prev, up }) {
   );
 }
 
-function IndexChips({ market, on, toggle, compact }) {
+function IndexChips({ market, on, toggle, compact, start = false }) {   // ── INDEX_LEFT_20261118 ── start: left-align (pre-open hero)
   return (
     <div role="group" aria-label="Show an index on the chart" data-testid="calm-index-chips"
-      style={{ display: "flex", gap: SP.sm, flexWrap: "wrap", justifyContent: compact ? "flex-start" : "flex-end", minWidth: 0, maxWidth: "100%" }}>
+      style={{ display: "flex", gap: SP.sm, flexWrap: "wrap", justifyContent: compact || start ? "flex-start" : "flex-end", minWidth: 0, maxWidth: "100%" }}>
       {INDEX_KEYS.map((k) => {
         const m = market?.[k] || {};
         if (m.ltp == null) return null;
@@ -162,7 +162,7 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
           No trades yet today.{armed ? ` ${armed} strateg${armed === 1 ? "y is" : "ies are"} armed.` : ""}{carried ? ` ${carried} carried position${carried === 1 ? "" : "s"} from earlier sessions.` : ""}
         </p>
         <PeriodChips totals={totals} compact={compact} />
-        {chips}
+        {market ? <IndexChips market={market} on={on} toggle={toggle} compact={compact} start /> : null}
         {overlays.length > 0 && <CalmChart lines={[]} overlays={overlays} nowMin={nowMin} height={compact ? 120 : 180} compact={compact} />}
         </div>
         {aside}
