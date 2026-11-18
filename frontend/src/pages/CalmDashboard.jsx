@@ -33,7 +33,8 @@ import { C, T, SP, RADIUS, inSession } from "../components/calm/calm";
 import CalmHero from "../components/calm/CalmHero";
 import { StrategyCard, IdleCard } from "../components/calm/StrategyCard";
 import { useMeters } from "../components/calm/useMeters";
-import { useIndexPaths } from "../components/calm/useIndexPaths";   // ── INDEX_PATH_20261117 ──
+import { useIndexPaths } from "../components/calm/useIndexPaths";
+import ReadyPanel from "../components/calm/ReadyPanel";   // ── READY_PANEL_20261118 ──   // ── INDEX_PATH_20261117 ──
 
 const FOCUS_STORAGE_KEY = "scalp.strategyHost.focusId";   // shared with StrategyHost and the Classic page
 const FILTER_KEY = "scalp.dashboard.calmFilter";
@@ -162,7 +163,7 @@ export default function CalmDashboard() {
     <div data-calm-root data-testid="calm-root" style={{ padding: isMobile ? `${SP.lg}px ${SP.lg}px ${SP.xxl}px` : `${SP.xl}px ${SP.xxl}px ${SP.xxxl}px`,
       background: C.page, color: C.ink, minHeight: "100vh", fontFamily: "var(--c-font-ui)", ...T.body }}>
       <style>{`[data-testid=calm-why] [data-testid=replay-waiting] { border-bottom: 0 !important; }`}</style>
-      <div style={{ maxWidth: 2000, margin: "0 auto",   /* WIDE_SCREEN_20261117: was 1360 — left 184 px empty on each side of a 16-inch MacBook Pro */ display: "flex", flexDirection: "column", gap: isMobile ? SP.xl : SP.xxxl }}>
+      <div style={{ maxWidth: 3200 /* WIDE_SCREEN2_20261118: was 2000; a 32-inch (2560 px) fills, a 4K TV at 1x keeps readable lines */, margin: "0 auto",   /* WIDE_SCREEN_20261117: was 1360 — left 184 px empty on each side of a 16-inch MacBook Pro */ display: "flex", flexDirection: "column", gap: isMobile ? SP.xl : SP.xxxl }}>
 
         {/* ── INDEX_PATH_20261117 ── the NIFTY / BANKNIFTY badges are now chips above the MTM chart */}
 
@@ -174,7 +175,8 @@ export default function CalmDashboard() {
 
         <BrokerIssues {...broker} isAdminUi={isAdminUi} meta={META} compact={isMobile} />
 
-        <CalmHero totals={data?.totals} paths={data?.paths} nowMin={nowMin} armed={idle.length} carried={carried} compact={isMobile} dateLine={dateLine} market={market} />
+        <CalmHero totals={data?.totals} paths={data?.paths} nowMin={nowMin} armed={idle.length} carried={carried} compact={isMobile} dateLine={dateLine} market={market}
+          aside={<ReadyPanel nowMin={nowMin} armed={fleet} isAdminUi={isAdminUi} compact={isMobile} />} />   {/* ── READY_PANEL_20261118 ── */}
 
         <section aria-label="Strategies today" data-testid="calm-strategies">
           <div style={{ display: "flex", alignItems: "baseline", gap: SP.md, flexWrap: "wrap", marginBottom: SP.lg }}>

@@ -770,3 +770,14 @@ def fleet_indices():
     except Exception as e:
         write_audit_log(f"[API][FLEET_INDICES][ERR] {e!r}")
         return {"ok": False, "error": repr(e), "indices": {}}
+
+
+# ── READY_PANEL_20261118 ── "Ready for the open" on the Dashboard: market feed state and the
+# stops kept at the broker for live carried legs (read-only; see app/api/fleet_ready.py)
+@router.get("/api/fleet/ready")
+def get_fleet_ready():
+    try:
+        from app.api.fleet_ready import ready_payload
+        return ready_payload()
+    except Exception as e:
+        return {"ok": False, "error": repr(e), "feed": {"state": "unknown"}, "carried_stops": []}

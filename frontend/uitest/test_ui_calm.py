@@ -234,14 +234,15 @@ with sync_playwright() as p:
       return { w: window.innerWidth, secL: sec.left, secR: sec.right, n: cards.length, cols: lefts.length,
                firstL: Math.min(...cards.map(r => r.left)), lastR: Math.max(...cards.map(r => r.right)),
                widths: cards.map(r => Math.round(r.width)) }; })()"""
-    for w, cap in ((1728, 70), (2056, 70)):
+    # ── WIDE_SCREEN2_20261118 (DEF-059): a 32-inch monitor (2560 px) fills too; a 4K TV at 1x (3840 px) is capped at 3200 px
+    for w, cap, tc in ((1728, 70, "TC-CALM-0037"), (2056, 70, "TC-CALM-0038"), (2560, 70, "TC-CALM-0039"), (3840, 360, "TC-CALM-0040")):
         ctx, pg = open_dash(b, fleet=mix_scene(), width=w, height=1100)
         pg.wait_for_selector("[data-testid=calm-card]", timeout=60000)
         pg.wait_for_timeout(1200)
         m = pg.evaluate(MEASURE)
         ok = (m["firstL"] <= cap and m["w"] - m["lastR"] <= cap + 16 and m["cols"] == 4 and m["lastR"] >= m["secR"] - 3
               and max(m["widths"]) - min(m["widths"]) <= 2)
-        check("TC-CALM-0037" if w == 1728 else "TC-CALM-0038", ok,
+        check(tc, ok,
               f"{w} px screen: content fills the width (sides {m['firstL']:.0f} / {m['w'] - m['lastR']:.0f} px), 4 equal columns, no empty column on the right ({m})")
         errs += pg._errors
         ctx.close()

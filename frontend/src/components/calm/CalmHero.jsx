@@ -86,11 +86,33 @@ function IndexChips({ market, on, toggle, compact }) {
   );
 }
 
+// ── READY_PANEL_20261118 ── nothing traded yet today: this week's and this month's net still
+// show (Live when it has trades this month, else Paper; never added together)
+function PeriodChips({ totals, compact }) {
+  const book = ["LIVE", "PAPER"].find((b) => (totals?.[b]?.month_trades || 0) > 0 || (totals?.[b]?.week_trades || 0) > 0);
+  if (!book) return null;
+  const t = totals[book];
+  return (
+    <div data-testid="calm-period-chips" data-book={book} style={{ display: "flex", gap: SP.sm, flexWrap: "wrap" }}>
+      {[["week", "This week"], ["month", "This month"]].map(([id, label]) => {
+        const v = value(t, id);
+        return (
+          <div key={id} data-period={id} title={`${t[id + "_trades"] ?? 0} trades exited since ${t[id + "_from"] || "—"}, after charges`}
+            style={{ minWidth: compact ? 0 : 150, flex: compact ? 1 : "0 0 auto", border: `1px solid ${C.line}`, borderRadius: RADIUS.inner, padding: `${SP.sm}px ${SP.lg}px` }}>
+            <span style={{ display: "block", ...T.meta, color: C.muted }}>{label} · {BOOK_NAME[book]}</span>
+            <span style={{ display: "block", ...T.body, fontWeight: 600, ...T.num, color: tone(v) }}>{fmtInr(v)}{t[id + "_approx"] ? " ≈" : ""}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function LiveTag() {
   return <span style={{ ...T.meta, fontWeight: 600, letterSpacing: "0.06em", color: C.ink, border: `1px solid ${C.ink}`, borderRadius: 4, padding: `0 ${SP.xs}px` }}>LIVE</span>;
 }
 
-export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0, compact = false, dateLine, market = null }) {
+export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0, compact = false, dateLine, market = null, aside = null }) {   // ── READY_PANEL_20261118 ── aside
   const traded = ["LIVE", "PAPER"].filter((b) => totals?.[b]?.rows > 0);
   const [period, setPeriod] = useState("today");
   const [pick, setPick] = useState(null);
@@ -132,14 +154,18 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
 
   if (!heroBook) {
     return (
-      <section aria-label="Today" data-testid="calm-hero" data-book="none" style={{ display: "flex", flexDirection: "column", gap: SP.lg }}>
+      <section aria-label="Today" data-testid="calm-hero" data-book="none" style={{ display: "flex", flexDirection: compact ? "column" : "row", flexWrap: "wrap", alignItems: "flex-start", gap: compact ? SP.lg : SP.xxxl }}>
+        <div style={{ flex: compact ? "1 1 auto" : "1 1 460px", minWidth: 0, display: "flex", flexDirection: "column", gap: SP.lg }}>   {/* ── READY_PANEL_20261118 ── left column; the panel sits beside it */}
         {dateLine}
         <div style={{ ...bigStyle, color: C.muted }}>₹0</div>
         <p style={{ margin: 0, ...T.lead, color: C.sub, maxWidth: 520 }}>
           No trades yet today.{armed ? ` ${armed} strateg${armed === 1 ? "y is" : "ies are"} armed.` : ""}{carried ? ` ${carried} carried position${carried === 1 ? "" : "s"} from earlier sessions.` : ""}
         </p>
+        <PeriodChips totals={totals} compact={compact} />
         {chips}
         {overlays.length > 0 && <CalmChart lines={[]} overlays={overlays} nowMin={nowMin} height={compact ? 120 : 180} compact={compact} />}
+        </div>
+        {aside}
       </section>
     );
   }
@@ -186,6 +212,7 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
       {left}
       {compact && tabs}
       <div style={{ flex: compact ? "1 1 auto" : "999 1 480px", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "flex-end", gap: SP.md }}>
+        {aside}
         {chips}
         <CalmChart lines={lines} overlays={overlays} nowMin={nowMin} height={compact ? 120 : 220} compact={compact} />
       </div>
