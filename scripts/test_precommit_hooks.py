@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# scripts/test_precommit_hooks.py  — ── PRECOMMIT_20261117 ── (TD-042) TC-HOOKS-0001…0028
+# scripts/test_precommit_hooks.py  — ── PRECOMMIT_20261117 ── (TD-042) TC-HOOKS-0001…0028, 0043
+# PUSH_ANYTIME_20261118: market-hours push hook removed — TC-HOOKS-0016…0021 retired.
 #
-# Unit checks of the four local hooks and the config, in throw-away folders and
+# Unit checks of the three local hooks and the config, in throw-away folders and
 # git repos (never this repo's index). The pre-commit framework itself is not
 # needed here.   python3 scripts/test_precommit_hooks.py   (stdlib; exit 1 on a failure)
 import os
@@ -105,37 +106,6 @@ chk("TC-HOOKS-0015", "--full lists both ways: copy-only files and differing file
     rc == 1 and "extra.py  — in the build copy only" in out and "frontend/src/App.jsx  — differs" in out, out)
 shutil.rmtree(d, ignore_errors=True)
 
-# ── market hours (pre-push) ──────────────────────────────────────────
-def push(now, ok=None):
-    env = {"SCALP_HOOK_NOW": now}
-    if ok is not None:
-        env["SCALP_PUSH_OK"] = ok
-    e = dict(os.environ)
-    e.pop("SCALP_PUSH_OK", None)
-    r = subprocess.run([sys.executable, os.path.join(H, "market_hours_push.py")], env=dict(e, **env),
-                       capture_output=True, text=True, timeout=30)
-    return r.returncode, r.stdout
-
-
-rc, out = push("2026-11-16T10:00:00+05:30")
-chk("TC-HOOKS-0016", "push on Monday 10:00 IST is blocked with the override hint",
-    rc == 1 and "Push blocked" in out and "SCALP_PUSH_OK=1" in out, out)
-res = {t: push(f"2026-11-16T{t}:00+05:30")[0] for t in ("08:59", "09:00", "15:30", "15:31")}
-chk("TC-HOOKS-0017", "boundaries: 08:59 and 15:31 allowed, 09:00 and 15:30 blocked",
-    res == {"08:59": 0, "09:00": 1, "15:30": 1, "15:31": 0}, res)
-res = [push(f"2026-11-{d_}T11:00:00+05:30")[0] for d_ in ("21", "22")]
-chk("TC-HOOKS-0018", "Saturday and Sunday 11:00 IST are allowed", res == [0, 0], res)
-rc, out = push("2026-11-16T10:00:00+05:30", ok="1")
-chk("TC-HOOKS-0019", "SCALP_PUSH_OK=1 lets a market-hours push through (and says so)",
-    rc == 0 and "pushing anyway" in out, out)
-rc_a, _ = push("2026-11-17T04:00:00Z")            # 09:30 IST Tue on the real UTC clock
-rc_b, _ = push("2026-11-17T10:05:00Z")            # 15:35 IST
-rc_c, _ = push("2026-11-20T23:00:00Z")            # Fri 23:00 UTC = Sat 04:30 IST
-chk("TC-HOOKS-0020", "UTC instants convert to IST: 04:00Z Tue blocked, 10:05Z allowed, Fri 23:00Z (Sat IST) allowed",
-    (rc_a, rc_b, rc_c) == (1, 0, 0), (rc_a, rc_b, rc_c))
-rc, _ = push("2026-11-16T10:00:00+05:30", ok="yes")
-chk("TC-HOOKS-0021", "only SCALP_PUSH_OK=1 overrides (=yes does not)", rc == 1, rc)
-
 # ── REPO_MAP refresh ─────────────────────────────────────────────────
 STUB = ("import os, sys\nroot = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n"
         "mp = os.path.join(root, 'REPO_MAP.md')\n"
@@ -171,17 +141,19 @@ shutil.rmtree(d, ignore_errors=True)
 # ── config ───────────────────────────────────────────────────────────
 cfg = open(os.path.join(ROOT, ".pre-commit-config.yaml"), encoding="utf-8").read()
 ids = re.findall(r"^\s*- id:\s*(\S+)", cfg, re.M)
-want = ["ruff-check", "no-backup-files", "dual-tree-parity", "repo-map-refresh", "market-hours-push"]
-chk("TC-HOOKS-0026", ".pre-commit-config.yaml has the five hooks, ruff pinned, pre-push installed by default, "
-    "market hours on pre-push only",
+want = ["ruff-check", "no-backup-files", "dual-tree-parity", "repo-map-refresh"]
+chk("TC-HOOKS-0026", ".pre-commit-config.yaml has the four hooks, ruff pinned, only the commit hook installed, "
+    "nothing on push (pushes allowed any time)",
     ids == want and re.search(r"rev:\s*v\d+\.\d+\.\d+", cfg) is not None
-    and "default_install_hook_types: [pre-commit, pre-push]" in cfg and "default_stages: [pre-commit]" in cfg
-    and re.search(r"id: market-hours-push(?:.|\n)*?stages: \[pre-push\]", cfg) is not None
+    and "default_install_hook_types: [pre-commit]" in cfg and "default_stages: [pre-commit]" in cfg
+    and "pre-push" not in cfg and not re.search(r"^\s+stages:", cfg, re.M)
     and not re.search(r"args:.*--fix", cfg), ids)
 local = re.findall(r"entry:\s*python (scripts/hooks/\S+)", cfg)
 chk("TC-HOOKS-0027", "every local hook runs a stdlib script under scripts/hooks/ (not tools/) that exists",
-    len(local) == 4 and all(os.path.exists(os.path.join(ROOT, p)) for p in local)
+    len(local) == 3 and all(os.path.exists(os.path.join(ROOT, p)) for p in local)
     and "language: python" in cfg and "tools/" not in cfg, local)
+chk("TC-HOOKS-0043", "no market-hours push hook left: scripts/hooks/market_hours_push.py is gone (PUSH_ANYTIME_20261118)",
+    not os.path.exists(os.path.join(H, "market_hours_push.py")))
 rt = open(os.path.join(ROOT, "ruff.toml"), encoding="utf-8").read()
 sel = re.findall(r'"([A-Z]+\d*)",\s*#', rt)
 chk("TC-HOOKS-0028", "ruff.toml selects errors only (E9, F63, F7, F82), no fixing, one baselined file",

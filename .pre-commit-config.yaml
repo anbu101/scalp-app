@@ -1,10 +1,11 @@
 # .pre-commit-config.yaml — ── PRECOMMIT_20261117 ── (TD-042)
+# ── PUSH_ANYTIME_20261118 ── (TD-047) market-hours push block removed: push any time
 # Install once per clone:
 #   pip install pre-commit
-#   pre-commit install --hook-type pre-commit --hook-type pre-push
+#   pre-commit install
 # Run by hand:  pre-commit run --all-files      (skip one hook: SKIP=<id> git commit ...)
 minimum_pre_commit_version: "3.2.0"
-default_install_hook_types: [pre-commit, pre-push]
+default_install_hook_types: [pre-commit]
 default_stages: [pre-commit]
 
 repos:
@@ -36,11 +37,3 @@ repos:
         always_run: true
         pass_filenames: false
         verbose: true
-
-      - id: market-hours-push
-        name: no push Mon-Fri 09:00-15:30 IST (SCALP_PUSH_OK=1 overrides)
-        entry: python scripts/hooks/market_hours_push.py
-        language: python
-        stages: [pre-push]
-        always_run: true
-        pass_filenames: false

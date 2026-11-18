@@ -34,7 +34,7 @@ Open `REPO_MAP.md` first. Per strategy (by codename) it names the engine, backte
 - Dual tree: edit `backend/` and `frontend/`; the script also writes the `desktop/src-tauri/` build copies when they exist.
 - `git status` on every target before patching (an `M` is a stop sign); assert the parent fence.
 - Read the latest `main`, never a file rebuilt from memory.
-- No live deploys Mon–Fri 09:00–15:30 IST.
+- Push and release any time (PUSH_ANYTIME_20261118); installing an update in market hours is the user's call — the app's update banner warns first.
 
 <!-- PRECOMMIT_20261117 -->
-- Commits run pre-commit (ruff errors, dual-tree parity, no backup files, REPO_MAP refresh); pushes are blocked Mon–Fri 09:00–15:30 IST unless `SCALP_PUSH_OK=1`.
+- Commits run pre-commit (ruff errors, dual-tree parity, no backup files, REPO_MAP refresh); nothing runs on push.
