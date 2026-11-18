@@ -31,8 +31,7 @@ Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core
 
 ## Tests — 179 backend scripts (exit code) + 17 pytest files
 - Failures + summary only: `python3 scripts/run_suites.py PATH...` — runs each suite its own way: scripts from backend/; pytest files (E/ic, backend/app/config, backend/app/db, backend/app/execution) via `-m pytest` from their folder; 2 BRK suites from the root. A pytest file run as a plain script exits 0 untested.
-- CI: `.github/workflows/ci.yml` (push to main); SKIP / KNOWN_FAIL lists in `scripts/ci/run_ci_suites.py`.
-- 210 suites (under backend/app/ unless shown): api/ 15 · backtest/ 56 · engine/ 63 · execution/ 15 · jobs/ 3 · marketdata/ 3 · parity/ 8 · tests/ 8 · tools/ 5 · utils/ 3 · frontend/uitest/ 11 · 20 more in 13 small folders
+- 209 suites (under backend/app/ unless shown): api/ 15 · backtest/ 56 · engine/ 63 · execution/ 15 · jobs/ 3 · marketdata/ 3 · parity/ 8 · tests/ 8 · tools/ 5 · utils/ 3 · frontend/uitest/ 11 · 19 more in 12 small folders
 - Fleet, one fake Kite account: `python3 scripts/run_suites.py E/test_fleet_adversarial.py E/test_fleet_live.py E/test_safety_layers.py`
 - Before a release: `python3 scripts/run_suites.py backend/app/execution/test_execution_router_contract.py` (E/ B/ A/ J/ prefixes work).
 - UI (Playwright, app closed): `cd frontend && CI=false npm run build && PYTHONPATH=../backend python3 uitest/test_ui_<name>.py` (frontend/uitest/README.md).
