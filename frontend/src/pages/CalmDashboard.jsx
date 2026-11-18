@@ -155,14 +155,14 @@ export default function CalmDashboard() {
   );
 
   const grid = isMobile ? { display: "flex", flexDirection: "column", gap: SP.md - 2 }
-    : { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: SP.lg, gridAutoFlow: "dense",
+    : { display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(max(300px, calc((100% - ${SP.lg * 3}px) / 4)), 1fr))`, gap: SP.lg,   /* WIDE_SCREEN_20261117: at most 4 columns, so wide screens get wider cards, not an empty column */ gridAutoFlow: "dense",
         alignItems: open ? "start" : "stretch" };   // an open card is tall: its row neighbours keep their own height
 
   return (
     <div data-calm-root data-testid="calm-root" style={{ padding: isMobile ? `${SP.lg}px ${SP.lg}px ${SP.xxl}px` : `${SP.xl}px ${SP.xxl}px ${SP.xxxl}px`,
       background: C.page, color: C.ink, minHeight: "100vh", fontFamily: "var(--c-font-ui)", ...T.body }}>
       <style>{`[data-testid=calm-why] [data-testid=replay-waiting] { border-bottom: 0 !important; }`}</style>
-      <div style={{ maxWidth: 1360, margin: "0 auto", display: "flex", flexDirection: "column", gap: isMobile ? SP.xl : SP.xxxl }}>
+      <div style={{ maxWidth: 2000, margin: "0 auto",   /* WIDE_SCREEN_20261117: was 1360 — left 184 px empty on each side of a 16-inch MacBook Pro */ display: "flex", flexDirection: "column", gap: isMobile ? SP.xl : SP.xxxl }}>
 
         {/* ── INDEX_PATH_20261117 ── the NIFTY / BANKNIFTY badges are now chips above the MTM chart */}
 

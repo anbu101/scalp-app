@@ -86,6 +86,19 @@ with sync_playwright() as p:
           "Classic page: chart below the panel too; its own hero and meter unchanged (no cards there)")
     errs += pg._errors
     ctx.close()
+    # ── RECENT_ABOVE_CHART_20261118 (DEF-058): a strategy whose panel has no closed table of its own
+    # (Tigris) gets the "Closed positions, today and recent" drawer ABOVE the live chart, like the others
+    S.SET.write_text(json.dumps({"dashboard_layout": "modern"}))
+    ctx, pg = S.page(b, {"width": 1470, "height": 2600}, focus="TSG_V1")
+    pg.wait_for_selector(CARD, timeout=60000)
+    pg.wait_for_timeout(1500)
+    o = pg.evaluate("""(() => { const c = document.querySelector('[data-testid=live-chart-card]');
+      const d = [...document.querySelectorAll('[data-testid=calm-focus] button')].find((b) => /Closed positions/.test(b.innerText));
+      if (!c || !d) return { card: !!c, drawer: !!d };
+      return { card: true, drawer: true, above: !!(d.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING), dTop: Math.round(d.getBoundingClientRect().top), cTop: Math.round(c.getBoundingClientRect().top) }; })()""")
+    check("TC-CHRT-0009", o.get("above") is True, f"Tigris: Closed positions drawer sits above the Live chart ({o})")
+    errs += pg._errors
+    ctx.close()
     check("TC-CHRT-0008", not errs, f"no page errors ({errs[:2]})")
     b.close()
 

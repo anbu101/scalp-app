@@ -455,9 +455,9 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
         style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}   /* ── HOST_PANEL_FIT_20260921 ── flex column */
       >
         {outsider ? (<>   {/* ── TRADE_REPLAY_LVB_20261030 ── its own live chart, not the previous strategy's */}
-          <LiveChartCard strategyId={outsider} />
           {outsiderNote}
-          <RecentSlot mode={recent} strategyId={outsider} />
+          <RecentSlot mode={recent} strategyId={outsider} />   {/* ── RECENT_ABOVE_CHART_20261118 ── */}
+          <LiveChartCard strategyId={outsider} />
         </>) : (<>
         <KillSwitch strategyId={effectiveFocus} />
         <PanelBox id={effectiveFocus}>{renderPanel(effectiveFocus, ltpMap)}</PanelBox>   {/* ── HOST_PANEL_FIT_20260921 ── */}
@@ -465,8 +465,9 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
             live, else spot + its indicators (watching for the next entry); "Full screen" opens the modal.
             Renders nothing for non-admin, on a phone, or outside a Dashboard ReplayHostProvider.
             ── CHART_BELOW_PANEL_20261117 ── below the strategy's panel (its legs), not above it */}
+        {/* ── RECENT_ABOVE_CHART_20261118 ── Closed positions (today and recent) before the chart, as IC/TMA/VET already show it in their panel */}
+        <RecentSlot mode={recent} strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── */}
         <LiveChartCard strategyId={effectiveFocus} />
-          <RecentSlot mode={recent} strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── */}
         </>)}
       </div>
 

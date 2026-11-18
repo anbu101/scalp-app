@@ -226,6 +226,25 @@ with sync_playwright() as p:
                   f"Live and Paper end labels do not touch each other when Paper ends above Live ({lab})")
         errs += pg._errors
         ctx.close()
+    # ── WIDE_SCREEN_20261117 (DEF-057): on a 16-inch MacBook Pro (1728 px, or 2056 "more space") the page fills the width
+    # and four strategies make four equal columns with no empty fifth column on the right
+    MEASURE = """(() => { const cards = [...document.querySelectorAll('[data-testid=calm-card],[data-testid=calm-idle-card]')].map(c => c.getBoundingClientRect());
+      const sec = document.querySelector('[data-testid=calm-strategies]').getBoundingClientRect();
+      const lefts = [...new Set(cards.map(r => Math.round(r.left)))].sort((a, b) => a - b);
+      return { w: window.innerWidth, secL: sec.left, secR: sec.right, n: cards.length, cols: lefts.length,
+               firstL: Math.min(...cards.map(r => r.left)), lastR: Math.max(...cards.map(r => r.right)),
+               widths: cards.map(r => Math.round(r.width)) }; })()"""
+    for w, cap in ((1728, 70), (2056, 70)):
+        ctx, pg = open_dash(b, fleet=mix_scene(), width=w, height=1100)
+        pg.wait_for_selector("[data-testid=calm-card]", timeout=60000)
+        pg.wait_for_timeout(1200)
+        m = pg.evaluate(MEASURE)
+        ok = (m["firstL"] <= cap and m["w"] - m["lastR"] <= cap + 16 and m["cols"] == 4 and m["lastR"] >= m["secR"] - 3
+              and max(m["widths"]) - min(m["widths"]) <= 2)
+        check("TC-CALM-0037" if w == 1728 else "TC-CALM-0038", ok,
+              f"{w} px screen: content fills the width (sides {m['firstL']:.0f} / {m['w'] - m['lastR']:.0f} px), 4 equal columns, no empty column on the right ({m})")
+        errs += pg._errors
+        ctx.close()
     check("TC-CALM-0023", not errs, f"no page errors ({errs[:2]})")
     b.close()
 

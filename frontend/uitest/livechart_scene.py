@@ -104,13 +104,13 @@ SET.write_text(json.dumps({"dashboard_layout": "classic"}))
 U.LICENSE.update(ui_level="admin", strategies=["*"])
 
 
-def page(b, vp):
+def page(b, vp, focus="TMA_V2"):   # RECENT_ABOVE_CHART_20261118: focus param
     ctx = b.new_context(viewport=vp, timezone_id="Asia/Kolkata")
     pg = ctx.new_page()
     pg._errors = []
     pg.on("pageerror", lambda e: pg._errors.append(str(e)[:300]))
     pg.clock.set_fixed_time("2025-02-25T13:05:05+05:30")
-    pg.add_init_script("localStorage.clear();localStorage.setItem('scalp.strategyHost.focusId','TMA_V2');")
+    pg.add_init_script("localStorage.clear();localStorage.setItem('scalp.strategyHost.focusId','%s');" % focus)
     pg.route("**/api/fleet/today", lambda r: r.fulfill(json=FLEET))
     pg.route("**/system/license", lambda r: r.fulfill(json=dict(U.LICENSE, status="VALID")))
     pg.goto(BASE, wait_until="domcontentloaded")
