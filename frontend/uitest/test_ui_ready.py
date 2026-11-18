@@ -47,9 +47,9 @@ def fmt(v):
     return ("+" if n > 0 else "−" if n < 0 else "") + "₹" + s
 
 
-def open_dash(b, fleet=None, z=Z_OK, a=A_OFF, r=R_OK, width=1440, height=1100, clock=PRE, admin=True):
+def open_dash(b, fleet=None, z=Z_OK, a=A_OFF, r=R_OK, width=1440, height=1100, clock=PRE, admin=True, theme="dark"):   # READY_LOGIN_LABEL_20261118: theme
     SET.parent.mkdir(parents=True, exist_ok=True)
-    SET.write_text(json.dumps({"dashboard_layout": "modern", "theme": "dark"}))
+    SET.write_text(json.dumps({"dashboard_layout": "modern", "theme": theme}))
     ctx = b.new_context(viewport={"width": width, "height": height}, timezone_id="Asia/Kolkata")
     pg = ctx.new_page()
     pg._errors, pg._calls = [], []
@@ -166,6 +166,23 @@ with sync_playwright() as p:
     check("TC-RDY-0017", o and o["pt"] > o["sb"] and o["pr"] <= 390 and o["sw"] <= 392, f"phone: panel under the hero, no sideways scroll ({o})")
     errs += pg._errors
     ctx.close()
+
+    # ── READY_LOGIN_LABEL_20261118 (DEF-062): the Log in label is readable on every theme (Arcade showed an empty pink block)
+    LBL = """(() => { const b = document.querySelector('[data-ready=zerodha] [data-testid=ready-login]'); if (!b) return null;
+      const cs = getComputedStyle(b); const p = (s) => (s.match(/[\\d.]+/g) || []).map(Number);
+      const lum = (c) => { const [r, g, bl] = c.slice(0, 3).map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }); return 0.2126 * r + 0.7152 * g + 0.0722 * bl; };
+      const fg = p(cs.color), bg = p(cs.backgroundColor); const a = fg.length > 3 ? fg[3] : 1;
+      const L1 = lum(fg), L2 = lum(bg); return { text: b.innerText, fg: cs.color, bg: cs.backgroundColor, alpha: a,
+        ratio: Math.round(((Math.max(L1, L2) + 0.05) / (Math.min(L1, L2) + 0.05)) * 10) / 10 }; })()"""
+    bad = {}
+    for th in ("dark", "light", "terminal", "kolam", "arcade"):
+        ctx, pg = open_dash(b, z=Z_OFF, theme=th)
+        o = pg.evaluate(LBL)
+        if not (o and o["text"].strip() == "Log in" and o["alpha"] > 0.9 and o["ratio"] >= 3):
+            bad[th] = o
+        errs += pg._errors
+        ctx.close()
+    check("TC-RDY-0019", not bad, f"Log in label readable (opaque, contrast ≥ 3:1) on dark, light, terminal, kolam, arcade ({bad})")
 
     check("TC-RDY-0018", not errs, f"no page errors ({errs[:2]})")
     b.close()

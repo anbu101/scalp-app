@@ -55,7 +55,7 @@ function LoginButton({ label = "Log in", busy, onClick, title }) {
     <button type="button" onClick={onClick} disabled={busy} title={title} data-testid="ready-login"
       style={{ font: "inherit", ...T.body, fontWeight: 600, cursor: busy ? "default" : "pointer", minHeight: 32,
         padding: `${SP.xs}px ${SP.md + 2}px`, borderRadius: RADIUS.inner - 4, border: 0,
-        background: C.accent, color: "var(--c-bg-page)", opacity: busy ? 0.6 : 1 }}>{busy ? "Opening…" : label}</button>
+        background: C.accent, color: "var(--c-bg-primary)", opacity: busy ? 0.6 : 1 }}>   {/* ── READY_LOGIN_LABEL_20261118 (DEF-062) ── was --c-bg-page: transparent on Arcade / Kolam, so the label vanished */}{busy ? "Opening…" : label}</button>
   );
 }
 
