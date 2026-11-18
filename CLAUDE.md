@@ -38,3 +38,8 @@ Open `REPO_MAP.md` first. Per strategy (by codename) it names the engine, backte
 
 <!-- PRECOMMIT_20261117 -->
 - Commits run pre-commit (ruff errors, dual-tree parity, no backup files, REPO_MAP refresh); nothing runs on push.
+
+<!-- RELIABILITY_GATE_20261118 -->
+- Commit-msg hook `reliability-checklist`: runs only the checklist items (scripts/checklist/items.py, read from HEAD) that the staged diff triggers, and stamps `Checklist: …` on the commit. Mode in scripts/checklist/MODE (`observe` = never blocks). `--list`, `--report`, `--worktree`, `--range A..B`.
+- Claude: before delivering an apply script, apply it on a clean clone and run `python3 scripts/hooks/reliability_checklist.py --worktree`; fix every `fail`, and name each `needs-ack` item and why it is fine in the delivery note.
+- A missed bug becomes an item: trigger readable from a diff + check + incidents, with a test in scripts/test_reliability_checklist.py.

@@ -1,11 +1,12 @@
 # .pre-commit-config.yaml — ── PRECOMMIT_20261117 ── (TD-042)
 # ── PUSH_ANYTIME_20261118 ── (TD-047) market-hours push block removed: push any time
+# ── RELIABILITY_GATE_20261118 ── (TD-048/049) reliability checklist on commit-msg (install once more: pre-commit install)
 # Install once per clone:
 #   pip install pre-commit
 #   pre-commit install
 # Run by hand:  pre-commit run --all-files      (skip one hook: SKIP=<id> git commit ...)
 minimum_pre_commit_version: "3.2.0"
-default_install_hook_types: [pre-commit]
+default_install_hook_types: [pre-commit, commit-msg]
 default_stages: [pre-commit]
 
 repos:
@@ -36,4 +37,12 @@ repos:
         language: python
         always_run: true
         pass_filenames: false
+        verbose: true
+
+      - id: reliability-checklist   # ── RELIABILITY_GATE_20261118 ── (TD-048/049) commit-msg: diff-triggered checklist + gate
+        name: reliability checklist (scripts/checklist/items.py from HEAD; mode in scripts/checklist/MODE)
+        entry: python3 scripts/hooks/reliability_checklist.py
+        language: system            # system python3: CL-07 runs the fleet suites with the app's packages
+        stages: [commit-msg]
+        always_run: true
         verbose: true

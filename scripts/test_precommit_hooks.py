@@ -141,16 +141,17 @@ shutil.rmtree(d, ignore_errors=True)
 # ── config ───────────────────────────────────────────────────────────
 cfg = open(os.path.join(ROOT, ".pre-commit-config.yaml"), encoding="utf-8").read()
 ids = re.findall(r"^\s*- id:\s*(\S+)", cfg, re.M)
-want = ["ruff-check", "no-backup-files", "dual-tree-parity", "repo-map-refresh"]
-chk("TC-HOOKS-0026", ".pre-commit-config.yaml has the four hooks, ruff pinned, only the commit hook installed, "
-    "nothing on push (pushes allowed any time)",
+want = ["ruff-check", "no-backup-files", "dual-tree-parity", "repo-map-refresh", "reliability-checklist"]
+chk("TC-HOOKS-0026", ".pre-commit-config.yaml has the five hooks, ruff pinned, commit + commit-msg hooks installed, "
+    "nothing on push, the checklist on commit-msg only",
     ids == want and re.search(r"rev:\s*v\d+\.\d+\.\d+", cfg) is not None
-    and "default_install_hook_types: [pre-commit]" in cfg and "default_stages: [pre-commit]" in cfg
-    and "pre-push" not in cfg and not re.search(r"^\s+stages:", cfg, re.M)
+    and "default_install_hook_types: [pre-commit, commit-msg]" in cfg and "default_stages: [pre-commit]" in cfg
+    and "pre-push" not in cfg and re.findall(r"^\s+stages:\s*(\[.*\])", cfg, re.M) == ["[commit-msg]"]
+    and re.search(r"id: reliability-checklist(?:.|\n)*?stages: \[commit-msg\]", cfg) is not None
     and not re.search(r"args:.*--fix", cfg), ids)
-local = re.findall(r"entry:\s*python (scripts/hooks/\S+)", cfg)
+local = re.findall(r"entry:\s*python3? (scripts/hooks/\S+)", cfg)   # RELIABILITY_GATE_20261118: 4 local hooks
 chk("TC-HOOKS-0027", "every local hook runs a stdlib script under scripts/hooks/ (not tools/) that exists",
-    len(local) == 3 and all(os.path.exists(os.path.join(ROOT, p)) for p in local)
+    len(local) == 4 and all(os.path.exists(os.path.join(ROOT, p)) for p in local)
     and "language: python" in cfg and "tools/" not in cfg, local)
 chk("TC-HOOKS-0043", "no market-hours push hook left: scripts/hooks/market_hours_push.py is gone (PUSH_ANYTIME_20261118)",
     not os.path.exists(os.path.join(H, "market_hours_push.py")))
