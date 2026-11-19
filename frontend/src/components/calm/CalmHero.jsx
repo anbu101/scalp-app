@@ -211,10 +211,10 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
     <section aria-label="Today" data-testid="calm-hero" data-book={heroBook} style={{ display: "flex", flexDirection: compact ? "column" : "row", flexWrap: "wrap", gap: compact ? SP.lg : SP.xxxl }}>
       {left}
       {compact && tabs}
-      <div style={{ flex: compact ? "1 1 auto" : "999 1 480px", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "flex-end", gap: SP.md }}>
-        {aside}
+      <div style={{ flex: compact ? "1 1 auto" : "999 1 480px", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: aside ? "flex-start" : "flex-end", gap: SP.md }}>
+        {aside ? <div style={{ display: "flex" }}>{aside}</div> : null}   {/* ── READY_HERO_FIT_20261119 ── row wrapper: the panel's flex size is a width, not a height */}
         {chips}
-        <CalmChart lines={lines} overlays={overlays} nowMin={nowMin} height={compact ? 120 : 220} compact={compact} />
+        {aside && !lines.some((l) => l.path.length > 1) && !overlays.length ? null : <CalmChart lines={lines} overlays={overlays} nowMin={nowMin} height={compact ? 120 : 220} compact={compact} />}
       </div>
     </section>
   );

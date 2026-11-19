@@ -148,6 +148,19 @@ with sync_playwright() as p:
     pos = pg.evaluate("""(() => { const p = document.querySelector('[data-testid=ready-panel]'); const f = document.querySelector('[data-testid=calm-hero-figure]');
       return p && f ? { pl: p.getBoundingClientRect().left, fr: f.getBoundingClientRect().right } : null; })()""")
     check("TC-RDY-0014", pos and pos["pl"] > pos["fr"], f"with carried positions the panel is beside the big number ({pos})")
+    # ── READY_HERO_FIT_20261119 (DEF-067): the panel hugs its rows (not stretched tall) and no empty day chart under it
+    g = pg.evaluate("""(() => { const p = document.querySelector('[data-testid=ready-panel]'); if (!p) return null;
+      const rows = p.querySelectorAll('[data-ready]'); const last = rows[rows.length - 1].getBoundingClientRect();
+      const ch = document.querySelector('[data-testid=calm-hero] [data-testid=calm-chart]');
+      return { gap: Math.round(p.getBoundingClientRect().bottom - last.bottom), empty: !!(ch && /first order/.test(ch.textContent)) }; })()""")
+    check("TC-RDY-0022", g and g["gap"] <= 60, f"carried, pre-open: panel fits its rows, not stretched tall ({g})")
+    errs += pg._errors
+    ctx.close()
+    _f = mix_scene(); _f["paths"] = {"LIVE": [], "PAPER": []}   # before 09:15 there is no line for today yet
+    ctx, pg = open_dash(b, fleet=_f)
+    pg.wait_for_selector("[data-testid=ready-panel]", timeout=60000)
+    ch = pg.evaluate("""(() => { const c = document.querySelector('[data-testid=calm-hero] [data-testid=calm-chart]'); return c ? c.textContent : null; })()""")
+    check("TC-RDY-0023", ch is None or "first order" not in ch, f"carried, no line yet: no empty 'day's line' box under the panel ({ch!r})")
     errs += pg._errors
     ctx.close()
 
