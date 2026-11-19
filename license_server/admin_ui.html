@@ -513,7 +513,11 @@ function render() {
             : "\u2264" + (l.entitlements?.max_lots || 5) + " lots"}</div></td>
       <td style="max-width:180px">${stratHtml}</td>
       <td><span class="${expCls}">${l.expires_at}</span><div class="dim">${dl < 0 ? Math.abs(dl)+"d ago" : dl+"d left"}</div></td>
-      <td>${l.machine_id ? '🔒 <span class="dim mono">'+l.machine_id.slice(0,8)+'…</span>' : '<span class="dim">unbound</span>'}</td>
+      <td>${l.machine_id ? '🔒 <span class="dim mono">'+l.machine_id.slice(0,8)+'…</span>'
+        /* MACHINE_ID_HW_20261119: HW = bound to the hardware id; MAC = not moved yet */
+        + (l.machine_migrated_at ? ' <span class="dim" title="hardware id since '+l.machine_migrated_at+'">HW</span>'
+                                 : ' <span class="dim" title="MAC id: moves to the hardware id at its next heartbeat on 12.0.8+">MAC</span>')
+        : '<span class="dim">unbound</span>'}</td>
       <td title="${fmt(l.last_heartbeat_at)}">${rel(l.last_heartbeat_at)}</td>
       <td><span class="badge ${cls}">${st}</span></td>
       <td><div class="actions">

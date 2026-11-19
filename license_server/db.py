@@ -106,6 +106,12 @@ def init_db():
             c.execute("ALTER TABLE licenses ADD COLUMN phone TEXT")
         if "email" not in cols:
             c.execute("ALTER TABLE licenses ADD COLUMN email TEXT")
+        # ── MACHINE_ID_HW_20261119 ── audit of the move from the MAC id to the
+        # hardware id. Matching never reads these; only machine_id binds.
+        if "legacy_machine_id" not in cols:
+            c.execute("ALTER TABLE licenses ADD COLUMN legacy_machine_id TEXT")
+        if "machine_migrated_at" not in cols:
+            c.execute("ALTER TABLE licenses ADD COLUMN machine_migrated_at TEXT")
         # ── CFG_OVERRIDE (role-level) ── generic KV settings; holds the
         # GLOBAL config-override set injected into every non-admin token.
         c.execute(
@@ -205,12 +211,30 @@ def list_licenses() -> list[dict]:
     return [row_to_dict(r) for r in rows]
 
 
-def bind_machine(key: str, machine_id: str):
+def bind_machine(key: str, machine_id: str, legacy_id: str | None = None):
+    # ── MACHINE_ID_HW_20261119 ── a client that sends a legacy id binds its
+    # hardware id: record that (admin list "HW"); an old client clears it.
+    now = _now_iso()
     with _conn() as c:
         c.execute(
-            "UPDATE licenses SET machine_id = ?, activated_at = ? WHERE key = ?",
-            (machine_id, _now_iso(), key),
+            "UPDATE licenses SET machine_id = ?, activated_at = ?, "
+            "legacy_machine_id = ?, machine_migrated_at = ? WHERE key = ?",
+            (machine_id, now, legacy_id, now if legacy_id else None, key),
         )
+
+
+def migrate_machine(key: str, legacy_id: str, new_id: str) -> bool:
+    """── MACHINE_ID_HW_20261119 ── move a binding from its legacy (MAC) id to
+    the hardware id. Compare-and-set: only while the licence is still bound
+    to legacy_id, so two machines presenting the same legacy id cannot both
+    move it. True when this call moved it."""
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE licenses SET machine_id = ?, legacy_machine_id = ?, "
+            "machine_migrated_at = ? WHERE key = ? AND machine_id = ?",
+            (new_id, legacy_id, _now_iso(), key, legacy_id),
+        )
+        return cur.rowcount == 1
 
 
 def touch_heartbeat(key: str):

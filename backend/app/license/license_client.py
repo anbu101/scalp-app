@@ -42,7 +42,8 @@ Files under ~/.scalp-app/license/:
   token.jwt              latest server-issued token
   last_server_time.txt   epoch of last successful server contact
   license_meta.json      label / license_expires_at (display only)
-  machine_id.txt         fingerprint cache (see machine_id.py)
+  machine_id.txt         legacy (MAC) fingerprint cache (see machine_id.py)
+  hardware_id.txt        hardware-UUID id cache (MACHINE_ID_HW_20261119)
 """
 
 import asyncio
@@ -58,7 +59,7 @@ import jwt  # PyJWT - REMEMBER: 'jwt' in spec hiddenimports + PyJWT in requireme
 
 from app.license import license_state
 from app.license.license_state import LicenseStatus
-from app.license.machine_id import get_machine_id
+from app.license.machine_id import device_ids, get_machine_id
 from app.event_bus.audit_logger import write_audit_log
 
 # --------------------------------------------------
@@ -203,8 +204,10 @@ def _evaluate_local():
         _set_state(LicenseStatus.INVALID, f"License token invalid: {type(e).__name__}")
         return
 
-    # 2. Machine binding
-    if claims.get("machine_id") != get_machine_id():
+    # 2. Machine binding  ── MACHINE_ID_STABLE_20261119 ── the signed claim is
+    #    kept when its MAC is on this machine (interface order can change)
+    #    ── MACHINE_ID_HW_20261119 ── or when it is this machine's hardware id
+    if claims.get("machine_id") != get_machine_id(prefer=claims.get("machine_id")):
         _set_state(LicenseStatus.INVALID, "License token is bound to a different machine")
         return
 
@@ -305,6 +308,34 @@ def _apply_server_response(data: dict):
     write_audit_log(f"[LICENSE] Server response status={status} -> {license_state.LICENSE_STATUS.value}")
 
 
+def _old_server_refused(resp) -> bool:
+    if resp.status_code == 422:
+        return True
+    try:
+        return resp.json().get("status") == "machine_mismatch"
+    except Exception:
+        return False
+
+
+def post_device(path: str, body: dict, timeout: float):
+    """
+    ── MACHINE_ID_HW_20261119 ── POST {key, machine_id, legacy_machine_id}
+    to a device endpoint. A licence server from before MACHINE_ID_HW knows
+    only legacy ids: under pydantic 2 it rejects the extra field (422),
+    under pydantic 1 it drops it and answers machine_mismatch. Either way
+    the request is repeated once in the old shape with the legacy id, so a
+    wrong deploy order can never lock a user out. Against a current server
+    the repeat is refused too (it already tried the legacy id): no new access.
+    """
+    url = f"{LICENSE_SERVER_URL}{path}"
+    resp = httpx.post(url, json=body, timeout=timeout)
+    if body.get("legacy_machine_id") and _old_server_refused(resp):
+        old = {k: v for k, v in body.items() if k != "legacy_machine_id"}
+        old["machine_id"] = body["legacy_machine_id"]
+        resp = httpx.post(url, json=old, timeout=timeout)
+    return resp
+
+
 def _heartbeat_sync(timeout: float = 10.0) -> bool:
     """
     One heartbeat. Returns True on ANY server response (including
@@ -316,11 +347,7 @@ def _heartbeat_sync(timeout: float = 10.0) -> bool:
     if not key:
         return False
     try:
-        resp = httpx.post(
-            f"{LICENSE_SERVER_URL}/heartbeat",
-            json={"key": key, "machine_id": get_machine_id()},
-            timeout=timeout,
-        )
+        resp = post_device("/heartbeat", {"key": key, **device_ids()}, timeout)
         _apply_server_response(resp.json())
         return True
     except Exception as e:
@@ -337,11 +364,7 @@ def activate(key: str) -> dict:
     if not key:
         return {"status": "error", "message": "Empty license key"}
     try:
-        resp = httpx.post(
-            f"{LICENSE_SERVER_URL}/activate",
-            json={"key": key, "machine_id": get_machine_id()},
-            timeout=10.0,
-        )
+        resp = post_device("/activate", {"key": key, **device_ids()}, 10.0)
         data = resp.json()
     except Exception as e:
         return {

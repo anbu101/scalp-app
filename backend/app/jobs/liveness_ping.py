@@ -86,12 +86,12 @@ def _telegram_target() -> Optional[Dict[str, str]]:
 
 def _payload() -> Optional[Dict]:
     try:
-        from app.license.license_client import (KEY_FILE, _read_text,
-                                                get_machine_id)
+        from app.license.license_client import KEY_FILE, _read_text
+        from app.license.machine_id import device_ids   # ── MACHINE_ID_HW_20261119 ──
         key = (_read_text(KEY_FILE) or "").strip()
         if not key:
             return None
-        return {"key": key, "machine_id": get_machine_id(),
+        return {"key": key, **device_ids(),
                 "label": platform.node()[:64],
                 "ts": int(time.time()),
                 "telegram": _telegram_target(),
@@ -102,10 +102,8 @@ def _payload() -> Optional[Dict]:
 
 def _post_once(payload: Dict) -> bool:
     try:
-        import httpx
-        from app.license.license_client import LICENSE_SERVER_URL
-        r = httpx.post(f"{LICENSE_SERVER_URL}/liveness", json=payload,
-                       timeout=TIMEOUT_S)
+        from app.license.license_client import post_device   # ── MACHINE_ID_HW_20261119 ──
+        r = post_device("/liveness", payload, TIMEOUT_S)
         return r.status_code < 500
     except Exception:
         return False

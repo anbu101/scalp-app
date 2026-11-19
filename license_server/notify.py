@@ -108,6 +108,18 @@ def notify_activation(label: str, tier: str, key: str, machine_id: str):
     )
 
 
+def notify_machine_migrated(label: str, key: str, legacy_id: str, new_id: str):
+    """── MACHINE_ID_HW_20261119 ── a licence moved from its MAC id to the
+    hardware id. Expected once per licence after the update; one you did
+    not expect means a copy got there first - rebind it."""
+    send(
+        "🔁 <b>Machine id upgraded</b>\n"
+        f"{label}\n"
+        f"<code>{key}</code>\n"
+        f"{legacy_id[:10]}… → {new_id[:10]}…"
+    )
+
+
 # --------------------------------------------------
 # EXPIRY WATCHER (background thread, started from server.py)
 # --------------------------------------------------

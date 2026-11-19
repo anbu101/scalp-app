@@ -25,6 +25,12 @@ Admin endpoints require header:  X-Admin-Secret: <secrets/admin_secret.txt>
 
 Statuses returned to the app (this is the FIXED Phase 2 contract):
   ok | unknown_key | revoked | expired | machine_mismatch | not_activated
+
+── MACHINE_ID_HW_20261119 ── device requests may carry legacy_machine_id
+(the MAC id) beside machine_id (the hardware id). A licence still bound to
+the legacy id moves to machine_id on /activate or /heartbeat (compare-and-
+set, Telegram ping); /liveness accepts either. Requests without the field
+(clients before 12.0.8) behave exactly as before.
 """
 
 import hmac
@@ -76,6 +82,7 @@ class StrictModel(BaseModel):
 class DeviceRequest(StrictModel):
     key: str = Field(min_length=8, max_length=64)
     machine_id: str = Field(min_length=8, max_length=128)
+    legacy_machine_id: str | None = Field(default=None, min_length=8, max_length=128)  # MACHINE_ID_HW_20261119
 
 
 # ── LIVENESS 2026-09-01 ── telegram is OPTIONAL (dict or null); holidays
@@ -83,6 +90,7 @@ class DeviceRequest(StrictModel):
 class LivenessRequest(StrictModel):
     key: str = Field(min_length=8, max_length=64)
     machine_id: str = Field(min_length=8, max_length=128)
+    legacy_machine_id: str | None = Field(default=None, min_length=8, max_length=128)  # MACHINE_ID_HW_20261119
     label: str = Field(default="", max_length=64)
     ts: int = 0
     telegram: dict | None = None
@@ -270,6 +278,22 @@ def _validate_common(lic: dict | None) -> dict | None:
     return None
 
 
+def _bound_here(lic: dict, req) -> dict | None:
+    """── MACHINE_ID_HW_20261119 ── the licence (re-read) when it is bound to
+    req.machine_id, moving it there first if it is still bound to
+    req.legacy_machine_id; None when it is bound to another machine."""
+    if lic["machine_id"] == req.machine_id:
+        return lic
+    legacy = req.legacy_machine_id
+    if legacy and legacy != req.machine_id and lic["machine_id"] == legacy:
+        if db.migrate_machine(lic["key"], legacy, req.machine_id):
+            notify.notify_machine_migrated(lic["label"], lic["key"], legacy, req.machine_id)
+        lic = db.get_license(lic["key"])
+        if lic and lic["machine_id"] == req.machine_id:
+            return lic
+    return None
+
+
 # --------------------------------------------------
 # DEVICE ENDPOINTS
 # --------------------------------------------------
@@ -281,15 +305,17 @@ def activate(req: DeviceRequest):
     if denial:
         return denial
 
-    if lic["machine_id"] and lic["machine_id"] != req.machine_id:
-        return _denied(
-            "machine_mismatch",
-            "License is already activated on another machine. "
-            "Ask the admin to rebind it.",
-        )
+    if lic["machine_id"]:
+        lic = _bound_here(lic, req)   # ── MACHINE_ID_HW_20261119 ──
+        if lic is None:
+            return _denied(
+                "machine_mismatch",
+                "License is already activated on another machine. "
+                "Ask the admin to rebind it.",
+            )
 
     if not lic["machine_id"]:
-        db.bind_machine(lic["key"], req.machine_id)
+        db.bind_machine(lic["key"], req.machine_id, req.legacy_machine_id)   # MACHINE_ID_HW_20261119
         lic = db.get_license(lic["key"])
         # First-time binding -> ping the admin on Telegram (fire-and-forget)
         notify.notify_activation(lic["label"], lic["tier"], lic["key"], req.machine_id)
@@ -307,7 +333,8 @@ def heartbeat(req: DeviceRequest):
     if not lic["machine_id"]:
         return _denied("not_activated", "License not activated - call /activate first")
 
-    if lic["machine_id"] != req.machine_id:
+    lic = _bound_here(lic, req)   # ── MACHINE_ID_HW_20261119 ──
+    if lic is None:
         return _denied("machine_mismatch", "License is bound to a different machine")
 
     return _issue(lic, req.machine_id)
@@ -322,7 +349,8 @@ def liveness(req: LivenessRequest):
     denial = _validate_common(lic)
     if denial:
         return denial
-    if not lic["machine_id"] or lic["machine_id"] != req.machine_id:
+    # ── MACHINE_ID_HW_20261119 ── either id; the move itself happens on /heartbeat
+    if not lic["machine_id"] or lic["machine_id"] not in (req.machine_id, req.legacy_machine_id):
         return _denied("machine_mismatch", "License is bound to a different machine")
     tg = req.telegram if isinstance(req.telegram, dict) else None
     if tg is not None:
