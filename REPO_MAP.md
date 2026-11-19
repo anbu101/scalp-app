@@ -29,9 +29,9 @@ Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core
 ## Dual tree
 - `backend/` ↔ `desktop/src-tauri/backend/`, `frontend/` ↔ `desktop/src-tauri/frontend/`: the copies are git-ignored, re-synced by `./desktop/build-scalp.sh frontend|backend|both`. Edit the source; apply scripts also write the copy when it exists (`BUILD_COPIES`).
 
-## Tests — 180 backend scripts (exit code) + 18 pytest files
+## Tests — 181 backend scripts (exit code) + 18 pytest files
 - Failures + summary only: `python3 scripts/run_suites.py PATH...` — runs each suite its own way: scripts from backend/; pytest files (E/ic, backend/app/config, backend/app/db, backend/app/execution) via `-m pytest` from their folder; 2 BRK suites from the root. A pytest file run as a plain script exits 0 untested.
-- 213 suites (under backend/app/ unless shown): api/ 16 · backtest/ 56 · engine/ 64 · execution/ 15 · jobs/ 3 · marketdata/ 3 · parity/ 8 · tests/ 8 · tools/ 5 · utils/ 3 · frontend/uitest/ 12 · scripts/ 3 · 17 more in 11 small folders
+- 214 suites (under backend/app/ unless shown): api/ 16 · backtest/ 56 · engine/ 64 · execution/ 15 · jobs/ 3 · marketdata/ 4 · parity/ 8 · tests/ 8 · tools/ 5 · utils/ 3 · frontend/uitest/ 12 · scripts/ 3 · 17 more in 11 small folders
 - Fleet, one fake Kite account: `python3 scripts/run_suites.py E/test_fleet_adversarial.py E/test_fleet_live.py E/test_safety_layers.py`
 - Before a release: `python3 scripts/run_suites.py backend/app/execution/test_execution_router_contract.py` (E/ B/ A/ J/ prefixes work).
 - UI (Playwright, app closed): `cd frontend && CI=false npm run build && PYTHONPATH=../backend python3 uitest/test_ui_<name>.py` (frontend/uitest/README.md).
@@ -47,7 +47,7 @@ Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core
 - `api_server.py` BackgroundScheduler:869 — routes, launches (_boot_guard), APScheduler (misfire 3600, coalesce); jobs/scheduler_observability.py
 - `risk/execution_modes.py` — OFF/PAPER/LIVE/PAPER_LIVE; paper twin trading/shadow_book.py
 - `parity/parity_core.py` — parity ledger (recorded day via real runner vs app); recon/ = broker reconciliation
-- `marketdata/zerodha_tick_engine.py` ZerodhaTickEngine:54 — SCALP_V1 engine + shared Kite tick spine; open no new socket
+- `marketdata/zerodha_tick_engine.py` ZerodhaTickEngine:55 — SCALP_V1 engine + shared Kite tick spine; open no new socket
 - `backtest/queue_worker.py` _dispatch_run_impl:203 — backtest dispatch (hand-kept twin: api/backtest_routes.py)
 - `backtest/engine/lot_compounding.py` — lot compounding/DD guard/tax for all runners; dte_lots.py
 

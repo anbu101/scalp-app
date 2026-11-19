@@ -427,10 +427,13 @@ class TMA2TickEngine:
     # (b) spot silence in the spot session → drop the protocol so KiteTicker
     # auto-reconnects. sendClose, NOT kws.close() (stop_retry kills the
     # auto-reconnect). Fully wrapped — cannot reach the candle path.
-    WD_SILENT_S = 120
-    WD_POLL_S = 30
+    # ── WS_WATCHDOG_FAST_20261119 ── was 120 s silent / 30 s poll; same numbers
+    # as app/marketdata/ws_watchdog.py (kept literal: this file imports app lazily).
+    WD_SILENT_S = 30
+    WD_POLL_S = 5
     WD_COOLDOWN_S = 90
     WD_BACKOFF_S = 1800
+    WD_OPEN_GRACE_S = 120 - WD_SILENT_S   # first reconnect no earlier than 09:17:00, as before
     CONNECT_AT_MIN = 9 * 60 + 13
 
     @staticmethod
@@ -509,7 +512,7 @@ class TMA2TickEngine:
         if not self._spot_session_at(now):
             return "off_session"
         base = max(self._last_spot_tick_ts, self._last_connect_ts,
-                   float(self._session_open_ts(now)))
+                   float(self._session_open_ts(now)) + self.WD_OPEN_GRACE_S)
         silent = now - base
         if silent < self.WD_SILENT_S:
             return "ok"

@@ -32,6 +32,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from app.event_bus.audit_logger import write_audit_log
+from app.marketdata import ws_watchdog as _WD   # ── WS_WATCHDOG_FAST_20261119 ──
 
 FENCE = "STRATEGY_INDEPENDENCE_20261015"
 FEED_CLIENTS = ("BB_V1", "BB_V2", "HA_V1")
@@ -231,9 +232,10 @@ class SharedTickFeed:
 
     def _tick_watchdog(self):
         """Zombie-socket guard — same rule as ZerodhaTickEngine (2026-06-11):
-        connected + market open + zero ticks for 120s → drop the protocol so
+        connected + market open + zero ticks for SILENT_S → drop the protocol so
         KiteTicker's auto-reconnect heals it."""
-        SILENT_S, POLL_S, COOLDOWN_S, BACKOFF_S = 120, 30, 90, 1800
+        # ── WS_WATCHDOG_FAST_20261119 ── was 120, 30, 90, 1800 (app/marketdata/ws_watchdog.py)
+        SILENT_S, POLL_S, COOLDOWN_S, BACKOFF_S = _WD.OPTION_SILENT_S, _WD.POLL_S, _WD.COOLDOWN_S, _WD.BACKOFF_S
         while True:
             try:
                 time.sleep(POLL_S)
@@ -242,7 +244,7 @@ class SharedTickFeed:
                 base = max(self._last_tick_ts, self._last_connect_ts)
                 if base <= 0:
                     continue
-                silent = time.time() - base
+                silent = time.time() - max(base, _WD.open_floor_ts(time.time(), SILENT_S))
                 if silent < SILENT_S or time.time() - self._last_wd_action_ts < COOLDOWN_S:
                     continue
                 if self._last_tick_ts > self._last_wd_action_ts:

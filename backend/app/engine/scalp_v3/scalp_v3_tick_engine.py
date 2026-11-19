@@ -66,6 +66,7 @@ from app.engine.strategy_engine import StrategyEngine
 from app.engine.condition_engine_v1_9 import ConditionEngineV19
 
 from app.event_bus.audit_logger import write_audit_log
+from app.marketdata import ws_watchdog as _WD   # ── WS_WATCHDOG_FAST_20261119 ──
 from app.fetcher.zerodha_instruments import load_instruments_df
 from app.db import timeline_repo
 
@@ -327,10 +328,11 @@ class ScalpV3TickEngine:
         Fully wrapped — nothing here can affect the tick path; on any error
         the watchdog degrades to a no-op.
         """
-        SILENT_S   = 120    # market open + connected + 0 ticks this long → act
-        POLL_S     = 30
-        COOLDOWN_S = 90     # min gap between actions (covers on_close lag)
-        BACKOFF_S  = 1800   # after 3 fruitless drops, slow to one per 30 min
+        # ── WS_WATCHDOG_FAST_20261119 ── was 120 s silent / 30 s poll (app/marketdata/ws_watchdog.py)
+        SILENT_S   = _WD.OPTION_SILENT_S
+        POLL_S     = _WD.POLL_S
+        COOLDOWN_S = _WD.COOLDOWN_S
+        BACKOFF_S  = _WD.BACKOFF_S
 
         while True:
             try:
@@ -345,7 +347,7 @@ class ScalpV3TickEngine:
                 if baseline <= 0:
                     continue
 
-                silent = time.time() - baseline
+                silent = time.time() - max(baseline, _WD.open_floor_ts(time.time(), SILENT_S))
                 if silent < SILENT_S:
                     continue
                 if time.time() - self._last_wd_action_ts < COOLDOWN_S:
