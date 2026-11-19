@@ -270,6 +270,10 @@ class ICGroupManager:
         self._rt: Dict[str, dict] = {}     # leg_id -> runtime extras
         self._paper = True
         self._mutex = threading.RLock()
+        # ── IC2_HEDGE_RACE_20261119 ── short stop paths still running (between
+        # the leg turning CLOSED and its MTC / adjustment being scheduled).
+        # The hedge-flat check must not sell the wings inside that window.
+        self._stop_inflight = 0
         self._sleep, self._clock = time.sleep, time.time   # ── IC_EXIT_CONFIRM_20261026 ── test-injectable
         self._entry_lock = threading.Lock()
         # ── IC_GROUPING ── per-condor key shared by all legs (incl. ·ADJ).
@@ -1066,7 +1070,18 @@ class ICGroupManager:
             if exiting:
                 return
             self._rt[leg.leg_id]["_exiting"] = True
+            self._stop_inflight += 1          # ── IC2_HEDGE_RACE_20261119 ──
+        try:
+            self._short_stop_path_body(leg, ltp_hint, already_filled_at, escalate)
+        finally:
+            with self._mutex:
+                self._stop_inflight -= 1
 
+    def _short_stop_path_body(self, leg: LegCore, ltp_hint: Optional[float],
+                              already_filled_at: Optional[float], escalate: bool):
+        """── IC2_HEDGE_RACE_20261119 ── the original _short_stop_path body,
+        run while _stop_inflight is held (unchanged logic)."""
+        core = self._core
         if already_filled_at is not None:
             exit_px = already_filled_at
         elif self._paper or self._rt[leg.leg_id].get("phantom"):
@@ -1164,6 +1179,15 @@ class ICGroupManager:
         wings = [l for l in open_legs if not l.is_short and not l.is_adjust]
         if not wings or any(l.is_short for l in open_legs):   # ── IC2_HEDGE_FLAT2_20261117 ──
             return 0
+        with self._mutex:                       # ── IC2_HEDGE_RACE_20261119 ──
+            if self._stop_inflight:
+                # a short's stop is being booked on another thread (GTT
+                # monitor): its adjustment is not armed yet. 19 Nov 2026 live:
+                # the wings were sold in that window, the condor closed and
+                # L1·ADJ was never bought (paper, same thread, was fine).
+                return 0
+            if any(l.is_short for l in core.open_legs()):
+                return 0
         if self._pending_adjust or self._carry_committed or any(l.carried for l in open_legs):
             return 0
         if not self._hedge_flat_enabled(self._cfg()):
@@ -1284,6 +1308,17 @@ class ICGroupManager:
         aid = f"{src_leg_id}A"
         if self._core is not None and aid in self._core.legs:
             write_audit_log(f"[IC][{self.strategy_id}][ADJ] {aid} already exists → not re-armed")
+            return
+        if self._core is not None and self._core.state == G_CLOSED:
+            # ── IC2_HEDGE_RACE_20261119 ── the engine stops calling process_due
+            # once the condor is closed, so this adjustment could never open.
+            write_audit_log(f"[IC][{self.strategy_id}][ADJ][LOST] {src_leg_id} stop exit after the "
+                            f"condor closed — adjustment NOT armed")
+            record_alert("IC_ADJ_DROPPED",
+                         f"{self.strategy_id} adjustment for {src_leg_id} not placed — the condor "
+                         f"was already closed when its stop was booked",
+                         severity="error", strategy_id=self.strategy_id,
+                         mode="paper" if self._paper else "live")
             return
         act_ts = trigger_ts + self._adjust_delay_s(cfg)
         self._pending_adjust[src_leg_id] = act_ts
