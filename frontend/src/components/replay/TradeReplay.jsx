@@ -571,6 +571,69 @@ const WAIT_TONE = { waiting: "secondary", ready: "profit", blocked: "warning", w
                     holding: "profit", near: "warning", exit: "loss" };   // ── TRADE_REPLAY_HOLD_20261030 ── in-trade states
 const WAIT_LABEL = { waiting: "WAITING", ready: "READY", blocked: "BLOCKED", warming: "WARMING UP", timed: "TIMED", unknown: "—",
                      holding: "IN TRADE", near: "EXIT NEAR", exit: "EXIT DUE" };
+// ── LEG_BAR_20261120 ── one bar per open leg ("Tug from entry"): entry is the line in the
+// middle, the bar grows red toward SL or green toward TP, the figure says how far it has gone.
+// SL is always on the left and TP on the right, for buys and sells alike. The SL/TP items it
+// replaces stay in the tooltip.
+const fmtPx = (v) => (Math.abs(v) >= 1000 ? v.toLocaleString("en-IN", { maximumFractionDigits: 1 }) : v.toFixed(2));
+export function legBarState(b) {
+  const span = b.tp - b.sl;
+  if (!span) return null;
+  const raw = (x) => (x - b.sl) / span;
+  const clamp = (x) => Math.max(0, Math.min(1, x));
+  const e = clamp(raw(b.entry)), r = raw(b.ltp), p = clamp(r);
+  const toSL = p < e;
+  const room = toSL ? e : 1 - e;
+  const frac = room > 0 ? Math.min(1, Math.abs(p - e) / room) : 0;
+  return { e, p, toSL, frac, hitSL: r <= 0, hitTP: r >= 1 };
+}
+
+/* fold the SL/TP items that carry a bar into one row per leg; other items stay as they are */
+export function foldLegBars(items) {
+  const out = [], seen = new Map();
+  (items || []).forEach((it) => {
+    if (!it || !it.bar || !it.bar.leg || !legBarState(it.bar)) { out.push({ it }); return; }
+    const k = it.bar.leg;
+    if (seen.has(k)) { seen.get(k).tips.push(it); return; }
+    const row = { bar: it.bar, tips: [it] };
+    seen.set(k, row);
+    out.push(row);
+  });
+  return out;
+}
+
+function LegBar({ bar, tips, compact }) {
+  const st = legBarState(bar);
+  const hue = st.toSL ? colors.loss : colors.profit;
+  const fill = alpha(hue, Math.round(45 + 55 * st.frac));
+  const left = Math.min(st.p, st.e) * 100, width = Math.max(Math.abs(st.p - st.e) * 100, 0.6);
+  const word = st.hitSL ? "SL hit" : st.hitTP ? "TP hit" : `${st.toSL ? "SL" : "TP"} ${Math.round(st.frac * 100)}%`;
+  const title = tips.map((t) => `${t.text}${t.value ? ` — ${t.value}` : ""}`).join("\n");
+  return (
+    <div data-testid="leg-bar" data-leg={bar.leg} data-side={st.toSL ? "sl" : "tp"} data-pct={Math.round(st.frac * 100)} title={title}
+      style={{ flexBasis: "100%", display: "grid", alignItems: "center", columnGap: SPACE.md, rowGap: 2,
+               gridTemplateColumns: compact ? "1fr auto" : "minmax(96px, max-content) 1fr 64px" }}>
+      <span style={{ ...TYPE.body, color: COLOR.ink, fontWeight: 500, whiteSpace: "nowrap" }}>
+        {bar.name}<span style={{ ...TYPE.meta, color: COLOR.muted, fontFamily: MONO, marginLeft: SPACE.sm }}>{fmtPx(bar.ltp)}</span>
+      </span>
+      <div style={{ gridColumn: compact ? "1 / -1" : "auto", gridRow: compact ? 2 : "auto", minWidth: 0 }}>
+        <div style={{ position: "relative", height: 10, borderRadius: 5, background: alpha(colors.text.muted, 18) }}>
+          <div style={{ position: "absolute", top: 0, bottom: 0, left: `${left}%`, width: `${width}%`, background: fill,
+                        borderRadius: 5 }} />
+          <div aria-hidden="true" style={{ position: "absolute", top: -3, bottom: -3, left: `${st.e * 100}%`, width: 2,
+                        transform: "translateX(-1px)", background: COLOR.ink, opacity: 0.75, borderRadius: 1 }} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2, ...TYPE.meta, fontFamily: MONO, color: COLOR.muted }}>
+          <span>SL {fmtPx(bar.sl)}</span>
+          <span>{bar.tp_label === "TP" ? `TP ${fmtPx(bar.tp)}` : bar.tp_label === "0" ? "0" : `+1R ${fmtPx(bar.tp)}`}</span>
+        </div>
+      </div>
+      <span data-testid="leg-bar-pct" style={{ ...TYPE.body, fontFamily: MONO, textAlign: "right", whiteSpace: "nowrap",
+                    color: st.hitSL || st.toSL ? colors.loss : colors.profit, fontWeight: st.hitSL || st.hitTP ? 600 : 400 }}>{word}</span>
+    </div>
+  );
+}
+
 export function WaitingPanel({ w, compact = false }) {   // ── PHONE_METER_20261117 ── exported; compact = phone (stacked)
   if (!w || !w.headline) return null;
   const toneKey = WAIT_TONE[w.status] || "secondary";
@@ -596,7 +659,8 @@ export function WaitingPanel({ w, compact = false }) {   // ── PHONE_METER_2
       </div>
       {(w.items || []).length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: compact ? `${SPACE.sm}px 0` : `${SPACE.xs}px ${SPACE.lg}px` }}>
-          {w.items.map((it, i) => {
+          {foldLegBars(w.items).map(({ it, bar, tips }, i) => {   // ── LEG_BAR_20261120 ──
+            if (bar) return <LegBar key={`bar-${bar.leg}`} bar={bar} tips={tips} compact={compact} />;
             const c = it.ok === true ? colors.profit : it.ok === false ? colors.loss : COLOR.muted;
             return (
               compact ? (   /* ── PHONE_METER_20261117 ── one condition per row, its value under it */

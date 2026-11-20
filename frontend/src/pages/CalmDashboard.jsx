@@ -15,7 +15,7 @@
  * Data: GET /api/fleet/today (5 s) for the books and rows — the same feed the
  * Classic page reads; GET /api/replay/meters (admin) for every card's meter.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { useMarketData } from "../context/MarketDataContext";
@@ -51,8 +51,18 @@ function sessionText(nowMin) {
 }
 const clockNow = () => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
 
+/* ── CARD_ORDER_20261120 ── fixed card order: in a trade first, then traded-and-closed; waiting
+   (idle) cards come after both. Inside a group by name, so a card never moves when P/L changes. */
+const byName = (nameOf) => (a, b) => nameOf(a.id).localeCompare(nameOf(b.id), undefined, { sensitivity: "base" });
+const cardGroup = (c) => (c.row.state === "OPEN" || c.twin?.state === "OPEN" ? 0 : 1);
+export function orderCards(cards, nameOf) {
+  const n = byName(nameOf);
+  return [...cards].sort((a, b) => cardGroup(a) - cardGroup(b) || n(a, b));
+}
+export const orderIdle = (idle, nameOf) => [...idle].sort(byName(nameOf));
+
 /* one card per strategy: its Live and Paper rows together (the shown book chosen by the filter) */
-function buildCards(rows, filter) {
+function buildCards(rows, filter, nameOf) {
   const by = new Map();
   rows.forEach((r) => {
     const g = by.get(r.id) || { id: r.id, live: null, paper: null };
@@ -66,7 +76,7 @@ function buildCards(rows, filter) {
     const twin = row === g.live ? g.paper : g.live;
     out.push({ id: g.id, row, twin, books: g.live && g.paper ? "Live + Paper" : g.live ? "Live" : "Paper" });
   });
-  return out.sort((a, b) => Math.abs(b.row.gross || 0) - Math.abs(a.row.gross || 0));
+  return orderCards(out, nameOf);   // ── CARD_ORDER_20261120 ── was: biggest |P/L| first (cards jumped around)
 }
 
 export default function CalmDashboard() {
@@ -125,11 +135,12 @@ export default function CalmDashboard() {
 
   const rows = data?.strategies || [];
   const sv = useStrategyVisibility();
-  const idle = (data?.idle || []).filter((r) => !sv.isHidden(r.id) && r.mode !== "OFF");
+  const nameOf = useCallback((id) => stratName(id, isAdminUi, META[id]?.name), [isAdminUi]);   // ── CARD_ORDER_20261120 ──
+  const idle = useMemo(() => orderIdle((data?.idle || []).filter((r) => !sv.isHidden(r.id) && r.mode !== "OFF"), nameOf), [data, sv, nameOf]);
   const shownFocus = sv.isHidden(focusId) ? (rows[0]?.id || idle[0]?.id || null) : focusId;
   const both = !!(data?.totals?.LIVE?.rows > 0 && data?.totals?.PAPER?.rows > 0);
   const f = both ? filter : "ALL";
-  const cards = useMemo(() => buildCards(rows, f), [rows, f]);
+  const cards = useMemo(() => buildCards(rows, f, nameOf), [rows, f, nameOf]);
 
   const meterIds = useMemo(() => [...new Set([...rows.filter((r) => r.state === "OPEN").map((r) => r.id), ...idle.map((r) => r.id)])], [rows, idle]);
   const meters = useMeters(meterIds, { enabled: isAdminUi, fast: !!open, session: inSession(nowMin) });

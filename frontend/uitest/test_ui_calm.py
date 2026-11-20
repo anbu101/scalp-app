@@ -97,8 +97,9 @@ with sync_playwright() as p:
     check("TC-CALM-0006", lines == 2 and "Now 13:05" in endlbl and "09:15" in endlbl, f"chart: Live + Paper lines, axis 09:15 → Now 13:05 ({lines} lines)")
     cs = cards(pg)
     ids = [c["id"] for c in cs if not c["idle"]]
-    check("TC-CALM-0007", ids == ["IC_V2", "TMA_V2", "TSG_V1", "VET_V1", "ORB_V1"] and [c["id"] for c in cs if c["idle"]] == ["EMC_V1", "BRK_V1"],
-          f"one card per strategy (TMA Live + Paper share one), biggest move first, then the waiting ones ({ids})")
+    # ── CARD_ORDER_20261120 ── in a trade first, then closed, then waiting; by name inside each group
+    check("TC-CALM-0007", ids == ["IC_V2", "TSG_V1", "TMA_V2", "ORB_V1", "VET_V1"] and [c["id"] for c in cs if c["idle"]] == ["BRK_V1", "EMC_V1"],
+          f"one card per strategy (TMA Live + Paper share one): in a trade, then closed, then waiting, by name in each group ({ids})")
     tma = next(c for c in cs if c["id"] == "TMA_V2")
     check("TC-CALM-0008", "Live + Paper" in tma["text"] and "Paper twin +₹6,410" in tma["text"] and "+₹6,240" in tma["text"],
           "TMA card: Live figure big, Paper twin under it")
@@ -246,6 +247,21 @@ with sync_playwright() as p:
               f"{w} px screen: content fills the width (sides {m['firstL']:.0f} / {m['w'] - m['lastR']:.0f} px), 4 equal columns, no empty column on the right ({m})")
         errs += pg._errors
         ctx.close()
+    # ── CARD_ORDER_20261120: P/L never moves a card. A closed strategy with the biggest P/L stays after
+    # every open one, and swapping the open ones' P/L leaves their order as it was.
+    import copy
+    flip = copy.deepcopy(FLEET)
+    big = {"ORB_V1": 95000, "VET_V1": -88000, "TSG_V1": -52000, "IC_V2": 10, "TMA_V2": 30000}
+    for r in flip["strategies"]:
+        r["gross"] = r["net"] = big[r["id"]]
+    ctx, pg = open_dash(b, fleet=flip)
+    pg.wait_for_selector("[data-testid=calm-card]", timeout=60000)
+    pg.wait_for_timeout(800)
+    ids2 = [c["id"] for c in cards(pg) if not c["idle"]]
+    check("TC-CALM-0041", ids2 == ["IC_V2", "TSG_V1", "TMA_V2", "ORB_V1", "VET_V1"],
+          f"cards keep their places when P/L changes: open ones first even when a closed one moved most ({ids2})")
+    errs += pg._errors
+    ctx.close()
     check("TC-CALM-0023", not errs, f"no page errors ({errs[:2]})")
     b.close()
 

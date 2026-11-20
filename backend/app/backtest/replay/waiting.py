@@ -55,6 +55,29 @@ def _item(text: str, ok=None, value: Optional[str] = None) -> dict:
     return {"text": text, "ok": ok, "value": value}
 
 
+# ── LEG_BAR_20261120 ── the numbers behind a leg's SL/TP items, for the panel's bar
+# (Tug from entry: entry in the middle, red toward SL, green toward TP). Every SL/TP
+# item of one leg carries the same bar (same "leg" key); the text stays for tooltips,
+# the meter score and old clients. "tp" is the right end: the TP, else 0 for a sold
+# option (full decay), else one risk unit past entry ("+1R").
+def _bar(leg: str, name: str, sl, tp, entry, ltp, short_option: bool = False) -> Optional[dict]:
+    try:
+        sl = float(sl) if sl else None
+        entry, ltp = float(entry), float(ltp)
+    except (TypeError, ValueError):
+        return None
+    if sl is None or sl == entry:
+        return None
+    if tp:
+        end, lab = float(tp), "TP"
+    elif short_option:
+        end, lab = 0.0, "0"
+    else:
+        end, lab = entry + (entry - sl), "+1R"
+    return {"leg": leg, "name": name, "sl": round(sl, 2), "tp": round(end, 2), "tp_label": lab,
+            "entry": round(entry, 2), "ltp": round(ltp, 2)}
+
+
 def _sell_spread(cfg: dict, buy_key: str = "buy") -> bool:
     """TMA live configs: a slot with main/sell + hedge/buy = the credit spread."""
     for slot in ("s1", "c1", "c2"):
@@ -484,6 +507,7 @@ def _lvb(ctx, now: int, forming_ts: Optional[int]) -> dict:
         items = []
         breached = False
         worst = 0.0
+        bar = _bar("spot", "NIFTY spot", c.get("sl_spot"), c.get("tp_spot"), es, spot)   # ── LEG_BAR_20261120 ──
         for k, key in (("SL", "sl_spot"), ("TP", "tp_spot")):
             v = c.get(key)
             if v is None:
@@ -497,6 +521,8 @@ def _lvb(ctx, now: int, forming_ts: Optional[int]) -> dict:
                 worst, breached = used, breached or dist <= 0
             items.append(_item(f"{k} spot {v:,.1f}", (dist > 0) if k == "SL" else None,
                                f"{abs(dist):,.1f} {'away' if dist > 0 else 'THROUGH'} · {used * 100:.0f}% of the way"))
+            if bar:
+                items[-1]["bar"] = bar   # ── LEG_BAR_20261120 ──
         items.append(_item(f"EOD {c.get('eod') or '15:15'}", None))
         out.update({"mode": "hold", "items": items,
                     "status": _status("holding", worst >= NEAR_USED, breached),
@@ -619,6 +645,8 @@ def _sltp(ctx, legs: List[dict], ltp: Dict[str, float]):
             continue
         px = _last_px(ctx, t, ltp)
         short, ep = t["direction"] == "SHORT", float(t["entry_price"])
+        bar = (_bar(t["tradingsymbol"], _leg_name(t), t.get("sl"), t.get("tp"), ep, px, short_option=short)
+               if px is not None else None)   # ── LEG_BAR_20261120 ──
         for k in ("sl", "tp"):
             lv = t.get(k)
             if not lv:
@@ -636,6 +664,8 @@ def _sltp(ctx, legs: List[dict], ltp: Dict[str, float]):
             items.append(_item(f"{k.upper()} {lv:,.2f} · {_leg_name(t)} (LTP {px:,.2f})",
                                (dist > 0) if k == "sl" else None,
                                f"{abs(dist):,.2f} {'away' if dist > 0 else 'THROUGH'} · {used * 100:.0f}% of the way"))
+            if bar:
+                items[-1]["bar"] = bar   # ── LEG_BAR_20261120 ──
     return items, worst, breached
 
 

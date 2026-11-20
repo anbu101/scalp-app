@@ -740,6 +740,11 @@ check("TMA_V2: XOVER ✓/✗ follows the position's side (E1 → exit when EMA13
 sl = [x for x in h["items"] if x["text"].startswith("SL ")][0]
 check("TMA_V2: SL against the live LTP — distance and share of the way",
       sl["ok"] is True and sl["value"].startswith(f"{_ep * 1.3 - _ep * 1.2:,.2f} away") and "67% of the way" in sl["value"], (sl, _ep))
+# ── LEG_BAR_20261120 ── the SL item carries the numbers for the panel's bar
+_b = sl.get("bar") or {}
+check("TC-LEGBAR-0001 TMA_V2: SL item carries a bar — SL, entry and LTP of the leg; sold leg without TP ends at 0",
+      _b.get("sl") == round(_ep * 1.3, 2) and _b.get("entry") == round(_ep, 2) and _b.get("ltp") == round(_ep * 1.2, 2)
+      and _b.get("leg") and _b.get("name") and (_b.get("tp_label") == "TP" or (_b.get("tp_label") == "0" and _b.get("tp") == 0)), (_b, _ep))
 check("TMA_V2: status exit when XOVER is met on the last closed bar, else holding/near",
       h["status"] == ("exit" if gap >= 0 else h["status"]) and h["status"] in ("holding", "near", "exit"), h["status"])
 check("TMA_V2: provisional line on the forming bar's XOVER", "XOVER" in (h.get("provisional") or ""), h.get("provisional"))
@@ -782,6 +787,12 @@ check("EMC open: SL / TP / EOD items", any(x["text"].startswith("SL ") for x in 
 sl = [x for x in h["items"] if x["text"].startswith("SL ")][0]
 check("EMC: long SL 31 below entry, LTP 10 below → 21 away, 32% of the way", sl["value"].startswith("21.00 away")
       and "32% of the way" in sl["value"], sl)
+# ── LEG_BAR_20261120
+_tp = [x for x in h["items"] if x["text"].startswith("TP ")][0]
+_b = sl.get("bar") or {}
+check("TC-LEGBAR-0002 EMC: SL and TP items of one leg carry the same bar (SL −31, TP +100, LTP −10, entry)",
+      _b and _b == _tp.get("bar") and _b["sl"] == round(_emc_ep - 31, 2) and _b["tp"] == round(_emc_ep + 100, 2)
+      and _b["tp_label"] == "TP" and _b["ltp"] == round(_emc_ep - 10, 2) and _b["entry"] == round(_emc_ep, 2), (_b, _tp))
 check("EMC: XOVER item (if xover_exit on) = the chart's spot EMA gap", (not xo) or xo[0]["value"] == f"{egap:+,.1f}", (xo, egap))
 # TSG open strangle (4 legs, 25 Feb 09:16) — time exit + basket MTM
 _live25 = [k for k in ("atm_ce", "atm_pe", "cew", "pew", "ce", "pe")
@@ -976,6 +987,14 @@ check("live_cfg never seeds a missing strategy file", (LR.live_cfg("ORB_V1")[1] 
 check("VET signal_tf aliased to timeframe_minutes", LR.live_cfg("VET_V1")[0].get("timeframe_minutes") == 5)
 
 print(f"\n{PASSES[0]} passed, {len(FAILS)} failed")
+# ── LEG_BAR_20261120 ── _bar on its own: the right end when a leg has no TP, and no bar without an SL
+from app.backtest.replay.waiting import _bar as _legbar
+_s = _legbar("X", "S 25300PE", 127.37, None, 63.69, 61.40, short_option=True)
+_l = _legbar("Y", "B 25600CE", 60.83, None, 86.90, 84.40)
+check("TC-LEGBAR-0003 bar: a sold option with no TP ends at 0 (full decay); a bought one at +1R past entry",
+      _s["tp"] == 0 and _s["tp_label"] == "0" and _l["tp"] == round(86.90 + (86.90 - 60.83), 2) and _l["tp_label"] == "+1R", (_s, _l))
+check("TC-LEGBAR-0004 bar: no SL, or SL at entry → no bar (the text item stays)",
+      _legbar("Z", "z", None, 50, 40, 41) is None and _legbar("Z", "z", 40, 50, 40, 41) is None and _legbar("Z", "z", 0, 50, 40, 41) is None)
 if FAILS:
     print("FAILED:", FAILS)
     sys.exit(1)
