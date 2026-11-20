@@ -5,7 +5,7 @@
 // cards are gone). Live is the hero when it traded today, Paper otherwise; with both, the other
 // book sits beside it, smaller — never summed.
 // Phone: a Live | Paper switch picks the hero book.
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { INDEX_KEYS } from "./useIndexPaths";   // ── INDEX_PATH_20261117 ──
 import { C, T, SP, RADIUS, tone } from "./calm";
 import { fmtInr } from "../fleet/fleetFormat";
@@ -167,6 +167,24 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
   const [period, setPeriod] = useState("today");
   const [pick, setPick] = useState(null);
   const [on, setOn] = useState(() => { try { const v = JSON.parse(localStorage.getItem(OVERLAY_KEY) || '["NIFTY"]'); return Array.isArray(v) ? v : ["NIFTY"]; } catch { return ["NIFTY"]; } });
+  // ── HERO_FIT_20261120 ── the chart's plot is as tall as the left column (MTM, closed / open line,
+  // tickers), so the tickers' bottom sits level with the chart's baseline. Only when the two columns
+  // are side by side on desktop; otherwise (phone, narrow window, the Ready panel beside it) 268 px.
+  const leftRef = useRef(null), rightRef = useRef(null);
+  const [fitH, setFitH] = useState(null);
+  useLayoutEffect(() => {
+    const l = leftRef.current, r = rightRef.current;
+    if (!l || !r || compact || aside) { setFitH(null); return undefined; }
+    const measure = () => {
+      const L = l.getBoundingClientRect(), R = r.getBoundingClientRect();
+      const side = R.left >= L.right - 1;
+      setFitH(side ? Math.max(180, Math.min(360, Math.round(L.height))) : null);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(l); ro.observe(r);
+    return () => ro.disconnect();
+  }, [compact, aside, traded.length > 0]);   // the refs exist only in the traded hero; ResizeObserver handles the rest
   const toggle = (k) => setOn((o) => { const n = o.includes(k) ? o.filter((x) => x !== k) : [...o, k]; try { localStorage.setItem(OVERLAY_KEY, JSON.stringify(n)); } catch {} return n; });
   const overlays = on.filter((k) => market?.[k]?.prev && (market[k].path || []).length > 1)
     .map((k) => ({ key: k, label: k, color: INDEX_COLOR[k], prev: market[k].prev, path: market[k].path }));
@@ -182,7 +200,8 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
     color: b === heroBook ? tone(totals[b].gross) : C.muted, dash: b !== heroBook,
   }));
 
-  const bigStyle = compact ? T.heroSm : T.hero;
+  // ── HERO_FIT_20261120 ── desktop: the MTM at 80 px (phone keeps T.heroSm)
+  const bigStyle = compact ? T.heroSm : { ...T.hero, fontSize: 80, lineHeight: "84px" };
   // ── WEEK_ON_DATELINE_20261120 ── the Today / This week / This month cards are gone: the big number
   // already is today, and Week / Month sit on the date line as text. Clicking one shows that period's
   // net in the big number (accent underline); clicking it again goes back to today.
@@ -224,7 +243,7 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
   }
 
   const left = (
-    <div style={{ flex: compact ? "1 1 auto" : "1 1 460px", minWidth: compact ? 0 : 300, maxWidth: compact ? undefined : 620, display: "flex", flexDirection: "column", gap: compact ? SP.md : SP.lg }}>
+    <div ref={leftRef} style={{ alignSelf: compact ? undefined : "flex-start", flex: compact ? "1 1 auto" : "1 1 460px", minWidth: compact ? 0 : 300, maxWidth: compact ? undefined : 620, display: "flex", flexDirection: "column", gap: compact ? SP.md : SP.lg }}>
       {compact ? dl(periodLinks) : null}   {/* desktop: the date line spans the hero, above both columns */}
       {compact && both && (
         <div role="group" aria-label="Book" style={{ display: "flex", gap: SP.sm }}>
@@ -266,10 +285,10 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
       {/* ── WEEK_ON_DATELINE_20261120 ── full width on desktop, so "closes in …  · Week … Month …  Broker check …" fits one line */}
       {!compact && <div style={{ flexBasis: "100%", minWidth: 0 }}>{dl(periodLinks)}</div>}
       {left}
-      <div style={{ flex: compact ? "1 1 auto" : "999 1 480px", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: aside ? "flex-start" : "flex-end", gap: SP.md }}>
+      <div ref={rightRef} style={{ flex: compact ? "1 1 auto" : "999 1 480px", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: aside ? "flex-start" : "flex-end", gap: SP.md }}>
         {aside ? <div style={{ display: "flex" }}>{aside}</div> : null}   {/* ── READY_HERO_FIT_20261119 ── row wrapper: the panel's flex size is a width, not a height */}
         {compact ? chips : null}   {/* ── TICKERS_UNDER_20261120 ── desktop: under the period cards; the chart takes their old row (220 → 268 px) */}
-        {aside && !lines.some((l) => l.path.length > 1) && !overlays.length ? null : <CalmChart lines={lines} overlays={overlays} nowMin={nowMin} height={compact ? 120 : 268} compact={compact} />}
+        {aside && !lines.some((l) => l.path.length > 1) && !overlays.length ? null : <CalmChart lines={lines} overlays={overlays} nowMin={nowMin} height={compact ? 120 : (fitH || 268)} compact={compact} />}
       </div>
     </section>
   );

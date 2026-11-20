@@ -151,6 +151,14 @@ with sync_playwright() as p:
           f"1440 px: NIFTY and BANKNIFTY side by side under the closed / open line, left edge on the column's, chart to the right ({g['nifty']}, {g['split']})")
     check("TC-IDX-0026", g["svgs"] == 0 and g["dashes"] == 0,
           f"no dash and no mini line on the moved chips ({g['svgs']} svg, {g['dashes']} dashes)")
+    # ── HERO_FIT_20261120: MTM 80 px, the closed / open line stays 17 px, and the chart's plot is as tall as the
+    # left column, so the tickers' bottom is level with the chart's baseline (was 88 px above it at 1333 px)
+    fit = pg.evaluate("""(() => { const r = (s) => document.querySelector(s).getBoundingClientRect();
+      return { chips: r('[data-testid=calm-index-chips]').bottom, plot: r('[data-testid=calm-chart] > div').bottom,
+               fig: getComputedStyle(document.querySelector('[data-testid=calm-hero-figure]')).fontSize,
+               split: getComputedStyle(document.querySelector('[data-testid=calm-hero-split]')).fontSize }; })()""")
+    check("TC-IDX-0027", abs(fit["chips"] - fit["plot"]) <= 2 and fit["fig"] == "80px" and fit["split"] == "17px",
+          f"1440 px: tickers' bottom level with the chart baseline, MTM 80 px, closed / open line 17 px ({fit})")
     errs += pg._errors
     ctx.close()
     check("TC-IDX-0011", not errs, f"no page errors ({errs[:2]})")
