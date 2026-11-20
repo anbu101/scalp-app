@@ -132,6 +132,25 @@ with sync_playwright() as p:
     ok = all(v["today"] == v["acc"] and v["nifty"] == v["acc"] and v["week"] != v["acc"] and v["bank"] != v["acc"] and v["fAll"] == v["acc"] and v["fLive"] != v["acc"] for v in seen.values())
     check("TC-IDX-0024", ok and len({v["acc"] for v in seen.values()}) >= 2,
           f"selected Today tab, NIFTY chip and All filter take the theme's accent colour, unselected ones don't ({ {k: (v['acc'], v['today'], v['nifty']) for k, v in seen.items()} })")
+    # ── TICKERS_UNDER_20261120: desktop traded hero — the chips sit under the period cards, side by side,
+    # no dash and no mini line, their text lined up with the cards' text; the chart fills the right column
+    ctx, pg = open_dash(b)
+    pg.wait_for_selector("[data-testid=calm-index-chips] [data-index=NIFTY]", timeout=60000)
+    pg.wait_for_timeout(1200)
+    g = pg.evaluate("""(() => { const r = (s) => document.querySelector(s).getBoundingClientRect();
+      const txt = (el) => { const x = document.createRange(); x.selectNodeContents(el); return x.getClientRects()[0].left; };
+      const box = document.querySelector('[data-testid=calm-index-chips]');
+      return { place: box.dataset.place, today: r('[data-period=today]'), month: r('[data-period=month]'), nifty: r('[data-index=NIFTY]'), bank: r('[data-index=BANKNIFTY]'),
+               chart: r('[data-testid=calm-chart]'), todayText: txt(document.querySelector('[data-period=today] span')),
+               niftyText: txt(document.querySelector('[data-index=NIFTY] b')), svgs: box.querySelectorAll('svg').length,
+               dashes: [...box.querySelectorAll('span')].filter(s => getComputedStyle(s).borderTopStyle === 'dashed').length }; })()""")
+    check("TC-IDX-0025", g["place"] == "under" and g["nifty"]["top"] >= g["today"]["bottom"] and abs(g["nifty"]["left"] - g["today"]["left"]) < 1
+          and abs(g["nifty"]["top"] - g["bank"]["top"]) < 1 and g["bank"]["left"] > g["nifty"]["right"] and g["chart"]["left"] > g["month"]["right"],
+          f"1440 px: NIFTY and BANKNIFTY side by side under the period cards, left edges lined up, chart to the right ({g['nifty']}, {g['today']})")
+    check("TC-IDX-0026", g["svgs"] == 0 and g["dashes"] == 0 and abs(g["niftyText"] - g["todayText"]) < 1.5,
+          f"no dash and no mini line on the moved chips; 'NIFTY' starts where 'Today' does ({g['niftyText']:.1f} vs {g['todayText']:.1f})")
+    errs += pg._errors
+    ctx.close()
     check("TC-IDX-0011", not errs, f"no page errors ({errs[:2]})")
     b.close()
 

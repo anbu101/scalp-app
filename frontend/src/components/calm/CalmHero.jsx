@@ -104,10 +104,14 @@ function Mini({ path, prev, up }) {
   );
 }
 
-function IndexChips({ market, on, toggle, compact, start = false }) {   // ── INDEX_LEFT_20261118 ── start: left-align (pre-open hero)
+// ── TICKERS_UNDER_20261120 ── under: the desktop traded hero puts the chips under the Today /
+// This week / This month cards, side by side, without the dash or the mini line, and with the
+// cards' 16 px inner padding so their text lines up with the cards' (the chart's footer still
+// names the dashed index; the selected chip keeps its accent outline)
+function IndexChips({ market, on, toggle, compact, start = false, under = false }) {   // ── INDEX_LEFT_20261118 ── start: left-align (pre-open hero)
   return (
-    <div role="group" aria-label="Show an index on the chart" data-testid="calm-index-chips"
-      style={{ display: "flex", gap: SP.sm, flexWrap: "wrap", justifyContent: compact || start ? "flex-start" : "flex-end", minWidth: 0, maxWidth: "100%" }}>
+    <div role="group" aria-label="Show an index on the chart" data-testid="calm-index-chips" data-place={under ? "under" : undefined}
+      style={{ display: "flex", gap: SP.sm, flexWrap: "wrap", justifyContent: compact || start || under ? "flex-start" : "flex-end", minWidth: 0, maxWidth: "100%" }}>
       {INDEX_KEYS.map((k) => {
         const m = market?.[k] || {};
         if (m.ltp == null) return null;
@@ -117,14 +121,14 @@ function IndexChips({ market, on, toggle, compact, start = false }) {   // ─�
         return (
           <button key={k} type="button" aria-pressed={sel} data-index={k} onClick={() => toggle(k)}
             title={sel ? `Hide ${k} from the chart` : `Draw ${k}'s move behind your MTM line`}
-            style={{ display: "inline-flex", alignItems: "center", gap: SP.sm, flexShrink: 0, minHeight: 36, cursor: "pointer", font: "inherit",
-              ...T.meta, fontSize: 13, color: C.ink, borderRadius: RADIUS.pill, padding: `${SP.xs + 2}px ${SP.md + 2}px`,
+            style={{ display: "inline-flex", alignItems: "center", gap: under ? 6 : SP.sm, flexShrink: 0, minHeight: 36, cursor: "pointer", font: "inherit",
+              ...T.meta, fontSize: 13, color: C.ink, borderRadius: RADIUS.pill, padding: `${SP.xs + 2}px ${under ? SP.lg : SP.md + 2}px`,
               background: sel ? C.surface : "transparent", border: `1px solid ${sel ? C.accent : C.line}`, boxShadow: sel ? `inset 0 0 0 1px ${C.accent}` : "none" }}>   {/* ── SELECT_ACCENT_20261117 ── theme accent, like the selected card */}
-            <span aria-hidden="true" style={{ width: 14, borderTop: `2px dashed ${sel ? INDEX_COLOR[k] : C.muted}` }} />
+            {!under && <span aria-hidden="true" style={{ width: 14, borderTop: `2px dashed ${sel ? INDEX_COLOR[k] : C.muted}` }} />}
             <b style={{ fontWeight: 600 }}>{k}</b>
             <span style={{ ...T.num }}>{fmtPx(m.ltp)}</span>
             {chg != null && <span style={{ ...T.num, fontWeight: 600, color: up ? C.up : C.down }}>{chg >= 0 ? "+" : "−"}{Math.abs(chg).toFixed(2)}%</span>}
-            {!compact && <Mini path={m.path} prev={m.prev} up={up} />}
+            {!compact && !under && <Mini path={m.path} prev={m.prev} up={up} />}
           </button>
         );
       })}
@@ -251,6 +255,7 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
       {period === "today" ? <HeroSplit t={t} both={both} compact={compact} />   /* ── HERO_SPLIT_20261120 ── */
         : <p data-testid="calm-hero-sentence" style={{ margin: 0, ...(compact ? T.body : T.lead), color: C.sub, maxWidth: 480 }}>{sentence(heroBook, t, period, both)}</p>}
       {!compact && tabs}
+      {!compact && market ? <IndexChips market={market} on={on} toggle={toggle} under /> : null}   {/* ── TICKERS_UNDER_20261120 ── */}
     </div>
   );
 
@@ -260,8 +265,8 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
       {compact && tabs}
       <div style={{ flex: compact ? "1 1 auto" : "999 1 480px", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: aside ? "flex-start" : "flex-end", gap: SP.md }}>
         {aside ? <div style={{ display: "flex" }}>{aside}</div> : null}   {/* ── READY_HERO_FIT_20261119 ── row wrapper: the panel's flex size is a width, not a height */}
-        {chips}
-        {aside && !lines.some((l) => l.path.length > 1) && !overlays.length ? null : <CalmChart lines={lines} overlays={overlays} nowMin={nowMin} height={compact ? 120 : 220} compact={compact} />}
+        {compact ? chips : null}   {/* ── TICKERS_UNDER_20261120 ── desktop: under the period cards; the chart takes their old row (220 → 268 px) */}
+        {aside && !lines.some((l) => l.path.length > 1) && !overlays.length ? null : <CalmChart lines={lines} overlays={overlays} nowMin={nowMin} height={compact ? 120 : 268} compact={compact} />}
       </div>
     </section>
   );
