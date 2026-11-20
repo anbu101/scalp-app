@@ -1,128 +1,102 @@
-# Soundtrack for reel-arcade (vertical feature reel), 26 s, 120 BPM, A minor — punchier than the landscape
-# cut: distorted four-on-the-floor kick, clap + snare, 16th hats, pumping off-beat bass, sidechained
-# supersaw chords, a square-wave chiptune lead (doubled from 14 s), half-beat silences before the drops
-# at 2 / 10 / 18 s, and an impact + stab on every headline slam of the video.
+# Soundtrack for reel-arcade (vertical feature reel), 26 s, 120 BPM, A minor — the Mass trailer's sound
+# (music/trailer-mass.py: syncopated kick, toms, claps, 16th shaker, 808 with slides, saw riff, brass
+# stabs + booms, the app's own target-hit whistle) re-timed to this video. Every hit sits on the beat
+# grid, at the same times the video's slams do (reel-arcade.jsx). Pre-drop gaps before 2 / 10 / 18 s.
 # fence: PROMO_ARCADE_20261120
-import sys, numpy as np
+import sys, wave, numpy as np
 from synthlib import *
-D = 26.0; m = Mix(D, seed=11); r = m.rng; B = 0.5
+D = 26.0; m = Mix(D, seed=5); r = m.rng; B = 0.5
 GROOVE = (2.0, 22.0)
-GAPS = [(1.75, 2.0), (9.75, 10.0), (17.75, 18.0)]          # pre-drop silences
+GAPS = [(1.75, 2.0), (9.75, 10.0), (17.75, 18.0)]
 def gap(t): return any(a <= t < b for a, b in GAPS)
-CH = [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]]   # Am F C G, a bar (2 s) each
-ROOT = [45, 41, 48, 43]
-def bar(t): return int(t // 2.0) % 4
-def sq(f, n, duty=0.5):
-    tt = np.arange(n) / SR; ph = (tt * f) % 1.0
-    return np.where(ph < duty, 1.0, -1.0)
+ROOT = [45, 41, 43, 40]
 
-# ── kick: hard, a touch of drive; quarter notes through the groove
-def hard_kick():
-    k = kick(r, int(0.42 * SR), 190, 46, 0.17)
-    return np.tanh(2.2 * k)
-kicks = [GROOVE[0] + i * B for i in range(int((GROOVE[1] - GROOVE[0]) / B))]
-for kt in kicks:
-    if not gap(kt): m.add(hard_kick(), kt, 0.95)
-# sidechain curve from the kicks
-N = m.N; duck = np.ones(N)
-for kt in kicks:
-    if gap(kt): continue
-    i = int(kt * SR); n = int(0.3 * SR); j = min(N, i + n)
-    duck[i:j] = np.minimum(duck[i:j], 0.2 + 0.8 * (np.arange(j - i) / n) ** 0.6)
+# ── on-screen hits (seconds), (time, weight): weight >= 1 gets the full chord stab
+HITS = [(0.5, 1), (0.75, .7),                                   # ON / AUTOPILOT.
+        (2.0, 1.3), (2.25, .7),                                 # TRADES / ITSELF.
+        (6.0, 1.2), (6.25, .7), (7.0, .6), (7.5, .6), (8.0, .6),  # SLICK / EXECUTION. + three tiles
+        (10.0, 1.4), (10.25, .8), (10.5, .7),                   # 6+ / YEARS / BACKTESTED
+        (14.0, 1.2), (14.5, .8),                                # COMPOUNDING / switch on
+        (18.0, 1.3), (18.25, .7),                               # EVERY TRADE, / IN TELEGRAM.
+        (22.0, 1.5), (22.25, .8), (22.5, .8)]                   # ⚡ / SCALP / TERMINAL
 
-# ── clap + snare on 2 & 4, 16th hats with accents, open hat on the off-beats
+# ── groove 2 → 22: the Mass trailer's syncopated kick, toms, claps on 2 & 4, 16th shaker
+kpat = [1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 0]       # 16ths over a bar (2 s)
 t = GROOVE[0]; i = 0
-while t < GROOVE[1]:
+while t < GROOVE[1] - 1e-9:
+    s16 = i % 16
     if not gap(t):
-        s16 = i % 8
-        if s16 == 4:
-            m.add(noise_hit(r, int(0.3 * SR), 0.09, 900), t, 0.34)
-            m.add(kick(r, int(0.2 * SR), 240, 180, 0.05), t, 0.25)
-        if s16 == 2 or s16 == 6: m.add(noise_hit(r, int(0.18 * SR), 0.05, 6000), t, 0.09, pan=-0.25)
-        m.add(noise_hit(r, int(0.04 * SR), 0.01, 8000), t, 0.10 if i % 2 else 0.05, pan=0.3)
+        if kpat[s16]: m.add(kick(r, f0=170, f1=48, d=0.16), t, 0.85)
+        if s16 in (4, 12): m.add(noise_hit(r, int(0.25 * SR), 0.07, 1000), t, 0.30)
+        if s16 in (14, 15) and int((t - 2) // 2) % 2 == 1: m.add(kick(r, int(0.3 * SR), 260, 140, 0.09), t, 0.32, pan=0.3)   # tom fill every other bar
+        m.add(noise_hit(r, int(0.05 * SR), 0.012, 7000), t, 0.07 if i % 2 else 0.11, pan=0.3)
     t += B / 4; i += 1
-# hook: tight hat ticks building, then a 4-hit tom roll into 2.0
-for k in range(12):
-    m.add(noise_hit(r, int(0.04 * SR), 0.01, 8000), 0.25 + k * B / 4, 0.03 + 0.006 * k, pan=0.2)
-for k, tt0 in enumerate([1.5, 1.625, 1.75 - 0.0001]):
-    m.add(kick(r, int(0.25 * SR), 280 - 30 * k, 130, 0.08), tt0, 0.3 + 0.1 * k)
-
-# ── bass: pumping off-beat saw + sub on the beat
+# hook 0 → 1.75: half-time toms
+for k in range(4):
+    m.add(kick(r, int(0.4 * SR), 220, 90, 0.14), k * B, 0.4)
+# ── 808 bass, 8ths, with a slide into each note
 t = GROOVE[0]
-while t < GROOVE[1]:
+while t < GROOVE[1] - 1e-9:
     if not gap(t):
-        f = hz(ROOT[bar(t)] - 12)
-        n = int(0.22 * SR); tt = np.arange(n) / SR
-        m.add(np.tanh(1.8 * lp(saw(f * 2, n, 0.01, 3), 900)) * env(n, 0.004, 0.12), t + B / 2, 0.30)
-        nn = int(0.3 * SR); ts = np.arange(nn) / SR
-        m.add(np.sin(2 * np.pi * f * ts) * env(nn, 0.004, 0.18), t, 0.32)
-    t += B
-
-# ── chords: supersaw, sidechained, filter opening across the piece
-pad = np.zeros(N)
-for bi in range(13):
-    t0 = bi * 2.0; n = int(2.2 * SR); tt = np.arange(n) / SR
-    s = sum(saw(hz(x), n, 0.012, 5) + 0.5 * saw(hz(x + 12), n, 0.015, 5) for x in CH[bi % 4])
-    e = np.minimum(1, tt / 0.03) * np.minimum(1, np.maximum(0, (2.2 - tt) / 0.2))
-    i0 = int(t0 * SR); j = min(N, i0 + n); pad[i0:j] += (s * e)[: j - i0]
-tsec = np.arange(N) / SR
-cut = np.clip(600 + 2600 * (tsec - 2) / 20, 500, 3200)
-cut = np.where(tsec < 2.0, 300 + 900 * (tsec / 2) ** 2, cut)
-pad = lp(pad, cut) * duck
-for a, b in GAPS: pad[int(a * SR):int(b * SR)] *= 0.08
-m.L += pad * 0.075; m.R += pad * 0.075
-
-# ── chiptune lead: square arp on the chord tones, 16ths; second voice an octave up from 14 s
-ARP = [0, 1, 2, 3, 2, 1, 2, 3]
+        root = ROOT[int((t - 2.0) // 2.0) % 4]
+        k = int(0.24 * SR); tt = np.arange(k) / SR
+        f = hz(root - 12) * (1 + 0.5 * np.exp(-tt / 0.02))
+        m.add(np.tanh(2.5 * np.sin(2 * np.pi * np.cumsum(f) / SR)) * env(k, 0.003, 0.14), t, 0.22)
+    t += B / 2
+# ── riff: bright saw, A minor pentatonic, 6 → 22
+RIFF = [69, 72, 74, 76, 74, 72, 69, 67]
 t = 6.0; i = 0
-while t < GROOVE[1]:
-    if not gap(t):
-        ch = CH[bar(t)]; tones = ch + [ch[0] + 12]
-        note = tones[ARP[i % 8] % 4] + 12
-        n = int(0.12 * SR)
-        v = lp(sq(hz(note), n, 0.25), 5000) * env(n, 0.002, 0.06)
-        m.add(v, t, 0.07, pan=-0.3 if i % 2 else 0.3)
-        if t >= 14.0: m.add(lp(sq(hz(note + 12), n, 0.5), 6000) * env(n, 0.002, 0.05), t + B / 8, 0.04, pan=0.3 if i % 2 else -0.3)
-    t += B / 4; i += 1
+while t < GROOVE[1] - 1e-9:
+    if not gap(t) and i % 8 not in (3, 7):
+        k = int(0.2 * SR)
+        note = RIFF[i % 8] + (0 if int((t - 6) // 2) % 2 == 0 else -2)
+        m.add(lp(saw(hz(note), k, 0.01, 5), 3800) * env(k, 0.004, 0.09), t, 0.08, pan=-0.25 if i % 2 else 0.25)
+    t += B / 2; i += 1
 
-# ── hits on every headline slam (times from reel-arcade.jsx) + risers into each section
-def stab(notes, k=int(0.4 * SR)):
-    tt = np.arange(k) / SR; s = sum(saw(hz(x), k, 0.01, 5) for x in notes)
-    return lp(s, 3400) * np.minimum(1, tt / 0.004) * np.exp(-tt / 0.12)
-BIG = [0.5, 2.1, 6.1, 10.0, 14.0, 18.0, 22.05]
-SMALL = [0.75, 2.35, 6.35, 7.0, 7.5, 8.0, 10.25, 10.5, 14.5, 18.25, 22.2, 22.45]
-for h in BIG:
-    m.add(boom(r, 2.0, 40), h, 0.32)
-    m.add(noise_hit(r, int(0.6 * SR), 0.1, 300, 6000), h, 0.3)
-    m.add(stab([57, 60, 64, 69]), h, 0.16)
-for h in SMALL:
-    m.add(noise_hit(r, int(0.3 * SR), 0.05, 500, 7000), h, 0.16)
-    m.add(stab([69, 76]), h, 0.07)
+# ── slams: boom + noise crack + brass stab, exactly on the video's hits
+def stab(notes, k=int(0.35 * SR)):
+    tt = np.arange(k) / SR; s = sum(saw(hz(n), k, 0.008, 5) for n in notes)
+    return lp(s, 3000) * np.minimum(1, tt / 0.005) * np.exp(-tt / 0.11)
+for h, kk in HITS:
+    m.add(boom(r, 1.0 + kk, 42), h, 0.2 * kk)
+    m.add(noise_hit(r, int(0.5 * SR), 0.09, 300, 5000), h, 0.25 * kk)
+    if kk >= 1: m.add(stab([57, 60, 64, 69]), h, 0.16)
+    else: m.add(stab([69, 72]), h, 0.07)
 for c in (2.0, 6.0, 10.0, 14.0, 18.0, 22.0):
-    m.add(riser(r, 1.0 if c in (2.0, 10.0, 18.0) else 0.6, 8000), c - (1.0 if c in (2.0, 10.0, 18.0) else 0.6), 0.22)
+    d = 1.0 if c in (2.0, 10.0, 18.0) else 0.6
+    m.add(riser(r, d, 7000), c - d, 0.20)
 
-# ── UI blips: alerts, year ticks, fee chips, ladder, chat messages
-def blip(f, d=0.07):
+# ── small ticks on the UI beats: alerts, year counter, fee chips, lot bars, chat bubbles
+def tick(f, d=0.06):
     n = int(d * SR); tt = np.arange(n) / SR
-    return lp(sq(f, n, 0.25), 7000) * np.exp(-tt / 0.02)
-for k in range(6): m.add(blip(hz(81 + [0, 3, 5, 7, 12, 0][k])), 2.5 + k * B, 0.09, pan=0.2)
-for k in range(7): m.add(blip(hz(76 + 2 * k), 0.05), 10.6 + k * 0.16, 0.07)
-for k in range(6): m.add(blip(hz(88), 0.05), 12.0 + k * 0.18, 0.06, pan=-0.2)
-for k in range(8): m.add(blip(hz(69 + [0, 3, 5, 0, 7, 10, 12, 12][k]), 0.1), 14.9 + k * 0.12, 0.08)
-for tt0, f in [(18.5, 81), (19.0, 84), (19.5, 76), (20.2, 81), (20.325, 88)]:
-    m.add(blip(hz(f), 0.12), tt0, 0.09)
+    return np.sin(2 * np.pi * f * tt) * np.exp(-tt / 0.015)
+for at in (2.5, 3.0, 3.5, 4.0, 5.0): m.add(tick(hz(81)), at, 0.10, pan=0.2)          # alerts (4.5 is the whistle)
+for k in range(7): m.add(tick(hz(76 + 2 * k)), 10.75 + k * 0.125, 0.08)              # 2020 → 2026
+for k in range(6): m.add(tick(hz(88)), 12.0 + k * 0.25, 0.08, pan=-0.2)              # fee chips
+for k in range(8): m.add(tick(hz(69 + [0, 3, 5, 0, 7, 10, 12, 12][k]), 0.1), 15.0 + k * 0.125, 0.09)   # lot bars
+for at in (18.5, 19.5, 20.0): m.add(tick(hz(84), 0.1), at, 0.10)                       # chat bubbles, day card
 
-# ── outro: big chord bloom + chip arpeggio up
-n = int(4.0 * SR); tt = np.arange(n) / SR
-fin = lp(sum(saw(hz(x), n, 0.008, 5) for x in (45, 52, 57, 60, 64, 69)), 2200) * np.minimum(1, tt / 0.02) * np.exp(-tt / 1.6)
-m.add(fin, 22.0, 0.14)
-for i, x in enumerate([69, 72, 76, 81, 84]):
-    m.add(blip(hz(x), 0.14), 22.5 + i * B / 2, 0.08, pan=-0.3 + 0.15 * i)
+# ── the app's whistle (NotificationProvider._playWhistle): on each TARGET HIT the video shows
+def whistle():
+    out = np.zeros(int(0.7 * SR))
+    for at, f0, f1, dur in [(0.00, 1750, 2650, 0.24), (0.32, 1750, 2750, 0.30)]:
+        k = int(dur * SR); tt = np.arange(k) / SR
+        rise = np.where(tt < dur * 0.7, f0 * (f1 / f0) ** (tt / (dur * 0.7)), f1 * (0.92) ** ((tt - dur * 0.7) / (dur * 0.3)))
+        f = rise + 40 * np.sin(2 * np.pi * 28 * tt)
+        g = np.where(tt < 0.02, 0.0001 * (0.28 / 0.0001) ** (tt / 0.02), np.where(tt < dur * 0.6, 0.28, 0.28 * (0.0001 / 0.28) ** ((tt - dur * 0.6) / (dur * 0.4))))
+        i0 = int(at * SR); out[i0:i0 + k] += np.sin(2 * np.pi * np.cumsum(f) / SR) * g
+    return out
+m.add(whistle(), 4.5, 1.3)     # Outrider · TARGET HIT alert
+m.add(whistle(), 19.0, 1.3)    # Telegram: TARGET HIT bubble
 
-m.write(sys.argv[1], fade_out=1.0, reverb=0.14, rev_d=1.4, drive=1.15)
-# loudness: the dense groove lands near -8.6 LUFS once peak-normalised; trim to about -12 LUFS
-import wave
+# ── title: rumble + held chord under the end card
+k = int(4.0 * SR); tt = np.arange(k) / SR
+m.add(lp(sum(saw(hz(n), k, 0.006, 5) for n in (45, 52, 57, 60, 64)), 1800) * np.minimum(1, tt / 0.02) * np.exp(-tt / 1.4), 22.0, 0.16)
+
+m.write(sys.argv[1], fade_out=1.0, reverb=0.16, rev_d=1.6, drive=1.0)
+# loudness trim to the -11…-14 LUFS window (peak-normalised mixes of this groove land louder)
+TRIM_DB = float(sys.argv[2]) if len(sys.argv) > 2 else -2.0
 with wave.open(sys.argv[1], "rb") as w: pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
 with wave.open(sys.argv[1], "wb") as w:
-    w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR); w.writeframes((pcm * 10 ** (-3.5 / 20)).astype(np.int16).tobytes())
+    w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR); w.writeframes((pcm * 10 ** (TRIM_DB / 20)).astype(np.int16).tobytes())
 print("ok reel-arcade")

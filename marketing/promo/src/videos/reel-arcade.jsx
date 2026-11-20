@@ -2,7 +2,8 @@
 // trades, execution, backtests, compounding, Telegram — over the redesigned Dashboard's PHONE layout
 // (CalmHero / StrategyCard / IdleCard with compact, the REAL components, fictional demo data) in the
 // Arcade theme. Scene copy comes from lib/arcade.jsx, shared with the landscape cut.
-// Sections on 2 s bars at 120 BPM; music/reel-arcade.py hits the same times.
+// Sections on 2 s bars at 120 BPM; every slam sits ON the beat grid (0.25 s steps) so the
+// music's hits (music/reel-arcade.py, from the Mass trailer's sound) land with them.
 // fence: PROMO_ARCADE_20261120
 import { mount } from "../lib/runtime";
 import "@app/index.css";
@@ -93,7 +94,7 @@ function Hook({ t }) {
   const f = outQuint(seg(t, 0.1, 1.75));
   const m = OPEN_MIN + (940 - OPEN_MIN) * f;
   const v = fleetAt(Math.floor(m)).totals.LIVE.gross;
-  const pop = 1 + 0.05 * Math.max(0, 1 - Math.abs(t - 1.78) / 0.12);
+  const pop = 1 + 0.05 * Math.max(0, 1 - Math.abs(t - 1.75) / 0.12);
   return (
     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingBottom: 260 }}>
       <Line t={t} inAt={0.05} style={{ fontFamily: SG, fontSize: 50, fontWeight: 600, color: A.sub }}>Your NIFTY options desk.</Line>
@@ -181,9 +182,9 @@ function PhoneScenes({ t }) {
         <Phone><PhoneDash nowMin={nowMin} scroll={scroll} /></Phone>
         {dim > 0 && <div style={{ position: "absolute", inset: 0, borderRadius: 90, background: `rgba(7,3,26,${dim})` }} />}
       </div>
-      <VHead t={t} at={S.auto + 0.1} out={S.exec - 0.25} lines={["TRADES", "ITSELF."]} sub="Signal → order → exit. Hands-free." top={110} />
+      <VHead t={t} at={S.auto} out={S.exec - 0.25} lines={["TRADES", "ITSELF."]} sub="Signal → order → exit. Hands-free." top={110} />
       <Alerts t={t} />
-      <VHead t={t} at={S.exec + 0.1} out={S.bt - 0.3} lines={["SLICK", "EXECUTION."]} sub={null} top={240} size={96} color={A.cyan} />
+      <VHead t={t} at={S.exec} out={S.bt - 0.3} lines={["SLICK", "EXECUTION."]} sub={null} top={240} size={96} color={A.cyan} />
       <ExecTiles t={t} />
     </>
   );
@@ -193,19 +194,19 @@ function PhoneScenes({ t }) {
 function Backtest({ t }) {
   if (t < S.bt - 0.05 || t >= S.comp) return null;
   const out = seg(t, S.comp - 0.25, S.comp);
-  const y = 2020 + Math.min(6, Math.floor(Math.max(0, t - (S.bt + 0.6)) / 0.16));
+  const y = 2020 + Math.min(6, Math.floor(Math.max(0, t - (S.bt + 0.75)) / 0.125));
   return (
     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 200, opacity: 1 - out, textAlign: "center" }}>
       <Slam t={t} at={S.bt} from={2.4} style={{ fontFamily: ORB, fontSize: 330, fontWeight: 900, lineHeight: 0.95, color: A.cyan, textShadow: "0 0 40px rgba(60,231,255,.7)" }}>6+</Slam>
       <Slam t={t} at={S.bt + 0.25} style={{ fontFamily: ORB, fontSize: 130, fontWeight: 900, color: A.ink, letterSpacing: "0.05em", textShadow: glowM, lineHeight: 1.05 }}>YEARS</Slam>
       <Slam t={t} at={S.bt + 0.5} style={{ fontFamily: ORB, fontSize: 74, fontWeight: 800, color: A.magenta, letterSpacing: "0.08em", lineHeight: 1.2, marginTop: 6 }}>BACKTESTED</Slam>
-      <Line t={t} inAt={S.bt + 0.6} style={{ fontFamily: SG, fontSize: 42, color: A.sub, marginTop: 26, lineHeight: 1.35 }}>
+      <Line t={t} inAt={S.bt + 0.75} style={{ fontFamily: SG, fontSize: 42, color: A.sub, marginTop: 26, lineHeight: 1.35 }}>
         on 1-minute NIFTY options data<br /><span style={{ fontFamily: MONO, fontSize: 52, color: A.ink }}>2020 → <span style={{ color: A.cyan }}>{y}</span></span>
       </Line>
       <Line t={t} inAt={S.bt + 1.6} style={{ fontFamily: ORB, fontSize: 44, fontWeight: 800, color: A.ink, letterSpacing: "0.04em", marginTop: 70, lineHeight: 1.2 }}>EVERY RUPEE OF FEES,<br />COUNTED</Line>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 440px)", gap: 20, marginTop: 34 }}>
         {FEES.map(([k, v], i) => {
-          const at = S.bt + 2.0 + i * 0.18;
+          const at = S.bt + 2.0 + i * 0.25;
           if (t < at) return <div key={k} style={{ height: 112 }} />;
           const g = seg(t, at, at + 0.16);
           return (
@@ -217,7 +218,7 @@ function Backtest({ t }) {
           );
         })}
       </div>
-      <Line t={t} inAt={S.bt + 3.2} style={{ fontFamily: SG, fontSize: 32, color: A.muted, marginTop: 26, padding: "0 80px" }}>Zerodha's published rates, on every backtest trade.</Line>
+      <Line t={t} inAt={S.bt + 3.5} style={{ fontFamily: SG, fontSize: 32, color: A.muted, marginTop: 26, padding: "0 80px" }}>Zerodha's published rates, on every backtest trade.</Line>
     </div>
   );
 }
@@ -237,11 +238,11 @@ function Compound({ t }) {
       </Slam>
       <Line t={t} inAt={S.comp + 0.4} style={{ fontFamily: SG, fontSize: 42, color: A.sub, marginTop: 30, lineHeight: 1.35 }}>Built into the backtester:<br />lots grow as equity does.</Line>
       <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", width: 920, height: 600, marginTop: 60, position: "relative" }}>
-        <div style={{ position: "absolute", left: 0, right: 0, bottom: 20 * U, borderTop: `4px dashed ${A.yellow}`, opacity: seg(t, S.comp + 1.9, S.comp + 2.1) }}>
+        <div style={{ position: "absolute", left: 0, right: 0, bottom: 20 * U, borderTop: `4px dashed ${A.yellow}`, opacity: seg(t, S.comp + 2.0, S.comp + 2.15) }}>
           <span style={{ position: "absolute", left: 0, top: -50, fontFamily: ORB, fontSize: 30, fontWeight: 800, color: A.yellow, letterSpacing: "0.08em" }}>MAX LOTS CAP</span>
         </div>
         {LADDER.map((v, i) => {
-          const at = S.comp + 0.9 + i * 0.12;
+          const at = S.comp + 1.0 + i * 0.125;
           const g = outBack(seg(t, at, at + 0.22));
           const dd = i === 3;
           const col = dd ? A.red : i % 2 ? A.cyan : A.magenta;
@@ -256,7 +257,7 @@ function Compound({ t }) {
       <div style={{ display: "flex", justifyContent: "space-between", width: 920, fontFamily: SG, fontSize: 28, color: A.muted, marginTop: 14 }}>
         <span>lots per trade · illustrative</span><span style={{ color: A.red }}>▲ drawdown guard</span>
       </div>
-      <Line t={t} inAt={S.comp + 2.4} style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 16, marginTop: 44, padding: "0 70px", fontFamily: SG, fontSize: 32, fontWeight: 600 }}>
+      <Line t={t} inAt={S.comp + 2.5} style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 16, marginTop: 44, padding: "0 70px", fontFamily: SG, fontSize: 32, fontWeight: 600 }}>
         {["Calendar-step or equity-based", "Max-lots cap", "Drawdown guard", "Tax set aside each FY"].map((x, i) => (
           <span key={x} style={{ padding: "10px 22px", borderRadius: 6, border: `2px solid ${i % 2 ? A.cyan : A.magenta}`, color: A.ink, background: "rgba(22,12,58,.9)" }}>{x}</span>
         ))}
@@ -270,13 +271,13 @@ function TelegramScene({ t }) {
   if (t < S.tg - 0.05 || t >= S.outro + 0.1) return null;
   const a = outCubic(seg(t, S.tg, S.tg + 0.45));
   const out = seg(t, S.outro - 0.2, S.outro + 0.05);
-  const card = outCubic(seg(t, S.tg + 2.2, S.tg + 2.6));
-  const lift = 380 * inOutCubic(seg(t, S.tg + 2.0, S.tg + 2.5));
+  const card = outCubic(seg(t, S.tg + 2.0, S.tg + 2.4));
+  const lift = 380 * inOutCubic(seg(t, S.tg + 1.75, S.tg + 2.25));
   return (
     <div style={{ position: "absolute", inset: 0, opacity: 1 - out }}>
       <VHead t={t} at={S.tg} out={null} lines={["EVERY TRADE,", "IN TELEGRAM."]} top={120} size={84}
-        sub={t < S.tg + 2.2 ? "Entries, targets, stops, rejections — as they happen." : null} />
-      <Line t={t} inAt={S.tg + 2.3} style={{ position: "absolute", left: 0, right: 0, top: 380, textAlign: "center", fontFamily: SG, fontSize: 42, color: A.sub, zIndex: 31 }}>
+        sub={t < S.tg + 2.0 ? "Entries, targets, stops, rejections — as they happen." : null} />
+      <Line t={t} inAt={S.tg + 2.0} style={{ position: "absolute", left: 0, right: 0, top: 380, textAlign: "center", fontFamily: SG, fontSize: 42, color: A.sub, zIndex: 31 }}>
         <span style={{ fontFamily: ORB, fontWeight: 800, color: A.cyan }}>15:40</span> · the day's card, Live and Paper apart.
       </Line>
       <div style={{ position: "absolute", left: 60, right: 60, top: 480, height: 1280, borderRadius: 28, overflow: "hidden", background: "#0e1621",
@@ -324,9 +325,9 @@ function Outro({ t }) {
   return (
     <div style={{ position: "absolute", inset: 0, opacity: a }}>
       <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingBottom: 380, textAlign: "center" }}>
-        <Slam t={t} at={o + 0.05} style={{ fontSize: 150, lineHeight: 1 }}>⚡</Slam>
-        <Slam t={t} at={o + 0.2} style={neon}>SCALP</Slam>
-        <Slam t={t} at={o + 0.45} style={{ ...neon, fontSize: 112 }}>TERMINAL</Slam>
+        <Slam t={t} at={o} style={{ fontSize: 150, lineHeight: 1 }}>⚡</Slam>
+        <Slam t={t} at={o + 0.25} style={neon}>SCALP</Slam>
+        <Slam t={t} at={o + 0.5} style={{ ...neon, fontSize: 112 }}>TERMINAL</Slam>
         <Line t={t} inAt={o + 0.7} style={{ fontFamily: SG, fontSize: 40, fontWeight: 500, color: A.sub, marginTop: 30 }}>Algorithmic options desk<br />NIFTY · Zerodha</Line>
         <Line t={t} inAt={o + 0.95} style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 14, marginTop: 40, padding: "0 70px", fontFamily: SG, fontSize: 30, fontWeight: 600 }}>
           {["Auto trades", "Static-IP relay", "6+ yrs backtests", "Compounding", "Telegram alerts", "macOS · Windows"].map((x, i) => (
