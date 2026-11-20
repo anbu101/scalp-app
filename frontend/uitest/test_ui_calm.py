@@ -102,10 +102,20 @@ with sync_playwright() as p:
           f"Paper hero: closed loss ▼ in the loss colour, open gain ▲; hover keeps the words ({sp2})")
     pg.click("[data-testid=calm-hero-other]")
     pg.wait_for_timeout(300)
-    pg.click("[data-period=week]")
+    # ── WEEK_ON_DATELINE_20261120 ── Week / Month are links on the date line; clicking the same one again → today
+    fig0 = pg.inner_text("[data-testid=calm-hero-figure]")
+    pg.click("[data-testid=calm-dateline] [data-period=week]")
     wk = (pg.inner_text("[data-testid=calm-hero-figure]"), pg.inner_text("[data-testid=calm-hero-sentence]"))
-    pg.click("[data-period=today]")
-    check("TC-CALM-0005", wk[0] == "+₹41,250" and "exited since 11 Nov" in wk[1], f"This week tab → week's net and its trade count ({wk})")
+    ACCENT = """(() => { const t = document.createElement('i'); t.style.color = 'var(--c-primary)'; document.body.appendChild(t);
+      const a = getComputedStyle(t).color; t.remove(); const w = document.querySelector('[data-period=week]');
+      return { acc: a, line: getComputedStyle(w).borderBottomColor, pressed: w.getAttribute('aria-pressed') }; })()"""
+    sel = pg.evaluate(ACCENT)
+    pg.click("[data-testid=calm-dateline] [data-period=week]")
+    back = pg.inner_text("[data-testid=calm-hero-figure]")
+    check("TC-CALM-0005", wk[0] == "+₹41,250" and "exited since 11 Nov" in wk[1], f"Week on the date line → week's net and its trade count ({wk})")
+    check("TC-CALM-0046", pg.locator("[data-period=today]").count() == 0 and pg.locator("[role=tablist]").count() == 0
+          and sel["pressed"] == "true" and sel["line"] == sel["acc"] and back == fig0,
+          f"no period cards; the chosen link is underlined in the accent, clicking it again brings today back ({sel}, {fig0} → {back})")
     lines = pg.evaluate("[...document.querySelectorAll('[data-testid=calm-chart] svg path')].length")
     endlbl = pg.locator("[data-testid=calm-chart]").inner_text()
     check("TC-CALM-0006", lines == 2 and "Now 13:05" in endlbl and "09:15" in endlbl, f"chart: Live + Paper lines, axis 09:15 → Now 13:05 ({lines} lines)")

@@ -157,9 +157,12 @@ export default function CalmDashboard() {
   const nOpen = new Set(rows.filter((r) => r.state === "OPEN").map((r) => r.id)).size;
   const carried = rows.filter((r) => r.carried && r.state === "OPEN").length;
 
-  const dateLine = (
+  // ── WEEK_ON_DATELINE_20261120 ── a function: the hero hands in its This week / This month links,
+  // which sit right after "closes in …"
+  const dateLine = (periodLinks = null) => (
     <div data-testid="calm-dateline" style={{ display: "flex", alignItems: "center", gap: SP.sm, flexWrap: "wrap", ...T.meta, fontSize: 13, color: C.muted, paddingRight: isMobile ? SP.xxl + SP.sm : 0 }}>
       <span>{dateStr} · {clockNow()} · {sessionText(nowMin)}</span>
+      {periodLinks}
       <BrokerBadge {...broker} />
       <span title={error ? String(error) : "fleet feed"} style={{ color: feedStale ? C.down : C.muted }}>
         {!loaded ? "· loading" : feedStale ? (error ? "· feed error, showing last good data" : `· feed stale ${feedAge}s`) : ""}

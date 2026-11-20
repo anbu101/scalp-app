@@ -1,8 +1,9 @@
 // frontend/src/components/calm/CalmHero.jsx — ── DASH_CALM_20261117 ──
-// The top of the Dashboard: ONE big number (the hero book's MTM), a plain sentence
-// saying what it means, Today / This week / This month tabs that each show their
-// own figure, and the day's chart. Live is the hero when it traded today, Paper
-// otherwise; with both, the other book sits beside it, smaller — never summed.
+// The top of the Dashboard: ONE big number (the hero book's MTM), the closed / open / from-high
+// line under it, and the day's chart. Week / Month sit on the date line (WEEK_ON_DATELINE_20261120:
+// click one to show that period's net in the big number; the old Today / This week / This month
+// cards are gone). Live is the hero when it traded today, Paper otherwise; with both, the other
+// book sits beside it, smaller — never summed.
 // Phone: a Live | Paper switch picks the hero book.
 import { useState } from "react";
 import { INDEX_KEYS } from "./useIndexPaths";   // ── INDEX_PATH_20261117 ──
@@ -11,7 +12,6 @@ import { fmtInr } from "../fleet/fleetFormat";
 import CalmChart from "./CalmChart";
 
 const BOOK_NAME = { LIVE: "Live", PAPER: "Paper" };
-const PERIODS = [["today", "Today"], ["week", "This week"], ["month", "This month"]];
 
 function value(t, period) {
   if (!t) return 0;
@@ -183,30 +183,33 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
   }));
 
   const bigStyle = compact ? T.heroSm : T.hero;
-  const tabs = (
-    <div role="tablist" aria-label="Period" style={{ display: "flex", gap: SP.sm, flexWrap: compact ? "nowrap" : "wrap" }}>
-      {PERIODS.map(([id, label]) => {
-        const on = id === period;
+  // ── WEEK_ON_DATELINE_20261120 ── the Today / This week / This month cards are gone: the big number
+  // already is today, and Week / Month sit on the date line as text. Clicking one shows that period's
+  // net in the big number (accent underline); clicking it again goes back to today.
+  const dl = (links) => (typeof dateLine === "function" ? dateLine(links) : dateLine);
+  const periodLinks = t ? (
+    <span data-testid="calm-period-links" style={{ display: "inline-flex", alignItems: "baseline", gap: SP.md, whiteSpace: "nowrap" }}>
+      {!compact && <span aria-hidden="true">·</span>}
+      {[["week", "Week"], ["month", "Month"]].map(([id, label]) => {
+        const on = period === id, v = value(t, id);
         return (
-          <button key={id} type="button" role="tab" aria-selected={on} data-period={id} onClick={() => setPeriod(id)}
-            style={{ flex: compact ? 1 : "0 0 auto", minWidth: compact ? 0 : 136, minHeight: 44, textAlign: "left", cursor: "pointer", font: "inherit",
-              background: on ? C.surface : "transparent", border: `1px solid ${on ? C.accent : C.line}`, boxShadow: on ? `inset 0 0 0 1px ${C.accent}` : "none", borderRadius: RADIUS.inner,   // ── SELECT_ACCENT_20261117 ──
-              padding: `${SP.sm}px ${compact ? SP.md : SP.lg}px`, color: C.ink }}>
-            <span style={{ display: "block", ...T.meta, color: C.muted }}>{compact ? label.replace("This w", "W").replace("This m", "M") : label}</span>
-            <span style={{ display: "block", ...T.body, fontWeight: 600, ...T.num }}>
-              {t ? <span style={{ color: tone(value(t, id)) }}>{fmtInr(value(t, id))}</span> : "—"}
-            </span>
+          <button key={id} type="button" data-period={id} aria-pressed={on} onClick={() => setPeriod(on ? "today" : id)}
+            title={on ? "Back to today" : `Show ${label.toLowerCase()}'s net in the big number`}
+            style={{ background: "transparent", border: 0, borderBottom: `2px solid ${on ? C.accent : "transparent"}`, borderRadius: 0, padding: "0 0 1px", margin: 0,
+              font: "inherit", cursor: "pointer", color: on ? C.ink : C.muted }}>
+            {label} <b style={{ fontWeight: 600, ...T.num, color: tone(v) }}>{fmtInr(v)}</b>
           </button>
         );
       })}
-    </div>
-  );
+    </span>
+  ) : null;
+  // ── WEEK_ON_DATELINE_20261120 ── (the Today / This week / This month tabs were here)
 
   if (!heroBook) {
     return (
       <section aria-label="Today" data-testid="calm-hero" data-book="none" style={{ display: "flex", flexDirection: compact ? "column" : "row", flexWrap: "wrap", alignItems: "flex-start", gap: compact ? SP.lg : SP.xxxl }}>
         <div style={{ flex: compact ? "1 1 auto" : "1 1 460px", minWidth: 0, display: "flex", flexDirection: "column", gap: SP.lg }}>   {/* ── READY_PANEL_20261118 ── left column; the panel sits beside it */}
-        {dateLine}
+        {dl(null)}
         <div style={{ ...bigStyle, color: C.muted }}>₹0</div>
         <p style={{ margin: 0, ...T.lead, color: C.sub, maxWidth: 520 }}>
           No trades yet today.{armed ? ` ${armed} strateg${armed === 1 ? "y is" : "ies are"} armed.` : ""}{carried ? ` ${carried} carried position${carried === 1 ? "" : "s"} from earlier sessions.` : ""}
@@ -222,7 +225,7 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
 
   const left = (
     <div style={{ flex: compact ? "1 1 auto" : "1 1 460px", minWidth: compact ? 0 : 300, maxWidth: compact ? undefined : 620, display: "flex", flexDirection: "column", gap: compact ? SP.md : SP.lg }}>
-      {dateLine}
+      {compact ? dl(periodLinks) : null}   {/* desktop: the date line spans the hero, above both columns */}
       {compact && both && (
         <div role="group" aria-label="Book" style={{ display: "flex", gap: SP.sm }}>
           {traded.map((b) => (
@@ -254,15 +257,15 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
       </div>
       {period === "today" ? <HeroSplit t={t} both={both} compact={compact} />   /* ── HERO_SPLIT_20261120 ── */
         : <p data-testid="calm-hero-sentence" style={{ margin: 0, ...(compact ? T.body : T.lead), color: C.sub, maxWidth: 480 }}>{sentence(heroBook, t, period, both)}</p>}
-      {!compact && tabs}
       {!compact && market ? <IndexChips market={market} on={on} toggle={toggle} under /> : null}   {/* ── TICKERS_UNDER_20261120 ── */}
     </div>
   );
 
   return (
-    <section aria-label="Today" data-testid="calm-hero" data-book={heroBook} style={{ display: "flex", flexDirection: compact ? "column" : "row", flexWrap: "wrap", gap: compact ? SP.lg : SP.xxxl }}>
+    <section aria-label="Today" data-testid="calm-hero" data-book={heroBook} style={{ display: "flex", flexDirection: compact ? "column" : "row", flexWrap: "wrap", rowGap: SP.lg, columnGap: compact ? SP.lg : SP.xxxl }}>
+      {/* ── WEEK_ON_DATELINE_20261120 ── full width on desktop, so "closes in …  · Week … Month …  Broker check …" fits one line */}
+      {!compact && <div style={{ flexBasis: "100%", minWidth: 0 }}>{dl(periodLinks)}</div>}
       {left}
-      {compact && tabs}
       <div style={{ flex: compact ? "1 1 auto" : "999 1 480px", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: aside ? "flex-start" : "flex-end", gap: SP.md }}>
         {aside ? <div style={{ display: "flex" }}>{aside}</div> : null}   {/* ── READY_HERO_FIT_20261119 ── row wrapper: the panel's flex size is a width, not a height */}
         {compact ? chips : null}   {/* ── TICKERS_UNDER_20261120 ── desktop: under the period cards; the chart takes their old row (220 → 268 px) */}
