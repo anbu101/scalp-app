@@ -19,7 +19,7 @@ async def open_page(p, name):
     exe = os.environ.get("PROMO_CHROME")
     b = await p.chromium.launch(executable_path=exe or None, args=["--force-color-profile=srgb", "--font-render-hinting=none"])
     url = (HERE / "dist" / f"{name}.html").as_uri()
-    pg = await b.new_page(viewport={"width": 1080, "height": 1080})
+    pg = await b.new_page(viewport={"width": 1080, "height": 1080}, timezone_id="Asia/Kolkata")   # app clocks read IST (card "09:20 · …" lines)
     await pg.goto(url); await pg.wait_for_function("window.stageReady === true")
     meta = await pg.evaluate("window.VIDEO")
     await pg.set_viewport_size({"width": meta["width"], "height": meta["height"]})
