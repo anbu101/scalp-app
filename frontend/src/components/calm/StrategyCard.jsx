@@ -94,7 +94,13 @@ function Facts({ r, compact }) {
 }
 
 export function StrategyCard({ id, name, accent, row, twin, books, meter, expanded, onToggle, selected, onFocus, compact = false }) {
-  const mv = row.state === "OPEN" ? meterView(meter?.waiting?.meter) : null;
+  // ── CLOSED_METER_20261120 ── a closed card shows its ENTRY meter (how far the next entry is); a time-based
+  // strategy has no score, so it gets a "Next entry …" line instead. An exit/hold reading left over from
+  // before the close is ignored.
+  const wm = meter?.waiting?.meter;
+  const after = row.state !== "OPEN" && wm && (wm.side === "entry" || wm.side === "timed") ? wm : null;
+  const mv = row.state === "OPEN" ? meterView(wm) : (after && after.side === "entry" ? meterView(after) : null);
+  const nextEntry = after && after.side === "timed" && after.reason ? after.reason : null;
   const ev = row.last_event || {};
   const evText = [ev.ts ? clock(ev.ts) : null, ev.text].filter(Boolean).join(" · ");
   const wide = expanded && !compact;
@@ -124,7 +130,8 @@ export function StrategyCard({ id, name, accent, row, twin, books, meter, expand
         {!compact && <Facts r={row} compact={compact} />}
       </button>
       <MeterBar v={mv} expanded={expanded} onToggle={onToggle} id={id} />
-      {expanded && meter?.waiting && (
+      {nextEntry && <div data-testid="calm-next-entry" style={{ ...T.meta, color: C.muted }}>{nextEntry.charAt(0).toUpperCase() + nextEntry.slice(1)}</div>}   {/* ── CLOSED_METER_20261120 ── */}
+      {expanded && mv && meter?.waiting && (
         <div id={`why-${id}`} data-testid="calm-why" style={{ background: C.inset, borderRadius: RADIUS.inner, padding: compact ? SP.md : SP.sm, overflow: "hidden" }}>
           <WaitingPanel w={meter.waiting} compact={compact} />
         </div>

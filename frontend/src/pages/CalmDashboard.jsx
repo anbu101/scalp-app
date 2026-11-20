@@ -142,7 +142,8 @@ export default function CalmDashboard() {
   const f = both ? filter : "ALL";
   const cards = useMemo(() => buildCards(rows, f, nameOf), [rows, f, nameOf]);
 
-  const meterIds = useMemo(() => [...new Set([...rows.filter((r) => r.state === "OPEN").map((r) => r.id), ...idle.map((r) => r.id)])], [rows, idle]);
+  // ── CLOSED_METER_20261120 ── closed (stopped-out / exited) cards are asked too: their meter says how near the next entry is
+  const meterIds = useMemo(() => [...new Set([...rows.map((r) => r.id), ...idle.map((r) => r.id)])], [rows, idle]);
   const meters = useMeters(meterIds, { enabled: isAdminUi, fast: !!open, session: inSession(nowMin) });
   const market = useIndexPaths(nowMin, inSession(nowMin));   // ── INDEX_PATH_20261117 ── NIFTY / BANKNIFTY behind the MTM chart
   const toggle = (id) => { setOpen((o) => (o === id ? null : id)); if (open !== id) meters.refresh(); };

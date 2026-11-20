@@ -107,10 +107,11 @@ with sync_playwright() as p:
     check("TC-CALM-0009", bd["VET_V1"] == "Stopped out" and bd["ORB_V1"] == "Done" and bd["TMA_V2"] == "Exit near" and bd["IC_V2"] == "In trade · 4 legs",
           f"state badges ({bd})")
     q = urllib.parse.unquote(pg._meters[0].split("strategies=")[-1]) if pg._meters else ""
-    check("TC-CALM-0010", len(pg._meters) == 1 and set(q.split(",")) == {"IC_V2", "TMA_V2", "TSG_V1", "EMC_V1", "BRK_V1"},
-          f"every open / waiting card's meter in ONE call; closed ones not asked ({len(pg._meters)} call: {q})")
+    # ── CLOSED_METER_20261120 ── closed cards are asked too (their meter = how near the next entry is)
+    check("TC-CALM-0010", len(pg._meters) == 1 and set(q.split(",")) == {"IC_V2", "TMA_V2", "TSG_V1", "ORB_V1", "VET_V1", "EMC_V1", "BRK_V1"},
+          f"every card's meter (open, closed, waiting) in ONE call ({len(pg._meters)} call: {q})")
     check("TC-CALM-0011", {c["id"] for c in cs if c["meter"]} == {"IC_V2", "TMA_V2", "TSG_V1", "EMC_V1", "BRK_V1"},
-          "meter bar on open and waiting cards only")
+          "meter bar on every card that has a reading (the closed ones have none in this scene)")
     w0 = tma["w"]
     pg.click("[data-strategy=TMA_V2] [data-testid=calm-meter]")
     pg.wait_for_selector("[data-strategy=TMA_V2] [data-testid=calm-why]", timeout=5000)
@@ -262,6 +263,39 @@ with sync_playwright() as p:
           f"cards keep their places when P/L changes: open ones first even when a closed one moved most ({ids2})")
     errs += pg._errors
     ctx.close()
+    # ── CLOSED_METER_20261120: a stopped-out card shows how near its NEXT entry is; a time-based one says when;
+    # an exit reading left over from before the close shows nothing
+    from calm_fixture import _w
+    METERS["VET_V1"] = _w("waiting", "Waits for the condition to flip to −1", "entry", 24, "warming",
+                          [{"ok": False, "text": "condition −1", "value": "now 0"}], "0/4 in place · nearest 50.3 pts")
+    METERS["ORB_V1"] = {"ok": True, "waiting": {"status": "timed", "headline": "Time-based", "items": [],
+                        "meter": {"side": "timed", "score": None, "level": None, "word": "", "reason": "next entry next session 09:16"}}}
+    ctx, pg = open_dash(b)
+    pg.wait_for_selector("[data-strategy=VET_V1] [data-testid=calm-meter]", timeout=60000)
+    vet = pg.inner_text("[data-strategy=VET_V1] [data-testid=calm-meter]")
+    pg.click("[data-strategy=VET_V1] [data-testid=calm-meter]")
+    pg.wait_for_selector("[data-strategy=VET_V1] [data-testid=calm-why]", timeout=5000)
+    vwhy = pg.inner_text("[data-strategy=VET_V1] [data-testid=calm-why]")
+    check("TC-CALM-0042", "Entry readiness" in vet and "24%" in vet and "warming" in vet and "condition −1" in vwhy
+          and pg.get_attribute("[data-strategy=VET_V1]", "data-state") == "CLOSED",
+          f"stopped-out card shows its entry readiness and opens the why-panel ({vet!r})")
+    nxt = pg.locator("[data-strategy=ORB_V1] [data-testid=calm-next-entry]")
+    check("TC-CALM-0043", nxt.count() == 1 and nxt.inner_text() == "Next entry next session 09:16"
+          and pg.locator("[data-strategy=ORB_V1] [data-testid=calm-meter]").count() == 0,
+          f"closed time-based card says when it enters next, no bar ({nxt.inner_text() if nxt.count() else None})")
+    errs += pg._errors
+    ctx.close()
+    METERS["VET_V1"] = _w("holding", "In trade", "exit", 80, "imminent", [], "")
+    del METERS["ORB_V1"]
+    ctx, pg = open_dash(b)
+    pg.wait_for_selector("[data-strategy=IC_V2] [data-testid=calm-meter]", timeout=60000)
+    pg.wait_for_timeout(800)
+    check("TC-CALM-0044", pg.locator("[data-strategy=VET_V1] [data-testid=calm-meter]").count() == 0
+          and "Stopped out" in pg.inner_text("[data-strategy=VET_V1]"),
+          "a closed card ignores an exit reading left over from its trade (no bar, still 'Stopped out')")
+    errs += pg._errors
+    ctx.close()
+    del METERS["VET_V1"]
     check("TC-CALM-0023", not errs, f"no page errors ({errs[:2]})")
     b.close()
 
