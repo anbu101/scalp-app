@@ -85,9 +85,23 @@ with sync_playwright() as p:
     check("TC-CALM-0003", hero.get_attribute("data-book") == "LIVE" and pg.inner_text("[data-testid=calm-hero-figure]") == "+₹24,690"
           and "+₹9,710" in pg.inner_text("[data-testid=calm-hero-other]"),
           "Live traded → Live is the big number, Paper beside it")
+    # ── HERO_SPLIT_20261120 ── the sentence is now one line: Closed ▲/▼ ₹ │ Open ▲/▼ ₹ │ From high ▼ ₹
+    SPLIT = """(() => Object.fromEntries([...document.querySelectorAll('[data-testid=calm-hero-split] [data-part]')]
+      .map(e => [e.dataset.part, { text: e.innerText.replace(/\\s+/g, ' '), color: getComputedStyle(e.querySelector('b') || e).color, title: e.title }])))()"""
+    sp = pg.evaluate(SPLIT)
     sent = pg.inner_text("[data-testid=calm-hero-sentence]")
-    check("TC-CALM-0004", "below today's high" in sent and "never added together" in sent and "₹15,132" in sent,
-          f"sentence explains the number ({sent[:90]}…)")
+    check("TC-CALM-0004", list(sp) == ["closed", "open", "high"] and "▲" in sp["closed"]["text"] and "₹15,132" in sp["closed"]["text"]
+          and "₹9,558" in sp["open"]["text"] and "FROM HIGH" in sp["high"]["text"].upper() and "never added together" in sent,
+          f"Live hero: Closed ▲ ₹15,132 │ Open ▲ ₹9,558 │ From high, and the never-added note ({sp})")
+    pg.click("[data-testid=calm-hero-other]")      # Paper as the big number: its closed trades lost ₹620
+    pg.wait_for_timeout(300)
+    sp2 = pg.evaluate(SPLIT)
+    up_col, dn_col = sp["closed"]["color"], sp2.get("closed", {}).get("color")
+    check("TC-CALM-0045", "▼" in sp2.get("closed", {}).get("text", "") and "₹620" in sp2["closed"]["text"] and dn_col != up_col
+          and "▲" in sp2["open"]["text"] and "₹10,330" in sp2["open"]["text"] and sp2["closed"]["title"] == "Closed trades lost ₹620",
+          f"Paper hero: closed loss ▼ in the loss colour, open gain ▲; hover keeps the words ({sp2})")
+    pg.click("[data-testid=calm-hero-other]")
+    pg.wait_for_timeout(300)
     pg.click("[data-period=week]")
     wk = (pg.inner_text("[data-testid=calm-hero-figure]"), pg.inner_text("[data-testid=calm-hero-sentence]"))
     pg.click("[data-period=today]")

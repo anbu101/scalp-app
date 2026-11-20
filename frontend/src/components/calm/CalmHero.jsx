@@ -38,6 +38,52 @@ function sentence(book, t, period, both) {
   return parts.join(" ");
 }
 
+// ── HERO_SPLIT_20261120 ── "today" under the big number: one line of labelled figures with
+// arrows (Closed ▼ ₹30,062 │ Open ▲ ₹1,38,353 │ From high ▼ ₹7,248), 17 px (15 on a phone),
+// instead of a sentence. Labels small caps, arrows and figures in the profit / loss colour,
+// "from high" in grey. Each part appears only when it has a value. Week / month keep sentence().
+const inrAbs = (v) => `₹${Math.abs(Math.round(v)).toLocaleString("en-IN")}`;
+function HeroSplit({ t, both, compact }) {
+  const size = compact ? 15 : 17;
+  const lab = { fontSize: Math.round(size * 0.55), letterSpacing: "0.14em", textTransform: "uppercase", color: C.muted, fontWeight: 600 };
+  const arrow = { fontSize: Math.round(size * 0.75) };
+  const r = Math.round(t.realised || 0), u = Math.round(t.unrealised || 0);
+  const parts = [];
+  if (r) parts.push({ id: "closed", k: "Closed", up: r > 0, v: inrAbs(r), title: `Closed trades ${r > 0 ? "made" : "lost"} ${inrAbs(r)}` });
+  if (u) parts.push({ id: "open", k: "Open", up: u > 0, v: inrAbs(u), title: `Open positions are ${u > 0 ? "up" : "down"} ${inrAbs(u)}` });
+  if (t.peak != null) {
+    const off = (t.peak ?? 0) - (t.gross ?? 0);
+    parts.push(off > 0.5 ? { id: "high", k: "From high", grey: true, v: inrAbs(off), title: `${inrAbs(off)} below today's high` }
+                         : { id: "high", k: "At today's high", grey: true, v: null, title: "At today's high" });
+  }
+  if (!parts.length && !both) return null;
+  return (
+    <div data-testid="calm-hero-sentence" style={{ display: "flex", flexDirection: "column", gap: SP.xs, color: C.sub }}>
+      {parts.length > 0 && (
+        // every part carries a left divider; the wrapper is pulled left by one divider's width and the
+        // outer box clips it, so the part that starts a line (first, or after a wrap) shows none
+        <div style={{ overflow: "hidden" }}>
+        <div data-testid="calm-hero-split" style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", rowGap: SP.xs, marginLeft: -(2 * SP.md - 3),
+          fontSize: size, lineHeight: `${size + 8}px` }}>
+          {parts.map((p) => {
+            const col = p.grey ? C.muted : p.up ? C.up : C.down;
+            return (
+              <span key={p.id} data-part={p.id} title={p.title} style={{ display: "inline-flex", alignItems: "baseline", gap: 5, whiteSpace: "nowrap",
+                marginLeft: SP.md - 2, paddingLeft: SP.md - 2, borderLeft: `1px solid ${C.line}` }}>
+                <span style={lab}>{p.k}</span>
+                {p.v != null && <span aria-hidden="true" style={{ ...arrow, color: col }}>{p.grey || !p.up ? "▼" : "▲"}</span>}
+                {p.v != null && <b style={{ fontWeight: 700, ...T.num, color: p.grey ? C.sub : col }}>{p.v}</b>}
+              </span>
+            );
+          })}
+        </div>
+        </div>
+      )}
+      {both && <span style={{ ...T.meta, color: C.muted }}>Live and Paper are never added together.</span>}
+    </div>
+  );
+}
+
 // ── INDEX_PATH_20261117 ── NIFTY / BANKNIFTY chips above the chart: price, % from yesterday's
 // close, today's line in miniature. Tapping one draws it behind the MTM line (remembered).
 export const INDEX_COLOR = { NIFTY: "#5FA8D3", BANKNIFTY: "#D9A441" };
@@ -202,7 +248,8 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
           </button>
         )}
       </div>
-      <p data-testid="calm-hero-sentence" style={{ margin: 0, ...(compact ? T.body : T.lead), color: C.sub, maxWidth: 480 }}>{sentence(heroBook, t, period, both)}</p>
+      {period === "today" ? <HeroSplit t={t} both={both} compact={compact} />   /* ── HERO_SPLIT_20261120 ── */
+        : <p data-testid="calm-hero-sentence" style={{ margin: 0, ...(compact ? T.body : T.lead), color: C.sub, maxWidth: 480 }}>{sentence(heroBook, t, period, both)}</p>}
       {!compact && tabs}
     </div>
   );
