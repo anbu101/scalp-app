@@ -172,19 +172,26 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
   // are side by side on desktop; otherwise (phone, narrow window, the Ready panel beside it) 268 px.
   const leftRef = useRef(null), rightRef = useRef(null);
   const [fitH, setFitH] = useState(null);
+  // ── HERO_FIT2_20261120 ── the Dashboard always passes the Ready panel as `aside`, even when it draws
+  // nothing (it returns null outside its hours), so "aside → off" kept the fit off in the real app.
+  // Now: off only while the panel actually shows (has height); the plot's height is measured from
+  // where the plot really starts, so any gap above it is allowed for.
   useLayoutEffect(() => {
     const l = leftRef.current, r = rightRef.current;
-    if (!l || !r || compact || aside) { setFitH(null); return undefined; }
+    if (!l || !r || compact) { setFitH(null); return undefined; }
     const measure = () => {
       const L = l.getBoundingClientRect(), R = r.getBoundingClientRect();
       const side = R.left >= L.right - 1;
-      setFitH(side ? Math.max(180, Math.min(360, Math.round(L.height))) : null);
+      const panel = r.querySelector("[data-hero-aside]");
+      const plot = r.querySelector("[data-testid=calm-chart] > div");
+      if (!side || !plot || (panel && panel.getBoundingClientRect().height > 0)) { setFitH(null); return; }
+      setFitH(Math.max(180, Math.min(360, Math.round(L.bottom - plot.getBoundingClientRect().top))));
     };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(l); ro.observe(r);
     return () => ro.disconnect();
-  }, [compact, aside, traded.length > 0]);   // the refs exist only in the traded hero; ResizeObserver handles the rest
+  }, [compact, traded.length > 0]);   // the refs exist only in the traded hero; ResizeObserver handles the rest (panel shown / hidden too)
   const toggle = (k) => setOn((o) => { const n = o.includes(k) ? o.filter((x) => x !== k) : [...o, k]; try { localStorage.setItem(OVERLAY_KEY, JSON.stringify(n)); } catch {} return n; });
   const overlays = on.filter((k) => market?.[k]?.prev && (market[k].path || []).length > 1)
     .map((k) => ({ key: k, label: k, color: INDEX_COLOR[k], prev: market[k].prev, path: market[k].path }));
@@ -286,7 +293,7 @@ export default function CalmHero({ totals, paths, nowMin, armed = 0, carried = 0
       {!compact && <div style={{ flexBasis: "100%", minWidth: 0 }}>{dl(periodLinks)}</div>}
       {left}
       <div ref={rightRef} style={{ flex: compact ? "1 1 auto" : "999 1 480px", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: aside ? "flex-start" : "flex-end", gap: SP.md }}>
-        {aside ? <div style={{ display: "flex" }}>{aside}</div> : null}   {/* ── READY_HERO_FIT_20261119 ── row wrapper: the panel's flex size is a width, not a height */}
+        {aside ? <div data-hero-aside="" style={{ display: "flex" }}>{aside}</div> : null}   {/* ── READY_HERO_FIT_20261119 ── row wrapper: the panel's flex size is a width, not a height */}
         {compact ? chips : null}   {/* ── TICKERS_UNDER_20261120 ── desktop: under the period cards; the chart takes their old row (220 → 268 px) */}
         {aside && !lines.some((l) => l.path.length > 1) && !overlays.length ? null : <CalmChart lines={lines} overlays={overlays} nowMin={nowMin} height={compact ? 120 : (fitH || 268)} compact={compact} />}
       </div>
