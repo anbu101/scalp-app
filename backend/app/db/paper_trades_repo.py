@@ -328,10 +328,17 @@ def close_paper_trade(
             gross_pnl = (float(exit_price) - float(entry_price)) * int(qty)
 
         # ── Zerodha option charges (turnover-based, same formula) ──
+        # ── PAPER_STT_SIDE_20261121 ── pass the direction: without it every
+        # SHORT row was charged as LONG — STT 0.15% on the buy-back price
+        # instead of the sell (entry) price (DEF-075; every TSG/IC/TMA short
+        # paper row since at least 22 Sep 2026). Stamp duty stays on the entry
+        # leg, the backtest charges_model's convention, so paper and backtest
+        # charges still agree to the paisa.
         charges = calculate_option_charges(
             entry_price=float(entry_price),
             exit_price=float(exit_price),
             qty=int(qty),
+            direction=("SHORT" if str(effective_direction).upper() == "SHORT" else "LONG"),
         )
 
         # Override gross_pnl in charges result with direction-corrected value

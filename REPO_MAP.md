@@ -5,7 +5,7 @@ Open the file named here first. Line numbers are hints: `grep -n` to confirm, th
 
 ## Strategies — live · backtest · SL/ST/BT lines · panel (F/strategies/<id>/) · test suites
 Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core = fleet-wide live changes cover it.
-- **Icarus IC_V2** (+Indica IC_V1) core — E/ic/ (ic_group_manager, ic_live_core, ic_runtime) · B/ic/backtest_ic_runner.py QW:319 · SL:496–562 ST:2924–3133 BT:4415–4646 · ICPanel.jsx · tests E/ic 17, B/ic 4
+- **Icarus IC_V2** (+Indica IC_V1) core — E/ic/ (ic_group_manager, ic_live_core, ic_runtime) · B/ic/backtest_ic_runner.py QW:319 · SL:496–562 ST:2924–3133 BT:4415–4646 · ICPanel.jsx · tests E/ic 18, B/ic 4
 - **Timberwolf TMA_V2** core — E/tma2/ (tma2_live_core, tma2_selection_loop, tma2_trade_manager) · B/tma/backtest_tma_v2_runner.py QW:275 · SL:833–860 ST:2580–2724 BT:3955–4201 · TMA2Panel.jsx · tests E/tma2 9, B/tma 5
 - **Tigris TSG_V1** core — E/tsg/ (tsg_live_core, tsg_manager, tsg_runtime) · B/tsg/backtest_tsg_runner.py QW:290 · SL:868–889 ST:2826–2922 BT:4647–4710 · TSGV1Panel.jsx A/tsg_v1_state_routes.py · tests E/tsg 5, B/tsg 1
 - **Velvet VET_V1** core — E/vet/ (vet_live_core, vet_manager, vet_selection_loop) · B/vet/backtest_vet_runner.py QW:469 · SL:786–831 ST:2470–2579 BT:5353–5451 · VETPanel.jsx · tests E/vet 11, B/vet 8
@@ -29,9 +29,9 @@ Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core
 ## Dual tree
 - `backend/` ↔ `desktop/src-tauri/backend/`, `frontend/` ↔ `desktop/src-tauri/frontend/`: the copies are git-ignored, re-synced by `./desktop/build-scalp.sh frontend|backend|both`. Edit the source; apply scripts also write the copy when it exists (`BUILD_COPIES`).
 
-## Tests — 183 backend scripts (exit code) + 18 pytest files
+## Tests — 184 backend scripts (exit code) + 20 pytest files
 - Failures + summary only: `python3 scripts/run_suites.py PATH...` — runs each suite its own way: scripts from backend/; pytest files (E/ic, backend/app/config, backend/app/db, backend/app/execution) via `-m pytest` from their folder; 2 BRK suites from the root. A pytest file run as a plain script exits 0 untested.
-- 219 suites (under backend/app/ unless shown): api/ 16 · backtest/ 56 · engine/ 64 · execution/ 15 · jobs/ 3 · marketdata/ 4 · parity/ 8 · tests/ 8 · tools/ 5 · utils/ 3 · frontend/uitest/ 14 · scripts/ 3 · 20 more in 13 small folders
+- 223 suites (under backend/app/ unless shown): api/ 16 · backtest/ 56 · db/ 3 · engine/ 65 · execution/ 16 · jobs/ 3 · marketdata/ 4 · parity/ 8 · tests/ 8 · tools/ 5 · utils/ 3 · frontend/uitest/ 14 · scripts/ 3 · 19 more in 13 small folders
 - Fleet, one fake Kite account: `python3 scripts/run_suites.py E/test_fleet_adversarial.py E/test_fleet_live.py E/test_safety_layers.py`
 - Before a release: `python3 scripts/run_suites.py backend/app/execution/test_execution_router_contract.py` (E/ B/ A/ J/ prefixes work).
 - UI (Playwright, app closed): `cd frontend && CI=false npm run build && PYTHONPATH=../backend python3 uitest/test_ui_<name>.py` (frontend/uitest/README.md).

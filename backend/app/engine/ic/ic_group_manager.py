@@ -200,6 +200,14 @@ _EXIT_REALERT_S         = 300     # stuck leg: re-page cadence
 # (session candles end 15:29); live mirrors it with a clock cutoff.
 ADJ_CUTOFF_MIN = 15 * 60 + 29
 
+# ── IC_ADJ_CHAIN_RETRY_20261121 ── a chain snapshot that fails at activation
+# (13 Nov 2026 10:46:40: one kite.quote ReadTimeout, 7 s) dropped the L1
+# adjustment for good. The activation is re-queued through process_due (the
+# engine loop never blocks) every ADJ_CHAIN_RETRY_S, up to ADJ_CHAIN_RETRIES
+# more times, then dropped with the same alert as before (fail closed).
+ADJ_CHAIN_RETRIES = 3
+ADJ_CHAIN_RETRY_S = 5
+
 # ── IC2_HEDGE_FLAT_20261117 ── orphaned wings are sold only while the market
 # takes orders (09:15–15:30 IST); outside it they stay for the morning close.
 HEDGE_FLAT_FROM_MIN  = 9 * 60 + 15
@@ -296,6 +304,7 @@ class ICGroupManager:
         # survive the session).
         self._pending_mtc:    Dict[str, int] = {}   # partner_id -> activate_ts
         self._pending_adjust: Dict[str, int] = {}   # src_leg_id -> activate_ts
+        self._adj_chain_tries: Dict[str, int] = {}  # ── IC_ADJ_CHAIN_RETRY_20261121 ── src -> failed snapshots
         # ── IC_V2 ── carry lifecycle
         self._carry_committed = False   # this session committed a carry
         self._carry_entry_date: Optional[str] = None   # "YYYY-MM-DD" of the
@@ -1353,18 +1362,35 @@ class ICGroupManager:
             return
         try:
             expiry, ce_cands, pe_cands, tokens = self._chain_provider()
+            _chain_err = None if expiry is not None else "CHAIN_EMPTY"
         except Exception as e:
-            write_audit_log(f"[IC][{self.strategy_id}][ADJ][CHAIN_FAIL] {e!r} → drop")
-            record_alert("IC_ADJ_NO_STRIKE",
-                         f"{self.strategy_id} adjustment for {src_leg_id} dropped — chain snapshot failed",
-                         severity="error", strategy_id=self.strategy_id)
+            expiry, _chain_err = None, f"CHAIN_FAIL {e!r}"
+        if _chain_err is not None:
+            # ── IC_ADJ_CHAIN_RETRY_20261121 ── retry a failed snapshot before
+            # giving up; the pending entry keeps the wings held meanwhile.
+            _n = self._adj_chain_tries.get(src_leg_id, 0) + 1
+            if _n <= ADJ_CHAIN_RETRIES:
+                self._adj_chain_tries[src_leg_id] = _n
+                self._pending_adjust[src_leg_id] = int(time.time()) + ADJ_CHAIN_RETRY_S
+                write_audit_log(f"[IC][{self.strategy_id}][ADJ][CHAIN_RETRY] {src_leg_id} "
+                                f"{_chain_err} — retry {_n}/{ADJ_CHAIN_RETRIES} in {ADJ_CHAIN_RETRY_S}s")
+                self._persist_session()
+                return
+            self._adj_chain_tries.pop(src_leg_id, None)
+            if _chain_err == "CHAIN_EMPTY":
+                write_audit_log(f"[IC][{self.strategy_id}][ADJ][CHAIN_EMPTY] → drop "
+                                f"(after {ADJ_CHAIN_RETRIES} retries)")
+                record_alert("IC_ADJ_NO_STRIKE",
+                             f"{self.strategy_id} adjustment for {src_leg_id} dropped — empty chain",
+                             severity="error", strategy_id=self.strategy_id)
+            else:
+                write_audit_log(f"[IC][{self.strategy_id}][ADJ][{_chain_err}] → drop "
+                                f"(after {ADJ_CHAIN_RETRIES} retries)")
+                record_alert("IC_ADJ_NO_STRIKE",
+                             f"{self.strategy_id} adjustment for {src_leg_id} dropped — chain snapshot failed",
+                             severity="error", strategy_id=self.strategy_id)
             return
-        if expiry is None:
-            write_audit_log(f"[IC][{self.strategy_id}][ADJ][CHAIN_EMPTY] → drop")
-            record_alert("IC_ADJ_NO_STRIKE",
-                         f"{self.strategy_id} adjustment for {src_leg_id} dropped — empty chain",
-                         severity="error", strategy_id=self.strategy_id)
-            return
+        self._adj_chain_tries.pop(src_leg_id, None)
 
         cands = ce_cands if src.opt_type == "CE" else pe_cands
         # ── BROKER_TRUTH_20261114 ── never BUY a contract another strategy is

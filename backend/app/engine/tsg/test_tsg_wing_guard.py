@@ -212,8 +212,23 @@ def t_chain_band():
     sys.modules["app.fetcher.zerodha_instruments"] = stub
     kite = types.SimpleNamespace(ltp=lambda x: {"NSE:NIFTY 50": {"last_price": SPOT}})
     q = lambda syms: {s: px[s] for s in syms}
-    _, r1, _ = ICS.snapshot_weekly_chain(kite, "k", "t", quote_fn=q)
-    _, r2, _ = ICS.snapshot_weekly_chain(kite, "k", "t", quote_fn=q, strike_range=3000)
+    # ── TSG_WING_TEST_DATE_20261121 ── snapshot_weekly_chain keeps only
+    # expiries >= date.today(); the fixture is the 11-Nov chain (expiry
+    # 17 Nov), so without a frozen "today" this suite went red from 18 Nov.
+    class _Day(date):
+        @classmethod
+        def today(cls):
+            return DAY.date()
+    _prev_date, ICS.date = ICS.date, _Day
+    try:
+        _, r1, _ = ICS.snapshot_weekly_chain(kite, "k", "t", quote_fn=q)
+        _, r2, _ = ICS.snapshot_weekly_chain(kite, "k", "t", quote_fn=q, strike_range=3000)
+    finally:
+        ICS.date = _prev_date
+    check("CHAIN: the 11-Nov fixture chain is read as of 11 Nov, whatever today is",
+          bool(r1) and bool(r2), f"{len(r1)}/{len(r2)} rows")
+    if not (r1 and r2):
+        return
     w1 = max(abs(r["strike"] - SPOT) for r in r1)
     w2 = max(abs(r["strike"] - SPOT) for r in r2)
     check("CHAIN: default band unchanged (±1500) for IC/ORB/BRK/EMC/GC", w1 <= 1500, str(w1))
