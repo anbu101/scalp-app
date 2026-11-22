@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# scripts/mutation/prove_kills.py — ── MUTMUT_20261117 ── (TD-043)
+# scripts/mutation/prove_kills.py — ── MUTMUT_20261117 ── (TD-043) · BT_MUTSAFETY_20261122
 #
 # Proof for the tests written against surviving mutants: each mutant below is
 # put into a throw-away copy of its module, and its suite must FAIL there and
@@ -7,10 +7,14 @@
 # ~/.scalp-app is written (temp folder, HOME pointed into it).
 #   python3 scripts/mutation/prove_kills.py            all
 #   python3 scripts/mutation/prove_kills.py -v         also each mutant's diff
+#   -j N  mutants in parallel (default: CPUs-1, at most 4)
 # Exit 0 = every mutant killed and main green; 1 = a mutant survives or main
 # fails; a mutant whose line is no longer in the module is reported STALE
 # (the module changed: rerun mutmut_run.py for that module), not counted.
 # The list was generated from mutmut 3.8.1 `mutmut show` of the sandbox pilot.
+# BT_MUTSAFETY_20261122: more lists live beside this file as prove_kills_<module>.json
+# ({meta: {module, suite, deps}, mutants: [...]}; deps = other modules the suite imports);
+#   python3 scripts/mutation/prove_kills.py broker_truth     only that list
 import json
 import os
 import shutil
@@ -1474,6 +1478,25 @@ MUTANTS = json.loads(r"""[
 ]""")
 
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def extra_lists(only=None):
+    """Mutants of the prove_kills_<name>.json files beside this script."""
+    out = []
+    for fn in sorted(os.listdir(HERE)):
+        if not (fn.startswith("prove_kills_") and fn.endswith(".json")):
+            continue
+        if only and fn[len("prove_kills_"):-len(".json")] not in only:
+            continue
+        with open(os.path.join(HERE, fn), encoding="utf-8") as f:
+            d = json.load(f)
+        meta = d.get("meta", {})
+        for m in d.get("mutants", []):
+            out.append(dict({"module": meta["module"], "suite": meta["suite"], "deps": meta.get("deps", [])}, **m))
+    return out
+
+
 def run(tmp, suite):
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     env.update(PYTHONPATH=tmp, HOME=os.path.join(tmp, "home"), SCALP_TEST_MODE="1", PYTHONDONTWRITEBYTECODE="1")
@@ -1485,18 +1508,23 @@ def run(tmp, suite):
         return 124, "timeout"
 
 
-def stage(module, suite, text):
+def stage(module, suite, text, deps=()):
     tmp = tempfile.mkdtemp(prefix="prove_kills_")
     os.makedirs(os.path.join(tmp, "home"))
-    parts = module.split("/")
-    for i in range(1, len(parts)):
-        init = os.path.join(BACKEND, *parts[:i], "__init__.py")
-        dst = os.path.join(tmp, *parts[:i], "__init__.py")
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        if os.path.exists(init):
-            shutil.copy2(init, dst)
-        else:
-            open(dst, "w").close()
+    for rel in [module] + list(deps):
+        parts = rel.split("/")
+        for i in range(1, len(parts)):
+            init = os.path.join(BACKEND, *parts[:i], "__init__.py")
+            dst = os.path.join(tmp, *parts[:i], "__init__.py")
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if os.path.exists(dst):
+                continue
+            if os.path.exists(init):
+                shutil.copy2(init, dst)
+            else:
+                open(dst, "w").close()
+        if rel != module:
+            shutil.copy2(os.path.join(BACKEND, rel), os.path.join(tmp, rel))
     with open(os.path.join(tmp, module), "w", encoding="utf-8") as f:
         f.write(text)
     os.makedirs(os.path.dirname(os.path.join(tmp, suite)), exist_ok=True)
@@ -1506,36 +1534,46 @@ def stage(module, suite, text):
 
 def main(argv):
     verbose = "-v" in argv
+    jobs = int(argv[argv.index("-j") + 1]) if "-j" in argv else max(1, min(4, (os.cpu_count() or 2) - 1))
+    names = [a for i, a in enumerate(argv) if not a.startswith("-") and (i == 0 or argv[i - 1] != "-j")]
+    mutants = ([] if names else list(MUTANTS)) + extra_lists(names or None)
     fails = stale = killed = 0
     by_mod = {}
-    for m in MUTANTS:
-        by_mod.setdefault((m["module"], m["suite"]), []).append(m)
-    for (module, suite), ms in by_mod.items():
+    for m in mutants:
+        by_mod.setdefault((m["module"], m["suite"], tuple(m.get("deps", ()))), []).append(m)
+    for (module, suite, deps), ms in by_mod.items():
         with open(os.path.join(BACKEND, module), encoding="utf-8") as f:
             src = f.read()
-        tmp = stage(module, suite, src)
+        tmp = stage(module, suite, src, deps)
         rc, out = run(tmp, suite)
         shutil.rmtree(tmp, ignore_errors=True)
         print(f"{'ok  ' if rc == 0 else 'FAIL'} main: {suite} passes on the untouched {module}"
               + ("" if rc == 0 else f"\n{out[-1500:]}"))
         fails += rc != 0
-        for m in ms:
+
+        def one(m):
             if src.count(m["old"]) != 1:
-                stale += 1
-                print(f"STALE {m['name']}: its line is no longer in {module} once")
-                continue
-            tmp = stage(module, suite, src.replace(m["old"], m["new"], 1))
-            rc, out = run(tmp, suite)
+                return m, None
+            tmp = stage(module, suite, src.replace(m["old"], m["new"], 1), deps)
+            rc, _out = run(tmp, suite)
             shutil.rmtree(tmp, ignore_errors=True)
-            ok = rc != 0
-            killed += ok
-            fails += not ok
-            print(f"{'ok  ' if ok else 'FAIL'} {m['name']} [{m['tc']}] {m['what']}"
-                  + ("" if ok else "  <- SURVIVES"))
-            if verbose:
-                print("      - " + m["old"].strip().replace("\n", "\n      - ")
-                      + "\n      + " + m["new"].strip().replace("\n", "\n      + "))
-    print(f"\n{killed} killed, {fails} failed, {stale} stale — {len(MUTANTS)} mutants ({FENCE})")
+            return m, rc != 0
+
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(jobs) as ex:
+            for m, ok in ex.map(one, ms):
+                if ok is None:
+                    stale += 1
+                    print(f"STALE {m['name']}: its line is no longer in {module} once")
+                    continue
+                killed += ok
+                fails += not ok
+                print(f"{'ok  ' if ok else 'FAIL'} {m['name']} [{m['tc']}] {m['what']}"
+                      + ("" if ok else "  <- SURVIVES"))
+                if verbose:
+                    print("      - " + m["old"].strip().replace("\n", "\n      - ")
+                          + "\n      + " + m["new"].strip().replace("\n", "\n      + "))
+    print(f"\n{killed} killed, {fails} failed, {stale} stale — {len(mutants)} mutants ({FENCE})")
     return 1 if fails else 0
 
 
