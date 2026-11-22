@@ -383,6 +383,10 @@ def build(root):
     if need("frontend/uitest"):
         w("- UI (Playwright, app closed): `cd frontend && CI=false npm run build && "
           "PYTHONPATH=../backend python3 uitest/test_ui_<name>.py` (frontend/uitest/README.md).")
+    if os.path.exists(os.path.join(root, "scripts", "regression", "master_suite.py")):  # ── MASTER_SUITE_20261122 ──
+        w("- Weekly regression, every suite + report: `python3 scripts/regression/master_suite.py run` "
+          "(list: scripts/regression/MASTER_SUITE.md, kept current by pre-commit; weekly job, Fri 16:00: "
+          "`scripts/regression/schedule.py install`).")
     w("- No Starlette TestClient (breaks on the build Mac); timestamp knobs get a real-epoch test.")
     w("")
 

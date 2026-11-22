@@ -1,6 +1,7 @@
 # .pre-commit-config.yaml — ── PRECOMMIT_20261117 ── (TD-042)
 # ── PUSH_ANYTIME_20261118 ── (TD-047) market-hours push block removed: push any time
 # ── RELIABILITY_GATE_20261118 ── (TD-048/049) reliability checklist on commit-msg (install once more: pre-commit install)
+# ── MASTER_SUITE_20261122 ── (TD-050) master-suite-refresh: MASTER_SUITE.md follows the tests
 # Install once per clone:
 #   pip install pre-commit
 #   pre-commit install
@@ -34,6 +35,14 @@ repos:
       - id: repo-map-refresh
         name: REPO_MAP.md current
         entry: python scripts/hooks/repo_map_refresh.py
+        language: python
+        always_run: true
+        pass_filenames: false
+        verbose: true
+
+      - id: master-suite-refresh    # ── MASTER_SUITE_20261122 ── (TD-050) a test added / changed / deleted -> manifest
+        name: MASTER_SUITE.md current (scripts/regression)
+        entry: python scripts/hooks/master_suite_refresh.py
         language: python
         always_run: true
         pass_filenames: false
