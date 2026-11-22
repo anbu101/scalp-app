@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# scripts/mutation/test_mutmut_run.py — ── MUTMUT_20261117 ── (TD-043) TC-MUT-0001…0010
+# scripts/mutation/test_mutmut_run.py — ── MUTMUT_20261117 ── (TD-043) TC-MUT-0001…0012 · MUT_SKIP_LOGS_20261122 · MUT_TMP_SWEEP_20261122
 #
 # Checks the weekend mutation runner without mutmut: scope and suite choice,
 # the safety rails (work folder, environment, network block), the per-suite
@@ -136,10 +136,32 @@ os.symlink(sys.executable, os.path.join(work, ".venv", "bin", "python"))
 R.BACKEND = fake
 R.MODULES = {"m": {"file": "app/execution/m.py", "reach": r"\bm\b", "suites": ["app/execution/test_m.py"]}}
 R.ORDER = ["m"]
+os.makedirs(os.path.join(fake, "app", "state", "logs", "debug"))
+with open(os.path.join(fake, "app", "state", "logs", "debug", "candle_debug.tsv"), "w") as f:
+    f.write("x" * 4096)
+with open(os.path.join(fake, "app", "state", "keep.json"), "w") as f:
+    f.write("{}")
 ws1, n1 = R.build_workspace(work, "m")
 open(os.path.join(ws1, "marker"), "w").close()
+# 0011 (DEF-083) app run-time logs are never copied; an old workspace that has them is pruned on resume
+no_logs = not os.path.exists(os.path.join(ws1, "app", "state", "logs"))
+keeps_rest = os.path.exists(os.path.join(ws1, "app", "state", "keep.json"))
+os.makedirs(os.path.join(ws1, "app", "state", "logs", "debug"), exist_ok=True)
+os.makedirs(os.path.join(ws1, "mutants", "app", "state", "logs"))
+with open(os.path.join(ws1, "mutants", "app", "state", "logs", "old.tsv"), "w") as f:
+    f.write("x" * 4096)                  # bytes freed must not turn into a restart note (n2 == "")
+os.makedirs(os.path.join(ws1, "mutants", "app", "execution"), exist_ok=True)
+with open(os.path.join(ws1, "mutants", "app", "execution", "m.py.meta"), "w") as f:
+    f.write("{}")
 ws2, n2 = R.build_workspace(work, "m")
 kept = os.path.exists(os.path.join(ws2, "marker"))
+pruned = not any(os.path.exists(os.path.join(ws2, *p)) for p in (("app", "state", "logs"),
+                                                                    ("mutants", "app", "state", "logs")))
+meta_kept = os.path.exists(os.path.join(ws2, "mutants", "app", "execution", "m.py.meta"))
+chk("TC-MUT-0011", "app/state/logs not copied (rest of app/state is); pruned from an old workspace + "
+    "mutants/ on resume, results kept", no_logs and keeps_rest and pruned and meta_kept,
+    (no_logs, keeps_rest, pruned, meta_kept))
+shutil.rmtree(os.path.join(ws2, "mutants"))
 with open(os.path.join(fake, "app", "execution", "m.py"), "a") as f:
     f.write("Y = 2\n")
 ws3, n3 = R.build_workspace(work, "m")
@@ -172,6 +194,69 @@ diff = ("--- app/execution/m.py\n+++ app/execution/m.py\n@@ -1,3 +1,3 @@\n     x
 got = R.survivor_line(ws3, "app/execution/m.py", diff)
 chk("TC-MUT-0010", "survivors.txt line of a repeated line: the copy in the mutated hunk (line 6, not 3)",
     got == "app/execution/m.py:6", got)
+
+# 0012 (DEF-085) own TMPDIR per module, swept while mutmut runs, emptied after; low disk pauses
+import time as _time                     # noqa: E402
+e1, e2 = R.clean_env(work, mod="m"), R.clean_env(work)
+tm = os.path.join(work, "tmp", "m")
+chk("TC-MUT-0012", "TMPDIR / TMP / TEMP = <work>/tmp/<module> (shared one without a module), created",
+    e1["TMPDIR"] == e1["TMP"] == e1["TEMP"] == tm and os.path.isdir(tm)
+    and e2["TMPDIR"] == os.path.join(work, "tmp", "_shared"), (e1.get("TMPDIR"), e2.get("TMPDIR")))
+for nm in ("old_dir", "new_dir"):
+    os.makedirs(os.path.join(tm, nm, "deep"))
+with open(os.path.join(tm, "old_file"), "w") as f:
+    f.write("x")
+now = _time.time()
+for nm in ("old_dir", "old_file"):
+    os.utime(os.path.join(tm, nm), (now - 1000, now - 1000))
+n = R.sweep_tmp(tm, 900, now=now)
+left = sorted(os.listdir(tm))
+chk("TC-MUT-0012", "sweep deletes entries older than the age (a folder with its contents), keeps newer",
+    n == 2 and left == ["new_dir"], (n, left))
+chk("TC-MUT-0012", "sweep with age 0 empties it; a missing folder is 0, no error",
+    R.sweep_tmp(tm, 0) == 1 and os.listdir(tm) == [] and R.sweep_tmp(os.path.join(work, "nope"), 0) == 0)
+chk("TC-MUT-0012", "sweep age: 900 s, or longer than the slowest suite may run (10 x 100 s + 120)",
+    R.sweep_age_s(ws3) == 900.0 and R.sweep_age_s(work) == 900.0, R.sweep_age_s(ws3))
+with open(os.path.join(ws3, "tests", "suites.json")) as f:
+    sj2 = json.load(f)
+sj2["suites"][0]["secs"] = 100
+with open(os.path.join(ws3, "tests", "suites.json"), "w") as f:
+    json.dump(sj2, f)
+chk("TC-MUT-0012", "…a 100 s suite makes it 1120 s", R.sweep_age_s(ws3) == 1120.0, R.sweep_age_s(ws3))
+
+
+class _U:
+    free = 3 * 2**30
+
+
+chk("TC-MUT-0012", "free_gb reads the disk (3 GB); an unreadable disk is None",
+    R.free_gb(work, usage=lambda p: _U) == 3.0 and R.free_gb("/nonexistent/x/y") is None)
+fake_mm = os.path.join(work, ".venv", "bin", "mutmut")
+os.makedirs(os.path.join(work, "home"), exist_ok=True)
+with open(fake_mm, "w") as f:
+    f.write("#!" + sys.executable + "\nimport os, sys, time, tempfile\n"
+            "if sys.argv[1:2] == ['run']:\n"
+            "    for i in range(3):\n        tempfile.mkdtemp(prefix='leak_')\n"
+            "    open(os.path.join(os.environ['HOME'], 'tmpdir_seen'), 'w').write(tempfile.gettempdir())\n"
+            "    time.sleep(20)\n")
+os.chmod(fake_mm, 0o755)
+R.SWEEP_EVERY_S, R.LOW_DISK_GB = 0.05, 2.0
+_free = R.free_gb
+_seen_f = os.path.join(work, "home", "tmpdir_seen")
+R.free_gb = lambda p, usage=None: 1.5 if os.path.exists(_seen_f) else 50.0   # low once it has leaked
+st = {}
+t0 = _time.time()
+R.run_module(work, "m", 1, 0, False, st)
+took = _time.time() - t0
+R.free_gb = _free
+seen = open(os.path.join(work, "home", "tmpdir_seen")).read() if os.path.exists(
+    os.path.join(work, "home", "tmpdir_seen")) else ""
+chk("TC-MUT-0012", "mutmut runs with TMPDIR = <work>/tmp/m (python's tempfile goes there)",
+    os.path.realpath(seen) == os.path.realpath(tm), seen)
+chk("TC-MUT-0012", "disk under 2 GB free: mutmut stopped at once, status 'paused (disk low: 1.5 GB free)'",
+    took < 15 and st["m"]["status"].startswith("paused (disk low: 1.5 GB free)"), (took, st))
+chk("TC-MUT-0012", "the module's temp folder is empty after the run (its 3 leaked folders gone)",
+    bool(seen) and os.path.isdir(tm) and os.listdir(tm) == [], os.listdir(tm))
 
 for d in (home, ws, fake, work):
     shutil.rmtree(d, ignore_errors=True)

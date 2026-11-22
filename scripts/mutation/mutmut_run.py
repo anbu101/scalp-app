@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# scripts/mutation/mutmut_run.py — ── MUTMUT_20261117 ── (TD-043)
+# scripts/mutation/mutmut_run.py — ── MUTMUT_20261117 ── (TD-043) · MUT_SKIP_LOGS_20261122 (DEF-083)
+#   · MUT_TMP_SWEEP_20261122 (DEF-085)
 #
 # Weekend mutation testing (mutmut 3) of the safety-critical backend modules.
 # Offline, resumable, and it never touches the live app: every module runs in
@@ -35,6 +36,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -138,6 +140,9 @@ STATUS = {1: "killed", 3: "killed", 0: "survived", 5: "no tests", 33: "no tests"
 SECRET_ENV = re.compile(r"KITE|ZERODHA|DHAN|ANGEL|TELEGRAM|TOKEN|SECRET|PASSWORD|API_KEY|TOTP|LICEN[CS]E",
                         re.I)
 COPY_SKIP = {"__pycache__", "venv", ".venv", "build", "dist", "node_modules", ".pytest_cache", "mutants"}
+# MUT_SKIP_LOGS_20261122 (DEF-083): the app's own run-time logs (backend/app/state/logs, 100+ MB)
+# are no source and no test reads them; copied per module (and again into mutants/) they filled the disk.
+SKIP_REL = (os.path.join("app", "state", "logs"),)
 
 
 # ── helpers (tested by test_mutmut_run.py) ────────────────────────────────────
@@ -187,13 +192,74 @@ def unsafe_work_dir(work, home=None):
     return ""
 
 
-def clean_env(work, base=None):
+# MUT_TMP_SWEEP_20261122 (DEF-085): suites leave a temp folder behind in every process, and a
+# mutation run makes thousands of them — 1.59 million entries filled the Mac's disk in an hour and
+# froze it. Every run now has its own TMPDIR under <work>/tmp/<module>: entries older than the
+# longest suite may run are deleted while mutmut runs, the folder is emptied at the end, and the
+# run pauses (resumable) when the disk falls below LOW_DISK_GB free.
+LOW_DISK_GB = 2.0
+SWEEP_EVERY_S = 30.0
+
+
+def tmp_dir(work, mod=None):
+    d = os.path.join(work, "tmp", mod or "_shared")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:                                # a work folder that is not there yet
+        pass
+    return d
+
+
+def sweep_tmp(d, max_age_s, now=None):
+    """Delete entries of `d` last touched more than max_age_s ago (all with max_age_s=0). Returns
+    how many were deleted. Never raises."""
+    now = time.time() if now is None else now
+    n = 0
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return 0
+    for name in names:
+        p = os.path.join(d, name)
+        try:
+            if max_age_s and now - os.lstat(p).st_mtime <= max_age_s:
+                continue
+            if os.path.isdir(p) and not os.path.islink(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                os.remove(p)
+            n += 1
+        except OSError:
+            continue
+    return n
+
+
+def free_gb(path, usage=None):
+    try:
+        return (usage or shutil.disk_usage)(path).free / 2**30
+    except OSError:
+        return None
+
+
+def sweep_age_s(ws):
+    """Older than the longest a suite may run under the shim (max(60, 10 x its preflight time))."""
+    try:
+        with open(os.path.join(ws, "tests", "suites.json"), encoding="utf-8") as f:
+            secs = [float(s.get("secs") or 30.0) for s in json.load(f)["suites"]]
+    except (OSError, ValueError, KeyError):
+        secs = []
+    return max([900.0] + [max(60.0, 10.0 * x) + 120.0 for x in secs])
+
+
+def clean_env(work, base=None, mod=None):
     env = {k: v for k, v in (base if base is not None else os.environ).items()
            if not SECRET_ENV.search(k) and not k.upper().endswith("_PROXY") and k != "PYTHONPATH"}
     env.update(HOME=os.path.join(work, "home"), SCALP_TEST_MODE="1", PYTHONDONTWRITEBYTECODE="1",
                http_proxy="http://127.0.0.1:9", https_proxy="http://127.0.0.1:9",
                HTTP_PROXY="http://127.0.0.1:9", HTTPS_PROXY="http://127.0.0.1:9", NO_PROXY="",
                OBJC_DISABLE_INITIALIZE_FORK_SAFETY="YES", TZ=env.get("TZ", "Asia/Kolkata"))
+    t = tmp_dir(work, mod)
+    env.update(TMPDIR=t, TMP=t, TEMP=t)
     return env
 
 
@@ -330,7 +396,24 @@ def setup(work, python=None):
 
 
 def _ignore(d, names):
-    return [n for n in names if n in COPY_SKIP or ".bak-" in n or n.endswith((".pyc", ".db", ".sqlite"))]
+    rel = os.path.relpath(d, BACKEND)
+    return [n for n in names if n in COPY_SKIP or ".bak-" in n or n.endswith((".pyc", ".db", ".sqlite"))
+            or os.path.normpath(os.path.join(rel, n)) in SKIP_REL]
+
+
+def prune_skipped(ws):
+    """MUT_SKIP_LOGS_20261122: drop SKIP_REL from a workspace built before the skip (and from its
+    mutants/ copy). Results (*.meta) are kept, so the module still resumes."""
+    freed = 0
+    for rel in SKIP_REL:
+        for base in (ws, os.path.join(ws, "mutants")):
+            p = os.path.join(base, rel)
+            if os.path.isdir(p):
+                for dp, _dn, fn in os.walk(p):
+                    freed += sum(os.path.getsize(os.path.join(dp, f)) for f in fn
+                                 if not os.path.islink(os.path.join(dp, f)))
+                shutil.rmtree(p, ignore_errors=True)
+    return freed
 
 
 def build_workspace(work, mod, fresh=False):
@@ -378,6 +461,9 @@ def build_workspace(work, mod, fresh=False):
                     "timeout_multiplier = 3.0\ntimeout_constant = 30.0\n")
         with open(stamp_f, "w", encoding="utf-8") as f:
             json.dump(stamp, f)
+    freed = prune_skipped(ws)
+    if freed:                            # printed, not a note: a note restarts the module's state
+        print(f"{mod}: removed {freed / 2**20:.1f} MB of copied app logs (results kept)", flush=True)
     os.makedirs(os.path.join(ws, "home"), exist_ok=True)
     return ws, note
 
@@ -452,7 +538,9 @@ def survivor_line(ws, rel, diff):
 def run_module(work, mod, jobs, budget_min, fresh, state):
     mm = mutmut_bin(work)
     ws, note = build_workspace(work, mod, fresh)
-    env = clean_env(work)
+    sweep_tmp(tmp_dir(work), 0)                    # preflight leftovers
+    env = clean_env(work, mod=mod)
+    tmp, age = env["TMPDIR"], sweep_age_s(ws)
     st = state.setdefault(mod, {})
     if note:
         st.clear()
@@ -465,9 +553,28 @@ def run_module(work, mod, jobs, budget_min, fresh, state):
         log.flush()
         p = subprocess.Popen([mm, "run", "--max-children", str(jobs)], cwd=ws, env=env, stdout=log,
                              stderr=subprocess.STDOUT, start_new_session=True)
+        low = []
+        stop = threading.Event()
+
+        def _sweeper():
+            while not stop.wait(SWEEP_EVERY_S):
+                sweep_tmp(tmp, age)
+                gb = free_gb(work)
+                if gb is not None and gb < LOW_DISK_GB and not low:
+                    low.append(gb)
+                    log.write(f"\n==== {FENCE} disk low ({gb:.1f} GB free) — pausing\n")
+                    log.flush()
+                    try:
+                        os.killpg(p.pid, signal.SIGINT)
+                    except OSError:
+                        pass
+        threading.Thread(target=_sweeper, daemon=True, name="mut-tmp-sweep").start()
         try:
             p.wait(timeout=budget_min * 60 if budget_min else None)
             st["status"] = "done" if p.returncode == 0 else f"mutmut exit {p.returncode} (see log)"
+            if low:
+                st["status"] = (f"paused (disk low: {low[0]:.1f} GB free) — free space, then rerun "
+                                "to resume")
         except subprocess.TimeoutExpired:
             os.killpg(p.pid, signal.SIGINT)
             try:
@@ -483,8 +590,12 @@ def run_module(work, mod, jobs, budget_min, fresh, state):
             st["seconds"] = st.get("seconds", 0) + (time.time() - t0)
             save_state(work, state)
             raise
+        finally:
+            stop.set()
+            sweep_tmp(tmp, 0)
     st["seconds"] = st.get("seconds", 0) + (time.time() - t0)
     write_survivors(ws, mod, mm, env)
+    sweep_tmp(tmp, 0)
     save_state(work, state)
 
 
