@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # scripts/test_master_suite.py — ── MASTER_SUITE_20261122 ── (TD-079) TC-REGR-0001…0029
+#                           ── ISOLATED_HOME_20261122 ── (DEF-094) TC-REGR-0030…0033
 #
 # The master regression suite (scripts/regression/master_suite.py), its weekly
 # scheduler (schedule.py) and its pre-commit hook, checked in throw-away git
@@ -49,6 +50,11 @@ def load(path, name):
 
 
 PASS = "print('  ok   TC-FAKE-0001 one')\nprint('  ok   TC-FAKE-0002 two')\n"
+WRITES_HOME = ("import os, pathlib, sys\nh = pathlib.Path.home()\n"
+               "print('HOME=' + str(h))\nprint('DBP=' + str(os.environ.get('DB_PATH')))\n"
+               "p = h / '.scalp-app' / 'zerodha' / 'credentials.json'\n"
+               "p.parent.mkdir(parents=True, exist_ok=True)\np.write_text('{\"api_key\": \"k1\"}')\n"
+               "sys.exit(1 if os.environ.get('WH_FAIL') else 0)\n")
 FAILS = ("import sys\nprint('  ok   TC-FAKE-0010 fine')\n"
          "print('  FAIL TC-FAKE-0011 the stop is placed  -> None')\nsys.exit(1)\n")
 
@@ -234,6 +240,41 @@ try:
     chk("TC-REGR-0026", "a suite whose backend-venv Python lacks a package (pytest) is run again with the system "
         "python3, and the log says so", R4["status"] == "pass" and "lacks 'pytest'; ran with" in lg, (R4, lg[:400]))
     shutil.rmtree(os.path.join(d, "backend", "venv"))
+    # ── ISOLATED_HOME_20261122 ── DEF-094: suites saved into the real ~/.scalp-app (fake LIVE ORB trades in
+    # app.db, placeholder Zerodha / Telegram credentials). The runner's own HOME here is a stand-in folder.
+    realhome = tempfile.mkdtemp(prefix="msuite_realhome_")
+    put(d, "backend/app/x/test_writes_home.py", WRITES_HOME)
+    rc, o = tool(d, "run", "--out", out, "--no-build", "--only", "backend/app/x/test_writes_home.py",
+                 env=dict(PORT, HOME=realhome, DB_PATH=os.path.join(realhome, ".scalp-app", "data", "app.db"),
+                          SCALP_APP_HOME=os.path.join(realhome, ".scalp-app")))
+    lg = open(os.path.join(os.path.realpath(os.path.join(out, "latest")), "logs",
+                           "backend__app__x__test_writes_home.py.log"), encoding="utf-8").read()
+    seen = lg.split("HOME=")[1].split()[0] if "HOME=" in lg else ""
+    chk("TC-REGR-0030", "master suite: a suite that saves into ~/.scalp-app writes into an empty HOME of its own "
+        "under the run, never the runner's HOME, and that HOME is deleted when the suite ends (DEF-094)",
+        rc == 0 and bool(seen) and os.path.realpath(seen).startswith(os.path.realpath(out) + os.sep)
+        and not os.path.exists(seen) and not os.path.exists(os.path.join(realhome, ".scalp-app")), (rc, seen, o))
+    chk("TC-REGR-0031", "the app's folder variables (DB_PATH, SCALP_APP_HOME, …) are not passed on to a suite",
+        "DBP=None" in lg, lg[:400])
+    r = subprocess.run([sys.executable, os.path.join(d, "scripts", "run_suites.py"), "backend/app/x/test_writes_home.py"],
+                       cwd=d, env=dict(ENV, HOME=realhome, WH_FAIL="1"), capture_output=True, text=True, timeout=120)
+    seen2 = r.stdout.split("HOME=")[1].split()[0] if "HOME=" in r.stdout else ""
+    chk("TC-REGR-0032", "run_suites.py: the same suite gets a throw-away HOME (not the caller's), deleted after the run",
+        r.returncode == 1 and bool(seen2) and os.path.realpath(seen2) != os.path.realpath(realhome)
+        and not os.path.exists(seen2) and not os.path.exists(os.path.join(realhome, ".scalp-app")),
+        r.stdout + r.stderr)
+    os.remove(os.path.join(d, "backend/app/x/test_writes_home.py"))
+    shutil.rmtree(realhome, ignore_errors=True)
+    RS = load(os.path.join(d, "scripts", "run_suites.py"), "rs_t")
+    import site as _site
+    h0 = tempfile.mkdtemp(prefix="msuite_h0_")
+    _, _, e = RS.plan(os.path.join(d, "backend/app/x/test_good.py"), home=os.path.join(h0, "h"))
+    chk("TC-REGR-0033", "plan(): HOME and USERPROFILE are the given folder (made if missing); pip --user packages stay "
+        "reachable (PYTHONUSERBASE = the real user base)",
+        e["HOME"] == e["USERPROFILE"] == os.path.join(h0, "h") and os.path.isdir(e["HOME"])
+        and e.get("PYTHONUSERBASE") == os.environ.get("PYTHONUSERBASE", _site.getuserbase()),
+        {k: e.get(k) for k in ("HOME", "USERPROFILE", "PYTHONUSERBASE")})
+    shutil.rmtree(h0, ignore_errors=True)
     for _ in range(3):
         tool(d, "run", "--out", out, "--no-build", "--keep", "2", "--only", "backend/app/x/test_bad.py", env=PORT)
     runs = [x for x in os.listdir(out) if x[:2] == "20"]

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # scripts/test_reliability_checklist.py — ── RELIABILITY_GATE_20261118 ── (TD-048, TD-049) TC-GATE-0001…0040
+#                                     ── ISOLATED_HOME_20261122 ── (DEF-094) TC-GATE-0055…0056
 #
 # Checks of the diff-triggered checklist (scripts/checklist/items.py) and the commit gate
 # (scripts/hooks/reliability_checklist.py) in throw-away git repos — never this repo's index.
@@ -145,6 +146,13 @@ rc, out, fin = one(d, "backend/app/execution/test_fast.py", "assert elapsed < 0.
 chk("TC-GATE-0016", "CL-10: a sub-second timing bound in a test fails", status_of(fin, "CL-10") == "fail", fin)
 rc, out, fin = one(d, "apply_thing.py", "FENCE = 'THING_20261118'\nprint('no way back')\n")
 chk("TC-GATE-0017", "CL-11: an apply script with no backups / --rollback fails", status_of(fin, "CL-11") == "fail", fin)
+rc, out, fin = one(d, "scripts/run_suites.py", STUB_SUITES + "# runs every suite with the caller's HOME\n")
+chk("TC-GATE-0055", "CL-15: a suite runner that does not give suites a throw-away HOME fails (DEF-094)",
+    status_of(fin, "CL-15") == "fail", fin)
+rc, out, fin = one(d, "scripts/run_suites.py", "import os, tempfile\nenv = dict(os.environ)\n"
+                   "env['HOME'] = tempfile.mkdtemp()\n" + STUB_SUITES)
+chk("TC-GATE-0056", "CL-15: a runner that points HOME at a temp folder passes", status_of(fin, "CL-15") == "pass", fin)
+one(d, "scripts/run_suites.py", STUB_SUITES)
 rc, out, fin = one(d, "backend/app/engine/vet/vet_exit.py", "if now_ts > deadline_ts:\n    close_trade(x)\n")
 chk("TC-GATE-0018", "CL-08 and CL-12: a ts comparison and a close in engine code need acks",
     status_of(fin, "CL-08") == "needs-ack" and status_of(fin, "CL-12") == "needs-ack", fin)
@@ -262,8 +270,8 @@ git(d, "commit", "-qm", "c1", "--no-verify")
 rc, out = cli("--range", "HEAD~1..HEAD")
 chk("TC-GATE-0037", "--range A..B replays a past commit", rc == 1 and "CL-02 fail" in out, out)
 rc, out = cli("--list")
-chk("TC-GATE-0038", "--list shows 14 items, each with trigger, check and incidents",
-    "14 items" in out and out.count("incidents:") == 14 and out.count("trigger:") == 14, out[:300])
+chk("TC-GATE-0038", "--list shows 15 items, each with trigger, check and incidents",
+    "15 items" in out and out.count("incidents:") == 15 and out.count("trigger:") == 15, out[:300])
 commit(d, "x")
 rc, out = cli("--report")
 chk("TC-GATE-0039", "--report summarises the log", rc == 0 and "commits logged" in out, out)
@@ -273,8 +281,8 @@ shutil.rmtree(d, ignore_errors=True)
 ns = {}
 exec(compile(open(ITEMS).read(), ITEMS, "exec"), ns)
 ids = [i["id"] for i in ns["ITEMS"]]
-chk("TC-GATE-0040", "items: unique ids CL-01…CL-14, kind auto|ack, every item names its incidents",
-    ids == [f"CL-{n:02d}" for n in range(1, 15)] and all(i["kind"] in ("auto", "ack") and i["incidents"]
+chk("TC-GATE-0040", "items: unique ids CL-01…CL-15, kind auto|ack, every item names its incidents",
+    ids == [f"CL-{n:02d}" for n in range(1, 16)] and all(i["kind"] in ("auto", "ack") and i["incidents"]
                                                          and i["trigger"] and i["check"] for i in ns["ITEMS"]), ids)
 
 print("\n" + ("ALL RELIABILITY CHECKLIST CHECKS PASSED" if F == 0 else f"{F} FAILURES"))

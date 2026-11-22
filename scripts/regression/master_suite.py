@@ -289,11 +289,12 @@ def _exec(cmd, cwd, env, timeout, rel, rs):
 
 def run_one(rel, rs, timeout, ui_py, logdir):
     path = os.path.join(ROOT, rel)
-    cmd, cwd, env = rs.plan(path)
-    cmd = cmd + [os.path.join(ROOT, a) if os.path.exists(os.path.join(ROOT, a)) else a for a in ARGS.get(rel, [])]
     # DEF-085: suites leave temp folders behind; each gets its own TMPDIR, deleted when it ends
     tmp = os.path.join(os.path.dirname(logdir), "tmp", safe_name(rel))
     os.makedirs(tmp, exist_ok=True)
+    # ── ISOLATED_HOME_20261122 ── DEF-094: and its own empty HOME inside it, never the real ~/.scalp-app
+    cmd, cwd, env = rs.plan(path, home=os.path.join(tmp, "home"))
+    cmd = cmd + [os.path.join(ROOT, a) if os.path.exists(os.path.join(ROOT, a)) else a for a in ARGS.get(rel, [])]
     env.update(TMPDIR=tmp + os.sep, TMP=tmp, TEMP=tmp)
     if tier_of(rel) == "ui":
         cmd = [ui_py] + cmd[1:]

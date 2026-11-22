@@ -1,4 +1,5 @@
 # scripts/checklist/items.py — ── RELIABILITY_GATE_20261118 ── (TD-048)
+#                              ── ISOLATED_HOME_20261122 ── CL-15 (DEF-094)
 #
 # The reliability checklist. Each item has
 #   trigger  — something you can read from the staged diff (paths + added lines)
@@ -299,6 +300,21 @@ def cl14(ctx):
     return bool(hits), [], "; ".join(f"{p}:{n} {s}" for p, n, s in hits[:3])
 
 
+# ── CL-15 suite runners give every suite a throw-away HOME ────────────
+RUNNERS = ("scripts/run_suites.py", "scripts/regression/master_suite.py", "scripts/mutation/mutmut_run.py",
+           "scripts/ci/run_ci_suites.py")
+HOME_SET = re.compile(r"""\bHOME\s*=\s*(?!os\.path\.expanduser)\S|\[\s*["']HOME["']\s*\]\s*=|\bisolate_home\(|"""
+                      r"""\bplan\([^)]*\bhome\s*=""")
+
+
+def cl15(ctx):
+    fs = [f for f in ctx.files if f.status != "D" and f.path in RUNNERS]
+    if not fs:
+        return False, [], ""
+    return True, [f"{f.path}: runs suites without pointing HOME at a throw-away folder — a suite then saves into "
+                  f"the real ~/.scalp-app (DEF-094)" for f in fs if not HOME_SET.search(f.new_text())], ""
+
+
 ITEMS = [
     dict(id="CL-01", kind="auto", title="No hard-coded credentials", fn=cl01,
          trigger="an added line assigns a 16+ character literal to a key / secret / token / password name",
@@ -357,4 +373,8 @@ ITEMS = [
          trigger="engine/<s>/ gains an import from another strategy's package",
          check="it is shared code only — works when that strategy is off or not licensed",
          incidents="strategy independence rule (15 Oct: any strategy can be licensed alone)"),
+    dict(id="CL-15", kind="auto", title="Suite runners never hand a suite the real HOME", fn=cl15,
+         trigger="a suite runner changes (run_suites.py, regression/master_suite.py, mutation/mutmut_run.py, ci/run_ci_suites.py)",
+         check="each suite runs with HOME pointed at a throw-away folder (isolate_home / plan(home=…) / HOME=<tmp>)",
+         incidents="DEF-094 (master suite: fake LIVE ORB trades in app.db, Zerodha / Telegram credentials replaced)"),
 ]

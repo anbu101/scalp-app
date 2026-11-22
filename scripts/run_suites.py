@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # scripts/run_suites.py  — ── REPO_MAP_20261117 ── (TD-038)
 #                          ── REPO_MAP_FIX_20261117 ── each suite runs the way it is meant to run
+#                          ── ISOLATED_HOME_20261122 ── (DEF-094) every suite gets a throw-away HOME
 #
 # Runs the repo's test suites and prints ONLY the failures (last 25 lines
 # each) and one summary line. Stdlib only (pytest itself is needed for the
@@ -17,6 +18,10 @@
 #   pytest  python3 -m pytest -q <file> from the file's own folder, PYTHONPATH=backend:.
 #           (files that import pytest, or define test_ functions with no runner of their own)
 #   root    python3 <file> from the repo root ("Run from repo root" suites, e.g. BRK)
+# Every suite runs with HOME (and USERPROFILE) pointed at an empty throw-away folder, so
+# nothing a test saves can reach the real ~/.scalp-app (DEF-094: suites wrote fake LIVE ORB
+# trades into app.db and replaced the Zerodha / Telegram credentials). pip --user packages
+# and Playwright's browsers stay reachable; the folder is deleted when the run ends.
 # frontend/uitest/** : cwd=frontend. Other paths (scripts/**): cwd=repo root. *.mjs: node.
 # "not runnable here" = a third-party package this Python lacks (pytest, fastapi, …);
 # a module that exists in this repo but cannot be imported is a FAILURE, not an env gap.
@@ -25,8 +30,11 @@ import ast
 import importlib.util
 import os
 import re
+import shutil
+import site
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PFX = {"E/": "backend/app/engine/", "B/": "backend/app/backtest/", "A/": "backend/app/api/",
@@ -118,9 +126,35 @@ def python_for_backend():
     return sys.executable
 
 
-def plan(path):
+# Env vars the app reads its folders from (app/utils/app_paths.py): a suite must not inherit real ones.
+APP_PATH_VARS = ("SCALP_APP_HOME", "DB_PATH", "SCALP_DATA_DIR", "SCALP_LOG_DIR", "SCALP_STATE_DIR",
+                 "SCALP_CONFIG_DIR", "SCALP_ZERODHA_DIR")
+
+
+def isolate_home(env, home):
+    """── ISOLATED_HOME_20261122 ── (DEF-094) point the suite's home at `home`, never the real one."""
+    os.makedirs(home, exist_ok=True)
+    try:
+        ub = site.getuserbase()                      # read with the REAL home, before it is swapped
+    except Exception:
+        ub = None
+    pw = os.path.join(os.path.expanduser("~"), "Library", "Caches", "ms-playwright")
+    for k in APP_PATH_VARS:
+        env.pop(k, None)
+    env["HOME"] = home
+    env["USERPROFILE"] = home                        # Path.home() on Windows
+    if ub:
+        env.setdefault("PYTHONUSERBASE", ub)         # pip --user packages (pytest, jwt) stay importable
+    if os.path.isdir(pw):
+        env.setdefault("PLAYWRIGHT_BROWSERS_PATH", pw)
+    return env
+
+
+def plan(path, home=None):
+    """(cmd, cwd, env) for one suite. env always has a throw-away HOME: `home`, or a new temp folder."""
     rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
-    env = dict(os.environ, SCALP_TEST_MODE="1")
+    env = isolate_home(dict(os.environ, SCALP_TEST_MODE="1"),
+                       home or tempfile.mkdtemp(prefix="scalp-suite-home-"))
     backend = os.path.join(ROOT, "backend")
     if path.endswith(".mjs"):
         return ["node", path], ROOT, env
@@ -183,9 +217,17 @@ def main(argv):
             return 2
         suites += [g for g in got if g not in suites]
     passed, failed, envmiss = 0, [], []
-    for s in suites:
+    homes = tempfile.mkdtemp(prefix="run_suites_home_")       # DEF-094: one throw-away HOME per suite
+    try:
+        return _run(suites, timeout, quiet, homes, passed, failed, envmiss)
+    finally:
+        shutil.rmtree(homes, ignore_errors=True)
+
+
+def _run(suites, timeout, quiet, homes, passed, failed, envmiss):
+    for i, s in enumerate(suites):
         rel = os.path.relpath(s, ROOT)
-        cmd, cwd, env = plan(s)
+        cmd, cwd, env = plan(s, home=os.path.join(homes, str(i)))
         try:
             r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
             out, rc = (r.stdout or "") + (r.stderr or ""), r.returncode
