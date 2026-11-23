@@ -238,6 +238,89 @@ res = m11.on_decision({"action": FLIP, "side": "CE", "reason": "FLIP",
 chk("the exit still stands even though the re-entry was refused",
     res and res["closed"] and not res["opened"] and m11.pos is None, res)
 
+print("\n── 8. KILL re-entry block (VET_KILL_BLOCK_20261123 / KILL_PAPER_FLIP_20261123, DEF-097) ──")
+import json as _json
+from app.engine.vet.vet_live_core import HOLD
+kb_path = os.path.join(tmpdir, "state", "vet_kill_block.json")
+m12 = mk({"leg_action": "SELL"}, db=os.path.join(tmpdir, "l.db"))
+m12.kill_block_path = kb_path
+m12.open_position("PE", ts=10, bar_ts=10, condition=1)
+m12.kill(ts=50)
+chk("TC-VET-0319 a KILL of a PE position blocks PE and saves the block to the state file",
+    m12.pos is None and m12.kill_block_side == "PE" and os.path.exists(kb_path)
+    and _json.load(open(kb_path))["side"] == "PE", m12.kill_block_side)
+chk("TC-VET-0328 the manager's state shows the block side",
+    m12.state().get("kill_block_side") == "PE")
+
+# next morning: a new manager (daily re-arm / restart) reads the file
+m13 = mk({"leg_action": "SELL"}, db=os.path.join(tmpdir, "l.db"))
+m13.kill_block_path = kb_path
+chk("TC-VET-0320 a fresh manager (restart / next day) restores the block from the file",
+    m13.load_kill_block() == "PE" and m13.kill_block_side == "PE")
+enter_pe = {"action": ENTER, "side": "PE", "bar_ts": 100, "condition": 1}
+chk("TC-VET-0321 same trend (ENTER PE from flat) is blocked and the block stays",
+    m13.kill_gate(enter_pe) is False and m13.kill_block_side == "PE")
+chk("TC-VET-0321 ...and the manager itself refuses a PE entry while blocked (not frozen)",
+    not m13.frozen and m13.open_position("PE", ts=100, bar_ts=100, condition=1) is None
+    and m13.pos is None)
+hold_flat = {"action": HOLD, "side": None, "bar_ts": 105, "condition": 0}
+chk("TC-VET-0322 a neutral bar is a trend change: gate passes, block cleared, file removed",
+    m13.kill_gate(hold_flat) is True and m13.kill_block_side is None
+    and not os.path.exists(kb_path))
+chk("TC-VET-0323 after the block clears, a PE entry on the next signal opens",
+    m13.kill_gate(enter_pe) is True
+    and m13.open_position("PE", ts=110, bar_ts=110, condition=1) is not None)
+
+m14 = mk({"leg_action": "SELL"}, db=os.path.join(tmpdir, "m.db"))
+m14.kill_block_path = kb_path
+m14.open_position("PE", ts=10, bar_ts=10, condition=1)
+m14.kill(ts=20)
+m15 = mk({"leg_action": "SELL"}, db=os.path.join(tmpdir, "m.db"))
+m15.kill_block_path = kb_path
+m15.load_kill_block()
+enter_ce = {"action": ENTER, "side": "CE", "bar_ts": 200, "condition": -1}
+chk("TC-VET-0324 a flip to the other side clears the block and that side opens",
+    m15.kill_gate(enter_ce) is True and m15.kill_block_side is None
+    and m15.open_position("CE", ts=200, bar_ts=200, condition=-1) is not None)
+chk("TC-VET-0324 ...and later bars on the old side are no longer blocked",
+    m15.close_position("FLIP", ts=210) is not None
+    and m15.kill_gate(enter_pe) is True)
+
+m16 = mk(db=os.path.join(tmpdir, "n.db"))           # harness: no path
+m16.open_position("CE", ts=10, bar_ts=10, condition=1)
+before = set(os.listdir(tmpdir))
+m16.kill(ts=20)
+chk("TC-VET-0325 without a state path the block is kept in memory only (no file written)",
+    m16.kill_block_side == "CE" and set(os.listdir(tmpdir)) == before)
+
+m17 = mk(db=os.path.join(tmpdir, "o.db"))
+m17.kill_block_path = os.path.join(tmpdir, "state", "k17.json")
+m17.kill(ts=20)
+chk("TC-VET-0326 a KILL while flat sets no block",
+    m17.kill_block_side is None and not os.path.exists(m17.kill_block_path))
+
+bad = os.path.join(tmpdir, "state", "bad.json")
+with open(bad, "w") as _f:
+    _f.write("{not json")
+m18 = mk(db=os.path.join(tmpdir, "p.db"))
+m18.kill_block_path = bad
+chk("TC-VET-0327 an unreadable state file restores no block and does not raise",
+    m18.load_kill_block() is None and m18.kill_block_side is None)
+chk("TC-VET-0329 with a position open the gate never blocks (exits and flips run)",
+    m13.pos is not None and m13.kill_gate(enter_pe) is True)
+
+_loop = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "vet_selection_loop.py"), encoding="utf-8").read()
+_i_dec = _loop.find("decision = engine.decide(")
+_i_gate = _loop.find("if not manager.kill_gate(decision):")
+_i_act = _loop.find("manager.on_decision(decision, ts=ts)")
+chk("TC-VET-0330 loop: the KILL gate runs on every decision, after decide() and before any entry",
+    0 < _i_dec < _i_gate < _i_act, (_i_dec, _i_gate, _i_act))
+_i_path = _loop.find("manager.kill_block_path = _vet_kill_block_path()")
+_i_load = _loop.find("manager.load_kill_block()")
+chk("TC-VET-0331 loop: the live manager gets the state file and restores the block at arm time",
+    0 < _i_path < _i_load < _i_gate and "vet_kill_block.json" in _loop, (_i_path, _i_load))
+
 print("\n" + ("ALL MANAGER SMOKE CHECKS PASSED" if F == 0
               else f"{F} FAILURES"))
 sys.exit(1 if F else 0)

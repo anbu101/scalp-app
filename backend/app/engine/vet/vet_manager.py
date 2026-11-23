@@ -204,6 +204,12 @@ class VetManager:
         # keeps using its own cfg and never reads the machine's Settings.
         self.cfg_reader: Optional[Callable] = cfg_reader
         self.sltp_block_side: Optional[str] = None
+        # ── VET_KILL_BLOCK_20261123 ── after a KILL, no re-entry on the killed
+        # side until the trend changes (DEF-097). kill_block_path is injected
+        # by the live loop (state file, survives restarts and the daily
+        # re-arm); None in harnesses = in memory only.
+        self.kill_block_side: Optional[str] = None
+        self.kill_block_path: Optional[str] = None
         # ── VET_WING_FAR_20261101 ── fn(side, ts, main, expiry, cap,
         # max_strikes) -> row | None. Injected by the live loop; None in
         # harnesses (identical to the pre-fix manager).
@@ -577,6 +583,10 @@ class VetManager:
     def _open_position_impl(self, side: str, *, ts: int, bar_ts: int,
                             condition: int) -> Optional[Dict]:
         if self.frozen or self.pos is not None:
+            return None
+        if self.kill_block_side and side == self.kill_block_side:   # ── VET_KILL_BLOCK_20261123 ──
+            write_audit_log(f"[VET][KILL_BLOCK] entry on {side} refused — "
+                            f"killed on this side, trend unchanged since")
             return None
         if self.entries_gate is not None and not self.entries_gate():   # ── FLEET_MODES_20260923 ──
             write_audit_log("[VET][MGR] entry suppressed — strategy OFF (no new entries)")
@@ -1308,7 +1318,87 @@ class VetManager:
     def kill(self, ts: Optional[int] = None) -> Optional[Dict]:
         """Kill-switch adapter target: flatten and refuse to reopen."""
         self.freeze("kill switch")
-        return self.close_position(R_KILL, ts=ts or now_ts())
+        side = self.pos["side"] if self.pos else None      # ── VET_KILL_BLOCK_20261123 ──
+        ts = ts or now_ts()
+        out = self.close_position(R_KILL, ts=ts)
+        if side:
+            self.set_kill_block(side, ts)
+        return out
+
+    # ── VET_KILL_BLOCK_20261123 BEGIN ── (apply KILL_PAPER_FLIP_20261123) ─
+    # A KILL leaves VET flat while the trend still points the same way, and
+    # the rule "flat + trend → ENTER" would re-open that same side at the next
+    # 5m close (23 Nov 09:20: PE short again, no new signal). The block holds
+    # the killed option side until a completed bar wants anything else (the
+    # opposite side, or neutral); then it clears for good. It holds in every
+    # mode and across days. A trend change while the app is closed is not
+    # seen: the first bar the app sees on another side clears it.
+    def set_kill_block(self, side: str, ts: Optional[int] = None) -> None:
+        self.kill_block_side = side
+        self._save_kill_block(ts)
+        write_audit_log(f"[VET][KILL_BLOCK] set: no new {side} entry until "
+                        f"the trend changes")
+
+    def _save_kill_block(self, ts: Optional[int] = None) -> None:
+        p = self.kill_block_path
+        if not p:
+            return
+        import json
+        import os
+        try:
+            if not self.kill_block_side:
+                if os.path.exists(p):
+                    os.remove(p)
+                return
+            os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"side": self.kill_block_side,
+                           "since_ts": int(ts or now_ts())}, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, p)
+        except Exception as e:
+            write_audit_log(f"[VET][KILL_BLOCK] save failed: {e!r}")
+
+    def load_kill_block(self) -> Optional[str]:
+        """Restore a saved block (restart / next day). An unreadable file is
+        logged and restores no block (it never guesses a side)."""
+        p = self.kill_block_path
+        if not p:
+            return self.kill_block_side
+        import json
+        import os
+        if not os.path.exists(p):
+            return self.kill_block_side
+        try:
+            with open(p, encoding="utf-8") as f:
+                side = str((json.load(f) or {}).get("side") or "").upper()
+        except Exception as e:
+            write_audit_log(f"[VET][KILL_BLOCK] state file unreadable ({e!r}) "
+                            f"— no block restored")
+            return self.kill_block_side
+        if side in ("CE", "PE"):
+            self.kill_block_side = side
+            write_audit_log(f"[VET][KILL_BLOCK] restored: no new {side} entry "
+                            f"until the trend changes (killed earlier)")
+        return self.kill_block_side
+
+    def kill_gate(self, decision: Dict) -> bool:
+        """Call at each 5m decision, after decide(). False = suppress this
+        decision's entry. Clears the block once a bar wants another side."""
+        blocked = self.kill_block_side
+        if not blocked or self.pos is not None:
+            return True
+        want = decision.get("side") if decision.get("action") == ENTER else None
+        if want == blocked:
+            return False
+        write_audit_log(f"[VET][KILL_BLOCK] trend changed (now "
+                        f"{want or 'neutral'}) — block on {blocked} cleared")
+        self.kill_block_side = None
+        self._save_kill_block()
+        return True
+    # ── VET_KILL_BLOCK_20261123 END ─────────────────────────────────────
 
     # ── restart ─────────────────────────────────────────────────────────
     def resume_from_db(self) -> Optional[Dict]:
@@ -1343,6 +1433,7 @@ class VetManager:
         return {
             "mode": self.mode, "frozen": self.frozen,
             "freeze_reason": self.freeze_reason,
+            "kill_block_side": self.kill_block_side,   # ── VET_KILL_BLOCK_20261123 ──
             "leg_action": self.cfg.get("leg_action"),
             "eod_square": self.cfg.get("eod_square"),
             "hedged": self.wants_wing, "qty": self.qty,

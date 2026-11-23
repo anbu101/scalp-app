@@ -64,6 +64,22 @@
 #
 # Concurrency: one lock per strategy; a kill already in flight returns
 # {"ok": False, "error": "IN_FLIGHT"} instead of double-firing exits.
+#
+# ── KILL_PAPER_FLIP_20261123 (DEF-095, DEF-096, TD-081) ──
+#   * SETTLE: an exit can still be filling when the adapter returns (IC_V2
+#     on 20 Nov: L4 closing, remaining=1, flat 12 s later — mode stayed
+#     LIVE). When "remaining" is not 0, kill() re-reads the strategy's own
+#     flat test (a VERIFIER: reads only, never fires an exit) every
+#     SETTLE_POLL s for up to SETTLE_SECS, and flips to PAPER the moment it
+#     reads 0. Still open after that → the INCOMPLETE report as before, plus
+#     a background WATCH that flips once it reads flat (WATCH_SECS max; it
+#     stops if someone changes the mode or presses KILL again).
+#   * CONTRACT: every adapter result goes through _normalise(). BRK_V1 /
+#     ORB_V1 kill_all() return an int, TSG_V1 {ok, flat, closed:[ids]},
+#     GC_V1 {ok, flattened_legs} — all four used to crash kill() or read as
+#     "unverified", so their mode never flipped. A result that does not say
+#     what is left open is checked with the verifier instead.
+#   * Mode flip is still LAST and still only on a verified 0.
 # ============================================================================
 
 import threading
@@ -134,6 +150,201 @@ def _notify_critical(msg: str):
         notify_critical({"message": msg, "severity": "error"})
     except Exception:
         pass
+
+
+# ── KILL_PAPER_FLIP_20261123 BEGIN ── settle, verifiers, result contract ──
+SETTLE_SECS = 30.0      # in the request: wait this long for in-flight exits
+SETTLE_POLL = 2.0
+WATCH_SECS = 1800.0     # after that, a background watch flips once flat
+WATCH_POLL = 5.0
+LIVE_MODES = ("LIVE", "PAPER_LIVE")
+
+_sleep = time.sleep     # test-injectable
+_clock = time.monotonic
+
+
+def _spawn(fn: Callable[[], None]) -> None:
+    threading.Thread(target=fn, daemon=True, name="kill-watch").start()
+
+
+_WATCH_GEN: Dict[str, int] = {}
+
+
+def _runtime_mgr(module: str, attr: str = "_MANAGER"):
+    import importlib
+    return getattr(importlib.import_module(module), attr, None)
+
+
+def _v_trades(sid: str) -> Callable[[], int]:
+    return lambda: _open_trades_rows(sid)
+
+
+def _v_scalp_v3() -> int:
+    from app.db.scalp_v3_repo import get_all_open_v3_trades
+    return len(get_all_open_v3_trades() or [])
+
+
+def _v_scalp_v5() -> int:
+    from app.db.scalpv5_repo import get_all_open_v5_trades
+    return len(get_all_open_v5_trades() or [])
+
+
+def _v_ic(sid: str) -> Callable[[], int]:
+    def _f() -> int:
+        from app.engine.ic.ic_runtime import get_ic_manager
+        gm = get_ic_manager(sid)
+        legs = 0
+        if gm is not None:
+            core = getattr(gm, "_core", None)
+            if core is not None and hasattr(core, "open_legs"):
+                legs = len(core.open_legs())
+            elif gm.has_open_group():
+                legs = 1
+        db = _open_trades_rows(sid)
+        return -1 if db < 0 else max(legs, db)
+    return _f
+
+
+def _v_selection(module: str, attr: str) -> Callable[[], int]:
+    def _f() -> int:
+        import importlib
+        m = importlib.import_module(module).get_manager()
+        return 1 if (m is not None and getattr(m, attr, None)) else 0
+    return _f
+
+
+def _v_pos(module: str) -> Callable[[], int]:
+    return lambda: 0 if getattr(_runtime_mgr(module), "pos", None) is None else 1
+
+
+def _v_tsg() -> int:
+    m = _runtime_mgr("app.engine.tsg.tsg_runtime")
+    core = getattr(m, "_core", None)
+    return len(core.open_ids()) if core is not None else 0
+
+
+def _v_lvb() -> int:
+    return len(getattr(_runtime_mgr("app.engine.lvb.lvb_runtime"), "pos", None) or {})
+
+
+def _v_gc() -> int:
+    m = _runtime_mgr("app.engine.gc.gc_runtime", "_manager")
+    return len(getattr(m, "position", None) or [])
+
+
+# Each returns the strategy's still-open live exposure from its OWN source of
+# truth, reading only. -1 = could not tell (treated as not flat).
+_VERIFIERS: Dict[str, Callable[[], int]] = {
+    "SCALP_V1": _v_trades("SCALP_V1"),
+    "BB_V1":    _v_trades("BB_V1"),
+    "BB_V2":    _v_trades("BB_V2"),
+    "HA_V1":    _v_trades("HA_V1"),
+    "SCALP_V3": _v_scalp_v3,
+    "SCALP_V5": _v_scalp_v5,
+    "IC_V1":    _v_ic("IC_V1"),
+    "IC_V2":    _v_ic("IC_V2"),
+    "TMA_V1":   _v_selection("app.engine.tma.tma_selection_loop", "group"),
+    "TMA_V2":   _v_selection("app.engine.tma2.tma2_selection_loop", "group"),
+    "VET_V1":   _v_selection("app.engine.vet.vet_selection_loop", "pos"),
+    "BRK_V1":   _v_pos("app.engine.brk.brk_runtime"),
+    "ORB_V1":   _v_pos("app.engine.orb.orb_runtime"),
+    "EMC_V1":   _v_pos("app.engine.emc.emc_runtime"),
+    "TSG_V1":   _v_tsg,
+    "LVB_V1":   _v_lvb,
+    "GC_V1":    _v_gc,
+}
+
+
+def _verify(sid: str) -> int:
+    fn = _VERIFIERS.get(sid)
+    if fn is None:
+        return -1
+    try:
+        n = int(fn())
+        return n if n >= 0 else -1
+    except Exception as e:
+        write_audit_log(f"[KILL][{sid}][VERIFY_ERR] {e!r}")
+        return -1
+
+
+def _normalise(res) -> dict:
+    """Any adapter's result → {closed, remaining (None = not said), detail,
+    no_settle}. Never raises."""
+    if isinstance(res, (bool, int)):               # BRK_V1 / ORB_V1 kill_all()
+        return {"closed": int(res), "remaining": None, "detail": [],
+                "no_settle": False}
+    if not isinstance(res, dict):
+        return {"closed": 0, "remaining": None, "no_settle": False,
+                "detail": [f"adapter returned {type(res).__name__}"]}
+    closed = res.get("closed")
+    if isinstance(closed, (list, tuple, set)):     # TSG_V1: ids closed
+        closed = len(closed)
+    if closed is None:
+        closed = res.get("flattened_legs")         # GC_V1
+    try:
+        closed = int(closed or 0)
+    except (TypeError, ValueError):
+        closed = 0
+    rem = res.get("remaining")
+    if rem is None and "flat" in res:              # TSG_V1
+        rem = 0 if res.get("flat") else None
+    if rem is not None:
+        try:
+            rem = int(rem)
+        except (TypeError, ValueError):
+            rem = None
+    detail = res.get("detail") or []
+    detail = [detail] if isinstance(detail, str) else [str(d) for d in detail]
+    return {"closed": closed, "remaining": rem, "detail": detail,
+            "no_settle": bool(res.get("no_settle"))}
+
+
+def _settle(sid: str, remaining: int):
+    """Re-read the verifier until it reads 0 or SETTLE_SECS pass.
+    → (remaining, seconds waited)."""
+    if sid not in _VERIFIERS:
+        return remaining, 0.0
+    t0 = _clock()
+    while True:
+        n = _verify(sid)
+        waited = _clock() - t0
+        if n == 0 or waited >= SETTLE_SECS:
+            return n, waited
+        _sleep(SETTLE_POLL)
+
+
+def _watch_and_flip(sid: str, gen: int) -> None:
+    """Background: flip to PAPER once the strategy reads flat. Stops when a
+    newer KILL starts, when the mode is no longer live, or after WATCH_SECS."""
+    deadline = _clock() + WATCH_SECS
+    while _clock() < deadline:
+        _sleep(WATCH_POLL)
+        if _WATCH_GEN.get(sid) != gen:
+            return
+        mode = _mode(sid)
+        if mode not in LIVE_MODES:
+            write_audit_log(f"[KILL][{sid}][WATCH] mode is now {mode} — "
+                            f"stopped watching")
+            return
+        if _verify(sid) == 0:
+            flipped = _flip_to_paper(sid)
+            write_audit_log(f"[KILL][{sid}][WATCH] flat now — "
+                            f"mode_flipped={flipped}")
+            record_alert("KILL_SWITCH",
+                         f"{sid}: now flat — "
+                         + ("mode → PAPER" if flipped else
+                            "MODE FLIP FAILED, set PAPER in Settings"),
+                         severity="info" if flipped else "error",
+                         strategy_id=sid)
+            if not flipped:
+                _notify_critical(f"{sid} KILL: flat, but the PAPER mode "
+                                 f"flip failed — set it manually.")
+            return
+    write_audit_log(f"[KILL][{sid}][WATCH] still not flat after "
+                    f"{int(WATCH_SECS // 60)} min — mode left as it is")
+    _notify_critical(f"{sid} KILL: still not flat after "
+                     f"{int(WATCH_SECS // 60)} min — check Kite, then retry KILL.")
+# ── KILL_PAPER_FLIP_20261123 END ──
 
 
 # ============================================================================
@@ -235,13 +446,16 @@ def _kill_ic(sid: str) -> dict:
               f"ARMED — delete in Kite, then retry"
               for s in (res.get("stuck_gtts") or [])]
     remaining = res.get("remaining", -1)
+    # KILL_PAPER_FLIP_20261123: aborted on armed GTTs → nothing was sent, so
+    # there is nothing to wait for
+    no_settle = bool(res.get("stuck_gtts"))
     # secondary verification against the live trades table
     db_open = _open_trades_rows(sid)
     if db_open > 0:
         remaining = max(remaining, db_open)
         detail.append(f"{db_open} open IC row(s) still in trades DB")
     return {"closed": res.get("closed", 0), "remaining": remaining,
-            "detail": detail}
+            "detail": detail, "no_settle": no_settle}
 
 
 def _kill_tma() -> dict:
@@ -321,11 +535,16 @@ _ADAPTERS: Dict[str, Callable[[], dict]] = {
 }
 
 
-def register_adapter(strategy_id: str, fn: Callable[[], dict]):
-    """Local-tree extension point (SCALP_V2 / SCALP_V4): fn must return
+def register_adapter(strategy_id: str, fn: Callable[[], dict],
+                     verify: Optional[Callable[[], int]] = None):
+    """Local-tree extension point (SCALP_V2 / SCALP_V4): fn should return
     {"closed": int, "remaining": int, "detail": [str, ...]} with "remaining"
-    verified against the strategy's own source of truth."""
+    verified against the strategy's own source of truth (other shapes are
+    normalised). verify (KILL_PAPER_FLIP_20261123): optional read-only
+    still-open count; a built-in verifier for this id is kept otherwise."""
     _ADAPTERS[strategy_id] = fn
+    if verify is not None:
+        _VERIFIERS[strategy_id] = verify
     if strategy_id not in KILL_STRATEGIES:
         KILL_STRATEGIES.append(strategy_id)
         _LOCKS[strategy_id] = threading.Lock()
@@ -376,6 +595,7 @@ def kill(strategy_id: str) -> dict:
     lock = _LOCKS[sid]
     if not lock.acquire(blocking=False):
         return {"ok": False, "error": "IN_FLIGHT", "strategy_id": sid}
+    _WATCH_GEN[sid] = _WATCH_GEN.get(sid, 0) + 1    # a new KILL ends an old watch
     try:
         write_audit_log(f"[KILL][{sid}] ═══ KILL SWITCH PRESSED ═══")
         record_alert("KILL_SWITCH", f"{sid}: KILL pressed — closing all live "
@@ -390,9 +610,21 @@ def kill(strategy_id: str) -> dict:
             return {"ok": False, "error": f"ADAPTER_ERROR: {e!r}",
                     "strategy_id": sid}
 
-        closed = int(res.get("closed") or 0)
-        remaining = int(res.get("remaining") if res.get("remaining") is not None else -1)
-        detail = list(res.get("detail") or [])
+        # ── KILL_PAPER_FLIP_20261123 ── normalise, then let in-flight exits land
+        res = _normalise(res)
+        closed = res["closed"]
+        detail = res["detail"]
+        remaining = res["remaining"]
+        if remaining is None:                       # adapter did not say
+            remaining = _verify(sid)
+        waited = 0.0
+        if remaining != 0 and not res["no_settle"]:
+            remaining, waited = _settle(sid, remaining)
+            if remaining == 0:
+                detail.append(f"last exit filled {waited:.0f}s after the "
+                              f"close orders — flat")
+                write_audit_log(f"[KILL][{sid}] flat after settling "
+                                f"{waited:.1f}s")
 
         if remaining == 0:
             flipped = _flip_to_paper(sid)
@@ -413,12 +645,20 @@ def kill(strategy_id: str) -> dict:
                     "remaining": 0, "mode_flipped": flipped, "detail": detail}
 
         # stuck (or unverifiable): NO mode flip — never label live as PAPER
+        watching = sid in _VERIFIERS                # ── KILL_PAPER_FLIP_20261123 ──
+        if watching:
+            gen = _WATCH_GEN[sid]
+            _spawn(lambda: _watch_and_flip(sid, gen))
+            detail.append(f"watching: mode switches to PAPER by itself once "
+                          f"flat (up to {int(WATCH_SECS // 60)} min)")
         write_audit_log(f"[KILL][{sid}][STUCK] closed={closed} "
-                        f"remaining={remaining} detail={detail}")
+                        f"remaining={remaining} waited={waited:.1f}s "
+                        f"watching={watching} detail={detail}")
         _notify_critical(f"{sid} KILL INCOMPLETE — "
                          f"{'unverified' if remaining < 0 else remaining} "
-                         f"position(s) still open. Mode NOT flipped. "
-                         f"Check Kite, then retry KILL.")
+                         f"position(s) still open. Mode NOT flipped"
+                         + (" yet (it flips by itself once flat)" if watching else "")
+                         + ". Check Kite, then retry KILL.")
         record_alert("KILL_SWITCH",
                      f"{sid}: KILL INCOMPLETE — "
                      f"{'unverified' if remaining < 0 else remaining} still "
@@ -426,6 +666,6 @@ def kill(strategy_id: str) -> dict:
                      severity="error", strategy_id=sid)
         return {"ok": False, "strategy_id": sid, "closed": closed,
                 "remaining": remaining, "mode_flipped": False,
-                "detail": detail}
+                "detail": detail, "watching": watching}
     finally:
         lock.release()

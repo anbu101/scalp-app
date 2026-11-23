@@ -105,6 +105,17 @@ FIRST_CANDLE_GRACE_S = 150  # after start, before "no spot candle yet" may fire
 CAPTURE_KEEP_DAYS = 45
 
 
+def _vet_kill_block_path() -> str:
+    """~/.scalp-app/state/vet_kill_block.json (VET_KILL_BLOCK_20261123)."""
+    try:
+        from app.utils.app_paths import STATE_DIR
+        return str(STATE_DIR / "vet_kill_block.json")
+    except Exception:
+        import os
+        return os.path.join(os.path.expanduser("~"), ".scalp-app", "state",
+                            "vet_kill_block.json")
+
+
 def _vet_capture_dir() -> Optional[str]:
     """~/.scalp-app/vet_capture — the live NIFTY 1m candles Velvet decided on
     (one <day>.jsonl per session). Old files are pruned. Never raises."""
@@ -289,7 +300,8 @@ async def _vet_selection_loop_inner(zerodha_manager):
         return
 
     state = {"cutoff_blocked": 0, "last_decision": None,
-             "sltp_blocked": 0}   # ── VET_SLTP_LIVE_20261015 ──
+             "sltp_blocked": 0,   # ── VET_SLTP_LIVE_20261015 ──
+             "kill_blocked": 0}   # ── VET_KILL_BLOCK_20261123 ──
 
     def chain_list(side: str, ts: int) -> List[Dict]:
         """The manager's chain_fn: live ladder with last-print LTPs, the
@@ -376,6 +388,14 @@ async def _vet_selection_loop_inner(zerodha_manager):
         manager.restore_sltp_block()
     except Exception as _e:
         write_audit_log(f"[VET][SLTP] restore block failed: {_e!r}")
+    # ── VET_KILL_BLOCK_20261123 (KILL_PAPER_FLIP_20261123) ── a KILL's
+    # re-entry block outlives the process and the day: no new entry on the
+    # killed side until the trend changes
+    try:
+        manager.kill_block_path = _vet_kill_block_path()
+        manager.load_kill_block()
+    except Exception as _e:
+        write_audit_log(f"[VET][KILL_BLOCK] restore failed: {_e!r}")
 
     # ── FEED_RECOVERY_20261103 ── rebuild today's indicators from Kite after a feed stall
     from app.engine.feed_recovery import FeedRecovery
@@ -526,6 +546,14 @@ async def _vet_selection_loop_inner(zerodha_manager):
             state["sltp_blocked"] += 1
             write_audit_log(f"[VET][SLTP] re-entry on {decision.get('side')} "
                             f"blocked — trend unchanged since the SL/TP exit")
+            return
+        # ── VET_KILL_BLOCK_20261123 ── after a KILL: no re-entry on the killed
+        # side until the trend changes (runs on every decision, so a change
+        # seen while frozen still clears it)
+        if not manager.kill_gate(decision):
+            state["kill_blocked"] += 1
+            write_audit_log(f"[VET][KILL_BLOCK] re-entry on {decision.get('side')} "
+                            f"blocked — trend unchanged since the KILL")
             return
         action = decision.get("action", HOLD)
         if action == HOLD:
