@@ -488,6 +488,31 @@ def _with_periods(row: dict, legs: List[dict], day0: int) -> dict:
     return row
 
 
+# ── UNLISTED_LIVE_PNL_20261124 ── DEF-101: money a strategy already made or
+# lost LIVE still counts in the LIVE book's week / month figures after the
+# licence stops listing it (Dhivakar, 24 Nov: TSG_V1's 17 Nov live trade,
+# −₹3,867.15 net, was missing from "This month · Live"). The licence decides
+# what may RUN, not what was booked. Such a strategy gets one LIVE row that is
+# always IDLE and flagged "unlisted": never a tile, an idle entry, a sample or
+# a path, only part of _totals' week/month sums. Its paper legs stay out (no
+# money, and it cannot run). Only strategies with a live leg closed in the
+# month window get a row.
+def _unlisted_rows(sids: List[str], now: int, day0: int, warns: list) -> List[dict]:
+    out: List[dict] = []
+    since = _month_from(day0)
+    for sid in sids:
+        try:
+            live = [l for l in _legs_for(sid, warns) if l["book"] == "LIVE"]
+            if not any(not l["open"] and l["exit_ts"] and int(l["exit_ts"]) >= since for l in live):
+                continue
+            r = _with_periods(_row(sid, "LIVE", "OFF", [], now, day0), live, day0)
+            r["unlisted"] = True
+            out.append(r)
+        except Exception as e:                           # never blanks the fleet
+            warns.append(f"{sid} (unlisted): {e!r}")
+    return out
+
+
 def _compute(now: int, warns: list) -> List[dict]:
     day0 = _cr._day_start(now)
     rows: List[dict] = []
@@ -495,8 +520,10 @@ def _compute(now: int, warns: list) -> List[dict]:
     # ── FLEET_MARKS_REST_20260928 ── read every strategy's legs first, price
     # the never-marked open symbols in one REST call, then build the rows.
     read: List[tuple] = []
+    unlisted: List[str] = []                             # ── UNLISTED_LIVE_PNL_20261124 ──
     for sid in FLEET_IDS:
         if not _allowed(sid):
+            unlisted.append(sid)
             continue
         try:
             read.append((sid, _legs_for(sid, warns), None))
@@ -526,6 +553,7 @@ def _compute(now: int, warns: list) -> List[dict]:
                              "marks_stale": 0, "mark_asof": None,
                              "week": {"net": 0.0, "trades": 0, "approx": True},
                              "month": {"net": 0.0, "trades": 0, "approx": True}})
+    rows.extend(_unlisted_rows(unlisted, now, day0, warns))   # ── UNLISTED_LIVE_PNL_20261124 ──
     _persist_marks(now)   # ── FLEET_MARKS_20260928 ── throttled
     return rows
 
@@ -737,7 +765,7 @@ def get_fleet_today():
             })
         seen = set()
         for r in rows:
-            if r["id"] in active_ids or r["id"] in seen:
+            if r["id"] in active_ids or r["id"] in seen or r.get("unlisted"):   # ── UNLISTED_LIVE_PNL_20261124 ── not in the fleet
                 continue
             seen.add(r["id"])
             out["idle"].append({"id": r["id"], "mode": r["mode"]})

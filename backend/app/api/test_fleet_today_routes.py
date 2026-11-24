@@ -370,6 +370,41 @@ v5 = row(o, "SCALP_V5")
 check("Scalp V5 open SELL leg: short math (100−95)×650 = +3,250", v5 is not None and v5["state"] == "OPEN" and abs(v5["unrealised"] - 3250) < 1e-6, v5 and v5["unrealised"])
 check("no duplicate legs (the open row is added once)", v3["open_legs"] == 1 and v5["open_legs"] == 1)
 
+print("── 17. LIVE money of a strategy the licence no longer lists still counts (UNLISTED_LIVE_PNL_20261124, DEF-101)")
+DENY.clear()
+DENY.add("TSG_V1")
+b = feed()["totals"]
+_ent, _ext = DAY0 - 5 * 86400 + 36000, DAY0 - 5 * 86400 + 39600
+live("TSG_V1", "NIFTY26SEP23300CE", "SHORT", 100.0, 80.0, "MTM_SL", _ent, _ext)            # +1,300 gross, 5 days ago
+paper("TSG_V1", "NIFTY26SEP23300PE", "SHORT", 100.0, 50.0, "MTM_SL", _ent, _ext)          # paper: must not count
+live("TSG_V1", "NIFTY26AUG23300CE", "SHORT", 100.0, 90.0, "MTM_SL", DAY0 - 45 * 86400, DAY0 - 45 * 86400 + 600)   # outside the month
+_ch, _ok = CR._model_charges(True, 100.0, 80.0, 65)
+o = feed()
+a = o["totals"]
+check("unlisted strategy's live leg adds its net to LIVE week", _ok and abs(a["LIVE"]["week_net"] - b["LIVE"]["week_net"] - (1300 - _ch)) < 0.011, (b["LIVE"]["week_net"], a["LIVE"]["week_net"], _ch))
+check("… and to LIVE month, one more trade each", abs(a["LIVE"]["month_net"] - b["LIVE"]["month_net"] - (1300 - _ch)) < 0.011
+      and a["LIVE"]["week_trades"] == b["LIVE"]["week_trades"] + 1 and a["LIVE"]["month_trades"] == b["LIVE"]["month_trades"] + 1)
+check("its paper legs do not count", a["PAPER"]["week_net"] == b["PAPER"]["week_net"] and a["PAPER"]["month_trades"] == b["PAPER"]["month_trades"])
+check("a live leg older than the month window does not count", a["LIVE"]["month_trades"] == b["LIVE"]["month_trades"] + 1)
+check("not a tile, not idle, not in the fleet count", row(o, "TSG_V1", "LIVE") is None and row(o, "TSG_V1") is None
+      and "TSG_V1" not in [x["id"] for x in o["idle"]] and o["fleet"] == len(F.FLEET_IDS) - 1)
+check("today's LIVE figures unchanged (gross, rows)", a["LIVE"]["gross"] == b["LIVE"]["gross"] and a["LIVE"]["rows"] == b["LIVE"]["rows"])
+_rows = F._compute(NOW, [])
+check("never sampled into the MTM chart", "TSG_V1:LIVE" not in F._sample_values(_rows))
+DENY.clear()
+lic = feed()["totals"]
+check("LIVE week/month are the same licensed or not", lic["LIVE"]["week_net"] == a["LIVE"]["week_net"] and lic["LIVE"]["month_net"] == a["LIVE"]["month_net"]
+      and lic["LIVE"]["month_trades"] == a["LIVE"]["month_trades"], (lic["LIVE"], a["LIVE"]))
+DENY.add("ORB_V1")
+check("an unlisted strategy with no live leg in the window gets no row", not any(r.get("unlisted") for r in F._compute(NOW, [])))
+DENY.add("TSG_V1")
+_real = F._legs_for
+F._legs_for = lambda sid, w: (_ for _ in ()).throw(RuntimeError("db gone")) if sid == "TSG_V1" else _real(sid, w)
+o = feed()
+check("an unlisted strategy that fails to read is a warning, the fleet still answers", o["ok"] and any("TSG_V1 (unlisted)" in w for w in o.get("warnings", [])))
+F._legs_for = _real
+DENY.clear()
+
 print()
 if FAILS:
     print(f"FAILED {len(FAILS)}:")
