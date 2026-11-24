@@ -18,7 +18,7 @@ Not suites (left out): `backend/app/test_selector.py` (a scratch print of pick_s
 | `backend/app/api/test_dash_calm_routes.py` | script | c3fc4197fc63 | TC-CALM-0024…0033 |
 | `backend/app/api/test_fleet_fresh_marks.py` | script | ee46c9a3e21c | — |
 | `backend/app/api/test_fleet_ready.py` | script | c1c6e8b06b01 | TC-READY-0001…0015 |
-| `backend/app/api/test_fleet_today_routes.py` | script | aaa5d2605be5 | — |
+| `backend/app/api/test_fleet_today_routes.py` | script | 7039e2129808 | — |
 | `backend/app/api/test_ic_closed_route.py` | script | 2b2280e9bd01 | — |
 | `backend/app/api/test_index_path.py` | script | 7a0155040df3 | TC-IDX-0012…0023 |
 | `backend/app/api/test_margin_log.py` | script | 59b4f75b0132 | — |
