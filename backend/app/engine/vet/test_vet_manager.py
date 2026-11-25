@@ -401,6 +401,48 @@ chk("TC-VET-0343 loop: the broker executor is built whatever the arm-time mode",
     'if mode == "LIVE":\n        from app.execution.executor_factory' not in _loop
     and "executor = get_executor_for_strategy(STRATEGY_ID)" in _loop)
 
+print("\n── 10. A PAPER group open beside a LIVE one (VET_ORPHAN_PAPER_20261125, DEF-103) ──")
+# 25 Nov replay: PAPER short open since 09:19, the old version opened a LIVE
+# short at 10:05 beside it; the next version adopted LIVE and left PAPER open.
+db30 = os.path.join(tmpdir, "y.db")
+m30 = mk(SELL, db=db30)                                   # PAPER
+m30.open_position("PE", ts=1000, bar_ts=1000, condition=1)
+ex31 = Exec()
+m31 = mk(SELL, db=db30, execu=ex31)                       # LIVE, same DB
+m31.open_position("PE", ts=2000, bar_ts=2000, condition=1)
+repo30 = m31.repo
+chk("TC-VET-0344 both books open: LIVE wins whatever Settings say (real money managed first)",
+    carried_book_mode(repo30, "PAPER") == "LIVE" and carried_book_mode(repo30, "LIVE") == "LIVE")
+pg = repo30.open_group("PAPER")
+lg = repo30.open_group("LIVE")
+n_orders = len(ex31.calls)
+chk("TC-VET-0346 no price for a leg: nothing is written, the PAPER rows stay OPEN",
+    m31.close_orphan_paper(pg, ts=3000, mark_fn=lambda sym: None) is None
+    and repo30.open_group("PAPER") is not None)
+PX = {pg["main"]["tradingsymbol"]: 200.0, pg["wing"]["tradingsymbol"]: 3.0}
+r32 = m31.close_orphan_paper(pg, ts=3000, mark_fn=PX.get)
+rows = {r["id"]: r for r in repo30.trades_on(0, 10 ** 10, "PAPER")}
+mrow, wrow = rows[pg["main"]["id"]], rows[pg["wing"]["id"]]
+q_m, q_w = m31._leg_qty(pg["main"]), m31._leg_qty(pg["wing"])
+exp = (float(pg["main"]["entry_price"]) - 200.0) * q_m + (3.0 - float(pg["wing"]["entry_price"])) * q_w
+chk("TC-VET-0345 the PAPER group is closed in the paper book: both legs CLOSED, reason MODE_SWITCH, "
+    "short P&L = (entry − price) × qty, wing = (price − entry) × qty",
+    r32 is not None and mrow["status"] == "CLOSED" and wrow["status"] == "CLOSED"
+    and mrow["exit_reason"] == "MODE_SWITCH" and abs(r32["gross"] - round(exp, 2)) < 0.01
+    and mrow["net_pnl"] is not None and wrow["net_pnl"] is not None, (r32, exp))
+chk("TC-VET-0345 ...with no broker order, and the LIVE position untouched",
+    len(ex31.calls) == n_orders and repo30.open_group("LIVE") is not None
+    and m31.pos and m31.pos["group_id"] == lg["group_id"])
+chk("TC-VET-0347 a LIVE group is never closed this way",
+    m31.close_orphan_paper(lg, ts=3100, mark_fn=PX.get) is None and repo30.open_group("LIVE") is not None)
+
+_i_orph = _loop.find("_orphan = repo.open_group(\"PAPER\")")
+_i_close = _loop.find("manager.close_orphan_paper(_orphan")
+_i_adopt = _loop.find("g = repo.open_group(mode)")
+chk("TC-VET-0348 loop: the PAPER group beside a LIVE one is closed at arm, after the manager is built "
+    "and before the LIVE position is adopted",
+    0 < _i_orph < _i_mgr < _i_close < _i_adopt, (_i_orph, _i_mgr, _i_close, _i_adopt))
+
 print("\n" + ("ALL MANAGER SMOKE CHECKS PASSED" if F == 0
               else f"{F} FAILURES"))
 sys.exit(1 if F else 0)

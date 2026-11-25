@@ -157,14 +157,16 @@ def carried_book_mode(repo, settings_mode: str) -> str:
     """A carried open position keeps the mode it was opened in until it
     exits, whatever Settings say now (a LIVE carry must never be orphaned by
     a switch to PAPER, nor a PAPER carry by a switch to LIVE). No open
-    position → the Settings book ('LIVE' | 'PAPER')."""
+    position → the Settings book ('LIVE' | 'PAPER').
+    VET_ORPHAN_PAPER_20261125 (DEF-103): if BOTH books hold an open group
+    (left by an older version), LIVE always wins — real money is managed
+    first; the caller closes the PAPER one (close_orphan_paper)."""
     want = "LIVE" if str(settings_mode or "").upper() == "LIVE" else "PAPER"
-    other = "PAPER" if want == "LIVE" else "LIVE"
     try:
-        if repo.open_group(want):
-            return want
-        if repo.open_group(other):
-            return other
+        if repo.open_group("LIVE"):
+            return "LIVE"
+        if repo.open_group("PAPER"):
+            return "PAPER"
     except Exception as e:
         write_audit_log(f"[VET][MODE] open-position lookup failed ({e!r}) — "
                         f"starting in the Settings book {want}")
@@ -1483,6 +1485,60 @@ class VetManager:
                              f"this and later entries are {want}.")
         return True
     # ── VET_MODE_FOLLOW_20261125 END ────────────────────────────────────
+
+    # ── VET_ORPHAN_PAPER_20261125 BEGIN (DEF-103) ───────────────────────
+    # 25 Nov: a restart on the old version opened a LIVE position while a
+    # PAPER one was open; the next version adopted the LIVE one and left the
+    # PAPER group OPEN with nothing to ever exit it. The manager holds ONE
+    # position, so a second (PAPER) group found at arm is closed in the paper
+    # book at the current price — no broker order, same P&L and charges
+    # maths as a normal paper close — and an alert says so.
+    def close_orphan_paper(self, g: Dict, *, ts: int, mark_fn: Callable,
+                           reason: str = "MODE_SWITCH") -> Optional[Dict]:
+        """Close a PAPER group this manager is not holding. mark_fn(symbol)
+        → price or None. Any leg without a price → nothing is written."""
+        main, wing = (g or {}).get("main"), (g or {}).get("wing")
+        if not main or str(main.get("mode") or "").upper() != "PAPER":
+            return None
+        if self.pos is not None and self.pos.get("group_id") == g.get("group_id"):
+            return None
+        legs = [(main, str(main.get("direction") or "").upper() == "SHORT")]
+        if wing:
+            legs.append((wing, False))
+        marks = {}
+        for leg, _ in legs:
+            try:
+                px = mark_fn(leg["tradingsymbol"])
+                px = float(px) if px is not None else 0.0
+            except Exception:
+                px = 0.0
+            if px <= 0:
+                self._mode_alert(("ORPHAN_NOPRICE", g.get("group_id")),
+                                 f"VET_V1: PAPER position {g.get('group_id')} is open beside the "
+                                 f"{self.mode} one and could not be closed (no price for "
+                                 f"{leg['tradingsymbol']}) — it will be tried again at the next arm.",
+                                 severity="warning")
+                return None
+            marks[leg["tradingsymbol"]] = px
+        total = total_net = 0.0
+        for leg, short in legs:
+            px, q, entry = marks[leg["tradingsymbol"]], self._leg_qty(leg), float(leg["entry_price"])
+            gross = (entry - px) * q if short else (px - entry) * q
+            ch = self._leg_charges(short, entry, px, q)
+            self.repo.close_leg(int(leg["id"]), exit_ts=int(ts), exit_price=px, exit_reason=reason,
+                                pnl=round(gross, 2), charges=round(ch, 2),
+                                net_pnl=round(gross - ch, 2), exit_order_id=None)
+            total += gross
+            total_net += gross - ch
+        self._mode_alert(("ORPHAN_CLOSED", g.get("group_id")),
+                         f"VET_V1: closed the PAPER position {g.get('group_id')} "
+                         f"({main.get('tradingsymbol')}) in the paper book — it was open beside the "
+                         f"{self.mode} position the strategy now manages. Paper only, no broker order: "
+                         f"gross {total:,.0f}, net {total_net:,.0f}.",
+                         severity="warning")
+        return {"group_id": g.get("group_id"), "reason": reason,
+                "gross": round(total, 2), "net": round(total_net, 2)}
+    # ── VET_ORPHAN_PAPER_20261125 END ───────────────────────────────────
 
     # ── restart ─────────────────────────────────────────────────────────
     def resume_from_db(self) -> Optional[Dict]:

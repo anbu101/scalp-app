@@ -341,6 +341,15 @@ async def _vet_selection_loop_inner(zerodha_manager):
                         f"{mode} until it exits; Settings say {settings_mode}, "
                         f"which starts with the next entry")
     _alert_mode["mode"] = mode
+    # ── VET_ORPHAN_PAPER_20261125 (DEF-103) ── a PAPER group open beside the
+    # LIVE one (left by an older version) is closed below, once the manager
+    # exists; LIVE is the one managed.
+    _orphan = None
+    if mode == "LIVE":
+        try:
+            _orphan = repo.open_group("PAPER")
+        except Exception as _oe:
+            write_audit_log(f"[VET][ORPHAN] PAPER lookup failed: {_oe!r}")
     from app.execution.executor_factory import get_executor_for_strategy
     executor = None
     try:
@@ -358,6 +367,21 @@ async def _vet_selection_loop_inner(zerodha_manager):
     manager.entries_gate = lambda: _xm.entries_allowed(_xm.strategy_mode(STRATEGY_ID))   # ── FLEET_MODES_20260923 ──
     manager.mode_reader = lambda: _xm.book(_xm.strategy_mode(STRATEGY_ID))   # ── VET_MODE_FOLLOW_20261125 ──
     manager.executor_fn = lambda: get_executor_for_strategy(STRATEGY_ID)
+    if _orphan and _orphan.get("main"):   # ── VET_ORPHAN_PAPER_20261125 ──
+        def _ltp(sym):
+            try:
+                k = f"NFO:{sym}"
+                return float((kite.ltp([k]).get(k) or {}).get("last_price") or 0) or None
+            except Exception as _le:
+                write_audit_log(f"[VET][ORPHAN] LTP {sym} failed: {_le!r}")
+                return None
+        try:
+            _r = manager.close_orphan_paper(_orphan, ts=int(time.time()), mark_fn=_ltp)
+            write_audit_log(f"[VET][ORPHAN] PAPER {_orphan.get('group_id')} beside the LIVE position: "
+                            + (f"closed in the paper book (gross {_r['gross']:,.0f}, net {_r['net']:,.0f})"
+                               if _r else "NOT closed (no price) — retried at the next arm"))
+        except Exception as _ce:
+            write_audit_log(f"[VET][ORPHAN] close failed: {_ce!r}")
     # ── VET_DTE_LIVE_20261005 ── today's lots / skip from dte_lot_mult (read
     # once per session, like the mode); carried positions keep their own qty.
     manager.apply_day_lots(today)
