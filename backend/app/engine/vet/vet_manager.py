@@ -152,6 +152,25 @@ R_SL = "SL"   # ── VET_SLTP_LIVE_20261015 ──
 R_TP = "TP"
 
 
+# ── VET_MODE_FOLLOW_20261125 (DEF-102) ── which book the manager starts in.
+def carried_book_mode(repo, settings_mode: str) -> str:
+    """A carried open position keeps the mode it was opened in until it
+    exits, whatever Settings say now (a LIVE carry must never be orphaned by
+    a switch to PAPER, nor a PAPER carry by a switch to LIVE). No open
+    position → the Settings book ('LIVE' | 'PAPER')."""
+    want = "LIVE" if str(settings_mode or "").upper() == "LIVE" else "PAPER"
+    other = "PAPER" if want == "LIVE" else "LIVE"
+    try:
+        if repo.open_group(want):
+            return want
+        if repo.open_group(other):
+            return other
+    except Exception as e:
+        write_audit_log(f"[VET][MODE] open-position lookup failed ({e!r}) — "
+                        f"starting in the Settings book {want}")
+    return want
+
+
 def _fresh_vet_cfg():
     """── VET_SLTP_LIVE_20261015 ── Settings as saved NOW (SL/TP % for the next entry)."""
     from app.config.strategy_loader import load_strategy_config
@@ -210,6 +229,13 @@ class VetManager:
         # re-arm); None in harnesses = in memory only.
         self.kill_block_side: Optional[str] = None
         self.kill_block_path: Optional[str] = None
+        # ── VET_MODE_FOLLOW_20261125 (DEF-102) ── Settings mode followed at
+        # each entry. mode_reader() → 'LIVE' | 'PAPER' (the book Settings
+        # ask for); executor_fn() builds the broker executor on demand.
+        # Both injected by the live loop; None in harnesses = mode fixed.
+        self.mode_reader: Optional[Callable[[], str]] = None
+        self.executor_fn: Optional[Callable[[], object]] = None
+        self._mode_notice = None
         # ── VET_WING_FAR_20261101 ── fn(side, ts, main, expiry, cap,
         # max_strikes) -> row | None. Injected by the live loop; None in
         # harnesses (identical to the pre-fix manager).
@@ -590,6 +616,8 @@ class VetManager:
             return None
         if self.entries_gate is not None and not self.entries_gate():   # ── FLEET_MODES_20260923 ──
             write_audit_log("[VET][MGR] entry suppressed — strategy OFF (no new entries)")
+            return None
+        if not self.sync_mode():   # ── VET_MODE_FOLLOW_20261125 ── LIVE asked, no broker → no entry
             return None
         if self.day_skip:   # ── VET_DTE_LIVE_20261005 ──
             write_audit_log(f"[VET][MGR] entry suppressed — {self.day_dte}DTE "
@@ -1399,6 +1427,62 @@ class VetManager:
         self._save_kill_block()
         return True
     # ── VET_KILL_BLOCK_20261123 END ─────────────────────────────────────
+
+    # ── VET_MODE_FOLLOW_20261125 BEGIN (DEF-102) ────────────────────────
+    # 25 Nov: VET armed at 08:30 as PAPER, Settings went LIVE at 08:46, and
+    # the 09:20 entry was booked PAPER — the mode was read once, at arm.
+    # Now, like every other strategy, the mode is the one Settings say at
+    # the moment of entry. An open position keeps its own mode to its exit;
+    # the switch lands on the next entry (a FLIP's re-entry included).
+    def _mode_alert(self, key, msg: str, severity: str = "info") -> None:
+        if self._mode_notice == key:
+            return
+        self._mode_notice = key
+        write_audit_log(f"[VET][MODE] {msg}")
+        try:
+            from app.event_bus.inapp_events import record_alert
+            record_alert("VET_MODE", msg, severity=severity,
+                         strategy_id="VET_V1", mode=self.mode.lower())
+        except Exception:
+            pass
+
+    def sync_mode(self) -> bool:
+        """Follow Settings while flat. Returns False only when the book is
+        (or would become) LIVE and no broker executor can be built — the
+        caller must not enter (never book a LIVE row with paper fills)."""
+        if self.mode_reader is None:
+            return True
+        try:
+            want = "LIVE" if str(self.mode_reader() or "").upper() == "LIVE" else "PAPER"
+        except Exception as e:
+            write_audit_log(f"[VET][MODE] Settings unreadable ({e!r}) — keeping {self.mode}")
+            want = self.mode
+        if want != self.mode and self.pos is not None:
+            self._mode_alert(("PENDING", want, self.pos.get("group_id")),
+                             f"VET_V1: Settings say {want}; the open {self.mode} position "
+                             f"keeps {self.mode} until it exits — {want} starts with the next entry.")
+            return True
+        if want == "LIVE" and self.executor is None and self.executor_fn is not None:
+            try:
+                self.executor = self.executor_fn()
+                if self.executor is not None:
+                    write_audit_log("[VET][MODE] broker executor built for LIVE")
+            except Exception as e:
+                write_audit_log(f"[VET][MODE] executor build failed: {e!r}")
+        if want == "LIVE" and self.executor is None:
+            self._mode_alert(("NOEXEC",),
+                             "VET_V1: Settings say LIVE but the broker executor is not "
+                             "available — no entry (fail closed). Check Connections.",
+                             severity="error")
+            return False
+        if want != self.mode:
+            prev, self.mode = self.mode, want
+            self._mode_notice = None
+            self._mode_alert(("SWITCH", want),
+                             f"VET_V1 switched {prev} → {want} (Settings) — "
+                             f"this and later entries are {want}.")
+        return True
+    # ── VET_MODE_FOLLOW_20261125 END ────────────────────────────────────
 
     # ── restart ─────────────────────────────────────────────────────────
     def resume_from_db(self) -> Optional[Dict]:

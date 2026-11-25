@@ -1,5 +1,6 @@
 # scripts/checklist/items.py — ── RELIABILITY_GATE_20261118 ── (TD-048)
 #                              ── ISOLATED_HOME_20261122 ── CL-15 (DEF-094)
+#                              ── VET_MODE_FOLLOW_20261125 ── CL-16 (DEF-102)
 #
 # The reliability checklist. Each item has
 #   trigger  — something you can read from the staged diff (paths + added lines)
@@ -315,6 +316,51 @@ def cl15(ctx):
                   f"the real ~/.scalp-app (DEF-094)" for f in fs if not HOME_SET.search(f.new_text())], ""
 
 
+# ── CL-16 a Settings mode change needs no restart (DEF-102) ───────────
+EXEC_OR_MODE = re.compile(r"get_executor_for_strategy\(|trade_execution_mode")
+MODE_TEST = re.compile(r"LIVE|\bmode\b", re.I)
+
+
+def live_only_executor(src):
+    """Lines of get_executor_for_strategy( calls in the BODY of an
+    `if <mode / LIVE test>:` when the file builds it nowhere else — the
+    executor then exists only if the mode was LIVE at arm (DEF-102)."""
+    tree = ast.parse(src)
+    parent = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+    gated, free = [], []
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Call)
+                and getattr(n.func, "id", getattr(n.func, "attr", "")) == "get_executor_for_strategy"):
+            continue
+        child, p, in_live = n, parent.get(n), False
+        while p is not None:
+            if isinstance(p, ast.If) and MODE_TEST.search(ast.get_source_segment(src, p.test) or ""):
+                in_live = any(child is b for b in p.body)
+                break
+            child, p = p, parent.get(p)
+        (gated if in_live else free).append(n.lineno)
+    return gated if (gated and not free) else []
+
+
+def cl16(ctx):
+    fs = [f for f in ctx.files
+          if f.status != "D" and f.path.startswith("backend/app/engine/") and f.path.endswith(".py")
+          and not is_test(f.path) and any(EXEC_OR_MODE.search(t) for _, t in f.added)]
+    if not fs:
+        return False, [], ""
+    out = []
+    for f in fs:
+        try:
+            hits = live_only_executor(f.new_text())
+        except SyntaxError:
+            continue
+        if hits:
+            out.append(f"{f.path}:{hits}: the broker executor is built only when the arm-time mode is LIVE — "
+                       f"a PAPER→LIVE switch in Settings then needs a restart (DEF-102). Pre-build it whatever "
+                       f"the mode and read the mode at entry.")
+    return True, out, f"{len(fs)} engine file(s) scanned"
+
+
 ITEMS = [
     dict(id="CL-01", kind="auto", title="No hard-coded credentials", fn=cl01,
          trigger="an added line assigns a 16+ character literal to a key / secret / token / password name",
@@ -377,4 +423,10 @@ ITEMS = [
          trigger="a suite runner changes (run_suites.py, regression/master_suite.py, mutation/mutmut_run.py, ci/run_ci_suites.py)",
          check="each suite runs with HOME pointed at a throw-away folder (isolate_home / plan(home=…) / HOME=<tmp>)",
          incidents="DEF-094 (master suite: fake LIVE ORB trades in app.db, Zerodha / Telegram credentials replaced)"),
+    dict(id="CL-16", kind="auto", title="A Settings mode change takes effect without a restart", fn=cl16,
+         trigger="an engine file (backend/app/engine/**, not tests) gains a line with get_executor_for_strategy( "
+                 "or trade_execution_mode",
+         check="the executor is not built only under `if mode == LIVE` at arm — pre-build it whatever the mode, "
+               "read the mode at entry (engine/test_mode_follow_fleet.py)",
+         incidents="DEF-102 (25 Nov: VET armed PAPER at 08:30, Settings LIVE at 08:46, the 09:20 entry booked PAPER)"),
 ]

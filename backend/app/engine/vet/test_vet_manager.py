@@ -321,6 +321,86 @@ _i_load = _loop.find("manager.load_kill_block()")
 chk("TC-VET-0331 loop: the live manager gets the state file and restores the block at arm time",
     0 < _i_path < _i_load < _i_gate and "vet_kill_block.json" in _loop, (_i_path, _i_load))
 
+print("\n── 9. Settings mode followed at each entry (VET_MODE_FOLLOW_20261125, DEF-102) ──")
+from app.engine.vet.vet_manager import carried_book_mode
+WANT = ["LIVE"]
+SELL = {"leg_action": "SELL", "hedge_enabled": True, "hedge_max_premium": 3.0}
+
+# 25 Nov replay: armed PAPER at 08:30, Settings switched to LIVE at 08:46
+ex19 = Exec()
+m19 = mk(SELL, db=os.path.join(tmpdir, "q.db"))            # PAPER, no executor
+m19.mode_reader, m19.executor_fn = (lambda: WANT[0]), (lambda: ex19)
+p19 = m19.open_position("PE", ts=1000, bar_ts=1000, condition=1)
+chk("TC-VET-0332 armed PAPER, Settings now LIVE, flat: the next entry is LIVE with real orders",
+    p19 is not None and m19.mode == "LIVE" and p19["main"].get("mode") == "LIVE"
+    and [c[0] for c in ex19.calls][:2] == ["BUY", "SELL"], (m19.mode, ex19.calls))
+
+ex20 = Exec()
+m20 = mk(SELL, db=os.path.join(tmpdir, "r.db"))
+m20.open_position("PE", ts=1000, bar_ts=1000, condition=1)  # PAPER position open
+m20.mode_reader, m20.executor_fn = (lambda: WANT[0]), (lambda: ex20)
+chk("TC-VET-0333 a PAPER position open when Settings go LIVE keeps PAPER and places no order",
+    m20.sync_mode() is True and m20.mode == "PAPER" and ex20.calls == []
+    and m20.pos["main"].get("mode") == "PAPER")
+m20.close_position("SIGNAL_EXIT", ts=1100)
+chk("TC-VET-0333 ...its exit is booked PAPER (no broker order)", ex20.calls == [])
+p20 = m20.open_position("CE", ts=1200, bar_ts=1200, condition=-1)
+chk("TC-VET-0334 after that position closes on its own, the next entry is LIVE",
+    p20 is not None and m20.mode == "LIVE" and p20["main"].get("mode") == "LIVE"
+    and ("SELL", p20["main"]["tradingsymbol"]) in ex20.calls)
+
+ex21 = Exec()
+m21 = mk(SELL, db=os.path.join(tmpdir, "s.db"))
+m21.open_position("PE", ts=1000, bar_ts=1000, condition=1)  # PAPER
+m21.mode_reader, m21.executor_fn = (lambda: WANT[0]), (lambda: ex21)
+r21 = m21.on_decision({"action": FLIP, "side": "CE", "reason": "FLIP",
+                       "bar_ts": 1300, "condition": -1}, ts=1300)
+chk("TC-VET-0335 a FLIP out of a PAPER position re-enters LIVE (exit PAPER, entry LIVE)",
+    r21 and r21["closed"] and r21["opened"] and m21.mode == "LIVE"
+    and m21.pos["main"].get("mode") == "LIVE"
+    and not any(c[1] for c in ex21.calls if c[0] in ("CLOSE_SHORT", "CLOSE_LONG")), r21)
+
+m22 = mk(SELL, db=os.path.join(tmpdir, "t.db"))
+def _no_exec():
+    raise RuntimeError("no session")
+m22.mode_reader, m22.executor_fn = (lambda: "LIVE"), _no_exec
+chk("TC-VET-0336 Settings LIVE but no broker executor: no entry at all (never a LIVE row with paper fills)",
+    m22.open_position("PE", ts=1000, bar_ts=1000, condition=1) is None
+    and m22.pos is None and m22.mode == "PAPER")
+
+ex23 = Exec()
+m23 = mk(SELL, db=os.path.join(tmpdir, "u.db"), execu=ex23)  # LIVE
+m23.mode_reader = lambda: "PAPER"
+p23 = m23.open_position("PE", ts=1000, bar_ts=1000, condition=1)
+chk("TC-VET-0337 armed LIVE, Settings now PAPER, flat: the next entry is PAPER, no order",
+    p23 is not None and m23.mode == "PAPER" and ex23.calls == [])
+
+m24 = mk(SELL, db=os.path.join(tmpdir, "v.db"))
+chk("TC-VET-0338 a manager with no mode reader (harness) never changes mode",
+    m24.sync_mode() is True and m24.mode == "PAPER")
+
+# arm: which book to start in
+repo25 = m20.repo                                    # LIVE position open there now
+chk("TC-VET-0339 arm with a LIVE position open and Settings PAPER: start LIVE (the live carry is never orphaned)",
+    carried_book_mode(repo25, "PAPER") == "LIVE")
+m26 = mk(SELL, db=os.path.join(tmpdir, "w.db"))
+m26.open_position("PE", ts=1000, bar_ts=1000, condition=1)    # PAPER carry
+chk("TC-VET-0340 arm with a PAPER position open and Settings LIVE: start PAPER (the 25 Nov paper trade runs to its own exit)",
+    carried_book_mode(m26.repo, "LIVE") == "PAPER")
+m27 = mk(SELL, db=os.path.join(tmpdir, "x.db"))
+chk("TC-VET-0341 arm with nothing open: start in the Settings book",
+    carried_book_mode(m27.repo, "LIVE") == "LIVE" and carried_book_mode(m27.repo, "PAPER") == "PAPER")
+
+_i_book = _loop.find("mode = carried_book_mode(repo, settings_mode)")
+_i_mgr = _loop.find("manager = VetManager(")
+_i_reader = _loop.find("manager.mode_reader = lambda: _xm.book(_xm.strategy_mode(STRATEGY_ID))")
+_i_sync = _loop.find("manager.sync_mode()")
+chk("TC-VET-0342 loop: book picked from open positions before the manager is built; Settings read at each decision",
+    0 < _i_book < _i_mgr < _i_reader and _i_dec < _i_sync < _i_gate, (_i_book, _i_mgr, _i_reader, _i_sync))
+chk("TC-VET-0343 loop: the broker executor is built whatever the arm-time mode",
+    'if mode == "LIVE":\n        from app.execution.executor_factory' not in _loop
+    and "executor = get_executor_for_strategy(STRATEGY_ID)" in _loop)
+
 print("\n" + ("ALL MANAGER SMOKE CHECKS PASSED" if F == 0
               else f"{F} FAILURES"))
 sys.exit(1 if F else 0)

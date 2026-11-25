@@ -58,6 +58,7 @@ from app.engine.vet.vet_common import VetRepo
 from app.engine.vet.vet_live_core import ENTER, FLIP, HOLD
 from app.engine.vet.vet_live_signal_engine import VetLiveSignalEngine
 from app.engine.vet.vet_manager import VetManager, _fresh_vet_cfg   # ── VET_SLTP_LIVE_20261015 ──
+from app.engine.vet.vet_manager import carried_book_mode   # ── VET_MODE_FOLLOW_20261125 ──
 from app.event_bus.audit_logger import write_audit_log
 from app.risk import execution_modes as _xm   # ── FLEET_MODES_20260923 ──
 from app.utils.day_cycle import wait_for_arm_window, wait_for_teardown
@@ -329,16 +330,34 @@ async def _vet_selection_loop_inner(zerodha_manager):
         return tick.chain.last_close_at_or_before(sym, now - now % 60,
                                                   QUOTE_LOOKBACK_MIN)
 
+    # ── VET_MODE_FOLLOW_20261125 BEGIN (DEF-102) ── the Settings mode is
+    # followed at each entry, not frozen here. A carried open position keeps
+    # the mode it opened in until it exits; the executor is pre-built
+    # whatever the mode (house rule: a PAPER→LIVE flip never needs a restart).
+    settings_mode = mode
+    mode = carried_book_mode(repo, settings_mode)
+    if mode != settings_mode:
+        write_audit_log(f"[VET][MODE] carried {mode} position open — managed as "
+                        f"{mode} until it exits; Settings say {settings_mode}, "
+                        f"which starts with the next entry")
+    _alert_mode["mode"] = mode
+    from app.execution.executor_factory import get_executor_for_strategy
     executor = None
-    if mode == "LIVE":
-        from app.execution.executor_factory import get_executor_for_strategy
+    try:
         executor = get_executor_for_strategy(STRATEGY_ID)
+        write_audit_log("[VET] executor pre-built")
+    except Exception as e:
+        write_audit_log(f"[VET] executor build failed ({e!r}) — PAPER unaffected; "
+                        f"a LIVE entry retries the build and fails closed")
+    # ── VET_MODE_FOLLOW_20261125 END ──
 
     manager = VetManager(cfg, repo=repo, chain_fn=chain_list,
                          quote_fn=quote, executor=executor, mode=mode,
                          cfg_reader=_fresh_vet_cfg)   # ── VET_SLTP_LIVE_20261015 ── SL/TP % from Settings at each entry
     _manager = manager
     manager.entries_gate = lambda: _xm.entries_allowed(_xm.strategy_mode(STRATEGY_ID))   # ── FLEET_MODES_20260923 ──
+    manager.mode_reader = lambda: _xm.book(_xm.strategy_mode(STRATEGY_ID))   # ── VET_MODE_FOLLOW_20261125 ──
+    manager.executor_fn = lambda: get_executor_for_strategy(STRATEGY_ID)
     # ── VET_DTE_LIVE_20261005 ── today's lots / skip from dte_lot_mult (read
     # once per session, like the mode); carried positions keep their own qty.
     manager.apply_day_lots(today)
@@ -537,6 +556,11 @@ async def _vet_selection_loop_inner(zerodha_manager):
         # close, BEFORE the signal (a stop that fires keeps its own reason)
         _sltp_hit = manager.check_sltp(ts)
         decision = engine.decide(manager.pos["side"] if manager.pos else None)
+        # ── VET_MODE_FOLLOW_20261125 ── follow a Settings mode change while
+        # flat (an open position keeps its mode; the switch lands on the next
+        # entry, re-checked inside the manager at the moment of entry)
+        manager.sync_mode()
+        _alert_mode["mode"] = manager.mode
         state["last_decision"] = decision
         _bar_log(sig, decision)                       # ── VET_NEAR_OBS_20261106 ──
         if decision.get("blocked"):
@@ -670,7 +694,8 @@ async def _vet_selection_loop_inner(zerodha_manager):
                             f"warm from live ticks (later first signal)")
 
     tick.start()
-    write_audit_log(f"[VET] armed: mode={mode} leg={cfg.get('leg_action')} "
+    write_audit_log(f"[VET] armed: mode={mode} (Settings {settings_mode}; followed at each entry) "   # ── VET_MODE_FOLLOW_20261125 ──
+                    f"leg={cfg.get('leg_action')} "
                     f"eod_square={eod_square} universe={n} expiry={expiry_iso} "
                     f"dte={manager.day_dte} ({manager.day_dte_tag}, "
                     f"entry qty {manager.entry_qty}) "   # ── VET_DTE_LIVE_20261005 ──
