@@ -107,7 +107,9 @@ def test_ps4_idempotent():
 def test_ps5_exempt_set_locked():
     # NOTE: this assertion was stale in the pre-split tree (said ("IC_V1",)
     # while the code already exempted TSG_V1 too). Fixed to the true set.
-    assert SQ.OVERNIGHT_EXEMPT_STRATEGIES == ("IC_V2", "TSG_V1")
+    # ── STALE_TESTS_20261126 ── (DEF-050 / DEF-082) FLEET_MODES_20260923 added the three positional
+    # strategies that carry overnight; the five-strategy set is intended (Anbu, 26 Nov).
+    assert SQ.OVERNIGHT_EXEMPT_STRATEGIES == ("IC_V2", "TSG_V1", "TMA_V2", "VET_V1", "TMA_V1")
 
 
 if __name__ == "__main__":

@@ -293,10 +293,16 @@ def main():
     check("?fleet parsing: absent / '-' / '' / list",
           M._fleet_ids(None) is None and M._fleet_ids("-") == set() and M._fleet_ids("") == set()
           and M._fleet_ids("ic_v2, TSG_V1") == {"IC_V2", "TSG_V1"})
-    g = M.get_summary(days=30, fleet="IC_V2")
+    # ── STALE_TESTS_20261126 ── (DEF-087) the route counts its 30 days back from the real clock, and this
+    # data is dated 19 Oct 2026: from 18 Nov the rows fell out of the window. The route is read at 10:00 that day.
+    import unittest.mock as _um
+    with _um.patch.object(M.time, "time", return_value=float(ist(10, 0))):
+        g = M.get_summary(days=30, fleet="IC_V2")
+        g_all = M.get_summary(days=30)
     check("route echoes the selection and filters the fleet",
           g["ok"] and g["fleet_ids"] == ["IC_V2"] and g["fleet"]["PAPER"]["peak"] == 2.1e6, g.get("fleet"))
-    check("route without ?fleet → all", M.get_summary(days=30)["fleet_ids"] is None)
+    check("route without ?fleet → all", g_all["fleet_ids"] is None and g_all["fleet"]["PAPER"]["peak"] == 2.1e6 + 4e5 + 5e4,
+          g_all.get("fleet"))
 
     if FAILS:
         print(f"\n{len(FAILS)} FAILURES: {FAILS}")

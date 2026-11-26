@@ -2,6 +2,7 @@
 #                              ── ISOLATED_HOME_20261122 ── CL-15 (DEF-094)
 #                              ── VET_MODE_FOLLOW_20261125 ── CL-16 (DEF-102)
 #                              ── HOOK_NO_ADD_20261126 ── CL-17 (DEF-060)
+#                              ── PYTEST_FALLBACK_20261126 ── CL-18 (DEF-098; ported from e7ea184f, where it was CL-16)
 #
 # The reliability checklist. Each item has
 #   trigger  — something you can read from the staged diff (paths + added lines)
@@ -381,6 +382,22 @@ def cl17(ctx):
                 break
     return True, out, f"{len(fs)} hook file(s) scanned"
 
+
+# ── CL-18 a runner's missing-package check knows python -m's bare message ──
+QUOTED_GAP = "No module named '"                 # ModuleNotFoundError: No module named 'x'
+BARE_GAP = ": No module named ("                 # <python>: No module named pytest  (python -m, no pytest)
+
+
+def cl18(ctx):
+    fs = [f for f in ctx.files if f.status != "D" and f.path in RUNNERS and "No module named" in f.new_text()]
+    if not fs:
+        return False, [], ""
+    return True, [f"{f.path}: looks for \"No module named 'x'\" only — python -m pytest with no pytest prints "
+                  f"\"<python>: No module named pytest\" (no quotes), so every pytest suite counts as FAILED, "
+                  f"not 'not runnable here' (DEF-098)"
+                  for f in fs if QUOTED_GAP in f.new_text() and BARE_GAP not in f.new_text()], ""
+
+
 ITEMS = [
     dict(id="CL-01", kind="auto", title="No hard-coded credentials", fn=cl01,
          trigger="an added line assigns a 16+ character literal to a key / secret / token / password name",
@@ -455,4 +472,10 @@ ITEMS = [
                "for `git add … and commit again`",
          incidents="DEF-060 (18 Nov: repo-map-refresh git-added REPO_MAP.md that also had unstaged edits; the "
                    "commit aborted with 'patch does not apply', the edits left only in ~/.cache/pre-commit)"),
+    dict(id="CL-18", kind="auto", title="Suite runners see a missing pytest as 'not runnable here', not a failure",
+         fn=cl18,
+         trigger="a suite runner that reads 'No module named' from a suite's output changes",
+         check="it recognises the bare '<python>: No module named pytest' line of python -m too, not only "
+               "\"No module named 'x'\"",
+         incidents="DEF-098 (run_suites.py counted every pytest suite as FAILED on Anbu's Mac: the venv has no pytest)"),
 ]

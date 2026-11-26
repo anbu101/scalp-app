@@ -3,6 +3,7 @@
 #                                     ── ISOLATED_HOME_20261122 ── (DEF-094) TC-GATE-0055…0056
 #                                     ── VET_MODE_FOLLOW_20261125 ── (DEF-102) TC-GATE-0059…0061
 #                                     ── HOOK_NO_ADD_20261126 ── (DEF-060) TC-GATE-0062…0064; 0038/0040 count 17 items
+#                                     ── PYTEST_FALLBACK_20261126 ── (DEF-098) TC-GATE-0057…0058 (CL-18); 0038/0040 count 18 items
 #
 # Checks of the diff-triggered checklist (scripts/checklist/items.py) and the commit gate
 # (scripts/hooks/reliability_checklist.py) in throw-away git repos — never this repo's index.
@@ -154,6 +155,13 @@ chk("TC-GATE-0055", "CL-15: a suite runner that does not give suites a throw-awa
 rc, out, fin = one(d, "scripts/run_suites.py", "import os, tempfile\nenv = dict(os.environ)\n"
                    "env['HOME'] = tempfile.mkdtemp()\n" + STUB_SUITES)
 chk("TC-GATE-0056", "CL-15: a runner that points HOME at a temp folder passes", status_of(fin, "CL-15") == "pass", fin)
+QGAP = "GAP = r\"No module named '([\\w.]+)'\"\n"
+rc, out, fin = one(d, "scripts/run_suites.py", STUB_SUITES + "# HOME = tempfile.mkdtemp()\n" + QGAP)
+chk("TC-GATE-0057", "CL-18: a runner that reads only \"No module named 'x'\" (not python -m's bare line) fails (DEF-098)",
+    status_of(fin, "CL-18") == "fail", fin)
+rc, out, fin = one(d, "scripts/run_suites.py", STUB_SUITES + "# HOME = tempfile.mkdtemp()\n" + QGAP
+                   + "BARE = r\"python[\\d.]*: No module named ([\\w.]+)\"\n")
+chk("TC-GATE-0058", "CL-18: a runner that reads both forms passes", status_of(fin, "CL-18") == "pass", fin)
 one(d, "scripts/run_suites.py", STUB_SUITES)
 rc, out, fin = one(d, "backend/app/engine/vet/vet_loop_x.py",
                    "def arm(mode):\n    executor = None\n    if mode == 'LIVE':\n"
@@ -299,8 +307,8 @@ git(d, "commit", "-qm", "c1", "--no-verify")
 rc, out = cli("--range", "HEAD~1..HEAD")
 chk("TC-GATE-0037", "--range A..B replays a past commit", rc == 1 and "CL-02 fail" in out, out)
 rc, out = cli("--list")
-chk("TC-GATE-0038", "--list shows 17 items, each with trigger, check and incidents",
-    "17 items" in out and out.count("incidents:") == 17 and out.count("trigger:") == 17, out[:300])
+chk("TC-GATE-0038", "--list shows 18 items, each with trigger, check and incidents",
+    "18 items" in out and out.count("incidents:") == 18 and out.count("trigger:") == 18, out[:300])
 commit(d, "x")
 rc, out = cli("--report")
 chk("TC-GATE-0039", "--report summarises the log", rc == 0 and "commits logged" in out, out)
@@ -310,8 +318,8 @@ shutil.rmtree(d, ignore_errors=True)
 ns = {}
 exec(compile(open(ITEMS).read(), ITEMS, "exec"), ns)
 ids = [i["id"] for i in ns["ITEMS"]]
-chk("TC-GATE-0040", "items: unique ids CL-01…CL-17, kind auto|ack, every item names its incidents",
-    ids == [f"CL-{n:02d}" for n in range(1, 18)] and all(i["kind"] in ("auto", "ack") and i["incidents"]
+chk("TC-GATE-0040", "items: unique ids CL-01…CL-18, kind auto|ack, every item names its incidents",
+    ids == [f"CL-{n:02d}" for n in range(1, 19)] and all(i["kind"] in ("auto", "ack") and i["incidents"]
                                                          and i["trigger"] and i["check"] for i in ns["ITEMS"]), ids)
 
 print("\n" + ("ALL RELIABILITY CHECKLIST CHECKS PASSED" if F == 0 else f"{F} FAILURES"))

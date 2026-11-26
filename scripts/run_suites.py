@@ -2,6 +2,7 @@
 # scripts/run_suites.py  — ── REPO_MAP_20261117 ── (TD-038)
 #                          ── REPO_MAP_FIX_20261117 ── each suite runs the way it is meant to run
 #                          ── ISOLATED_HOME_20261122 ── (DEF-094) every suite gets a throw-away HOME
+#                          ── PYTEST_FALLBACK_20261126 ── (DEF-098) a pytest suite runs with a Python that has pytest
 #
 # Runs the repo's test suites and prints ONLY the failures (last 25 lines
 # each) and one summary line. Stdlib only (pytest itself is needed for the
@@ -23,6 +24,8 @@
 # trades into app.db and replaced the Zerodha / Telegram credentials). pip --user packages
 # and Playwright's browsers stay reachable; the folder is deleted when the run ends.
 # frontend/uitest/** : cwd=frontend. Other paths (scripts/**): cwd=repo root. *.mjs: node.
+# A pytest suite whose Python (the backend venv) has no pytest runs with the first of
+# sys.executable / python3 on PATH that has it (DEF-098); with none, it is "not runnable here".
 # "not runnable here" = a third-party package this Python lacks (pytest, fastapi, …);
 # a module that exists in this repo but cannot be imported is a FAILURE, not an env gap.
 # Exit 0 = all passed, 1 = a failure, 2 = bad arguments.
@@ -150,6 +153,44 @@ def isolate_home(env, home):
     return env
 
 
+def fallback_pythons():
+    """Other Pythons to try when the suite's own one lacks pytest (DEF-098). Tests replace this."""
+    return [sys.executable, shutil.which("python3")]
+
+
+_HAS = {}
+
+
+def has_module(py, mod, env):
+    """Can `py` import `mod` with the suite's env (its throw-away HOME, PYTHONUSERBASE)? Cached per Python."""
+    key = (os.path.abspath(py), mod)          # not realpath: a venv python links to the system binary
+    if key not in _HAS:
+        try:
+            _HAS[key] = subprocess.run([py, "-c", f"import {mod}"], cwd=ROOT, env=env, capture_output=True,
+                                       timeout=120).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            _HAS[key] = False
+    return _HAS[key]
+
+
+FELL_BACK = {}                                # suite's Python -> the one used instead (reported once)
+
+
+def pytest_python(py, env):
+    """── PYTEST_FALLBACK_20261126 ── (DEF-098) `py` if it has pytest, else the first fallback that has it,
+    else `py` itself (the run then says 'No module named pytest' and counts as not runnable here)."""
+    if has_module(py, "pytest", env):
+        return py
+    seen = {os.path.abspath(py)}
+    for alt in fallback_pythons():
+        if alt and os.path.abspath(alt) not in seen:
+            seen.add(os.path.abspath(alt))
+            if has_module(alt, "pytest", env):
+                FELL_BACK[py] = alt
+                return alt
+    return py
+
+
 def plan(path, home=None):
     """(cmd, cwd, env) for one suite. env always has a throw-away HOME: `home`, or a new temp folder."""
     rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
@@ -167,6 +208,7 @@ def plan(path, home=None):
     env["PYTHONPATH"] = os.pathsep.join(pp)
     cwd = {"backend": backend, "root": ROOT, "dir": os.path.dirname(path)}[m["cwd"]]
     if m["runner"] == "pytest":
+        py = pytest_python(py, env)
         return [py, "-m", "pytest", "-q", "-p", "no:cacheprovider", os.path.basename(path)], cwd, env
     return [py, path], cwd, env
 
@@ -188,11 +230,13 @@ def local_modules():
 
 def env_gap(out):
     """The missing module, if the failure is a third-party package this Python lacks."""
-    for mm in re.finditer(r"No module named '([\w.]+)'", out):
-        top = mm.group(1).split(".")[0]
+    # 'quoted' = ModuleNotFoundError; bare = `python -m pytest` with no pytest ("…/python: No module named pytest")
+    for mm in re.finditer(r"No module named '([\w.]+)'|python[\d.]*(?:\.exe)?: No module named ([\w.]+)\s*$", out, re.M):
+        name = mm.group(1) or mm.group(2)
+        top = name.split(".")[0]
         if top in ("app", "backend") or top in local_modules():
             return None                          # a repo module that would not import: a real failure
-        return mm.group(1)
+        return name
     return None
 
 
@@ -248,6 +292,9 @@ def _run(suites, timeout, quiet, homes, passed, failed, envmiss):
         if not quiet:
             print(f"✗ {rel} (exit {rc})")
             print("\n".join("    " + l for l in out.rstrip().splitlines()[-25:]))
+    if not quiet:
+        for a, b in FELL_BACK.items():
+            print(f"note: {a} has no pytest; pytest suites ran with {b} (DEF-098)")
     print(f"{passed} passed, {len(failed)} failed, {len(envmiss)} not runnable here — {len(suites)} suites")
     return 1 if failed else 0
 

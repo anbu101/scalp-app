@@ -97,9 +97,16 @@ def test_is4_both_ship_off():
 
 # ── IS5: identical leg TEMPLATE (the split is semantics, not structure) ───
 def test_is5_leg_templates_identical():
+    # ── STALE_TESTS_20261126 ── (DEF-049) Icarus (IC_V2) sells its two shorts at premium_max 100 while Indica
+    # (IC_V1) keeps 85 — intended (Anbu, 26 Nov). Everything else in the templates must still match.
     v1, v2 = DEFAULTS["IC_V1"]["legs"], DEFAULTS["IC_V2"]["legs"]
     assert [l["id"] for l in v1] == ["L1", "L2", "L3", "L4"]
-    assert v1 == v2, "leg templates must match — only exit/adjust semantics differ"
+    strip = lambda legs: [{k: v for k, v in l.items() if k != "premium_max"} for l in legs]   # noqa: E731
+    assert strip(v1) == strip(v2), "leg templates must match apart from premium_max — only exit/adjust semantics differ"
+    sells = {l["id"]: l["premium_max"] for l in v2 if l["action"] == "SELL"}
+    assert sells == {"L1": 100, "L2": 100}, f"IC_V2 short legs sell at premium_max 100: {sells}"
+    wings = [(a["premium_max"], b["premium_max"]) for a, b in zip(v1, v2) if a["action"] == "BUY"]
+    assert all(x == y for x, y in wings), f"wing caps identical in both instances: {wings}"
 
 
 # ── IS6: IC_V1 lots whitelist must NOT expose adjust.* paths ──────────────

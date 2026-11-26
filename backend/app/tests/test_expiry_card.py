@@ -1,5 +1,6 @@
 # backend/app/tests/test_expiry_card.py
 #
+# ── STALE_TESTS_20261126 ── (DEF-051/066) month-strip keys checked against the expiry calendar
 # ── EXPIRY_CARD_20260929 ── behavioural suite for the week + month expiry card:
 #   renderer   three fixtures render, fail-open, compact formatting
 #   data       buckets from synthetic legs on the REAL epoch clock through the
@@ -166,8 +167,13 @@ def test_data():
     exp_key = D._expected_expiry(D._ist_date(now - 12 * D_ - H)).isoformat()
     check("month strip: 12-day-old leg lands in its expected-expiry cell",
           any(c.key == exp_key and c.trades >= 1 for c in mp.cells), str([(c.key, c.net) for c in mp.cells]))
-    check("month strip keys are Tuesdays (expected expiry era)",
-          all(date.fromisoformat(c.key).weekday() == 1 for c in mp.cells), str([c.key for c in mp.cells]))
+    # ── STALE_TESTS_20261126 ── (DEF-051 / DEF-066) a Tuesday NSE holiday moves that week's expiry to the
+    # Monday before (19 Oct, 9 Nov, 23 Nov 2026), so "every key is a Tuesday" failed on the real clock while the
+    # card was right. Each key must be an expiry by the app's own calendar (its own expected expiry) — a Tuesday,
+    # or the Monday before a Tuesday holiday.
+    check("month strip keys are expiries by the app's calendar (Tuesday, or the Monday before a Tuesday holiday)",
+          all(D._expected_expiry(date.fromisoformat(c.key)) == date.fromisoformat(c.key)
+              and date.fromisoformat(c.key).weekday() in (0, 1) for c in mp.cells), str([c.key for c in mp.cells]))
     check("templates: both books share the same cell keys",
           [c.key for c in wp.cells] == [c.key for c in wl.cells] and [c.key for c in mp.cells] == [c.key for c in ml.cells])
     check("subtitle ends with 'weekly expiry'", data.subtitle.endswith("IST \u00b7 weekly expiry"), data.subtitle)

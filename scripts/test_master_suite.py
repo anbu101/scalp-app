@@ -2,6 +2,7 @@
 # scripts/test_master_suite.py — ── MASTER_SUITE_20261122 ── (TD-079) TC-REGR-0001…0029
 #                           ── ISOLATED_HOME_20261122 ── (DEF-094) TC-REGR-0030…0033
 #                           ── HOOK_NO_ADD_20261126 ── (DEF-060) TC-REGR-0011 reworded: the hook never stages
+#                           ── PYTEST_FALLBACK_20261126 ── (DEF-098) TC-REGR-0034…0037
 #
 # The master regression suite (scripts/regression/master_suite.py), its weekly
 # scheduler (schedule.py) and its pre-commit hook, checked in throw-away git
@@ -282,6 +283,52 @@ try:
         and e.get("PYTHONUSERBASE") == os.environ.get("PYTHONUSERBASE", _site.getuserbase()),
         {k: e.get(k) for k in ("HOME", "USERPROFILE", "PYTHONUSERBASE")})
     shutil.rmtree(h0, ignore_errors=True)
+    # ── PYTEST_FALLBACK_20261126 ── DEF-098: on Anbu's Mac backend/venv has no pytest; `python -m pytest` then
+    # says "…/venv/bin/python: No module named pytest" (no quotes) and every pytest suite counted as FAILED.
+    chk("TC-REGR-0034", "run_suites env_gap: the bare '<python>: No module named pytest' line (python -m pytest with "
+        "no pytest) is a missing package; a repo module or a stray phrase in a log is not",
+        RS.env_gap("/x/backend/venv/bin/python: No module named pytest\n") == "pytest"
+        and RS.env_gap("C:\\v\\python.exe: No module named pytest") == "pytest"
+        and RS.env_gap("ModuleNotFoundError: No module named 'fastapi'") == "fastapi"
+        and RS.env_gap("/x/python3: No module named app") is None
+        and RS.env_gap("ModuleNotFoundError: No module named 'app.engine'") is None
+        and RS.env_gap("No module named in the config was found") is None,
+        [RS.env_gap(x) for x in ("/x/python: No module named pytest", "No module named in the config")])
+    put(d, "backend/venv/bin/python", "#!/bin/sh\necho \"$0: No module named pytest\" >&2\nexit 1\n")
+    os.chmod(vpy, 0o755)
+    put(d, "backend/app/x/test_pyt.py", "import os, pathlib\nimport pytest\n\n\ndef test_home():\n"
+        "    pathlib.Path(os.environ['PYT_MARK']).write_text(str(pathlib.Path.home()))\n    assert pytest\n")
+    realhome = tempfile.mkdtemp(prefix="msuite_realhome_")
+    mark = os.path.join(realhome, "seen_home")
+    have_pytest = subprocess.run([sys.executable, "-c", "import pytest"], capture_output=True).returncode == 0
+    r = subprocess.run([sys.executable, os.path.join(d, "scripts", "run_suites.py"), "backend/app/x/test_pyt.py"],
+                       cwd=d, env=dict(ENV, HOME=realhome, PYT_MARK=mark), capture_output=True, text=True,
+                       timeout=300)
+    seen3 = open(mark, encoding="utf-8").read() if os.path.exists(mark) else ""
+    if have_pytest:
+        chk("TC-REGR-0035", "run_suites.py: a pytest suite whose backend-venv Python has no pytest runs with a Python "
+            "that has it and passes (exit 0, '1 passed'), and says which Python it used",
+            r.returncode == 0 and "1 passed, 0 failed" in r.stdout and "has no pytest; pytest suites ran with" in r.stdout,
+            r.stdout + r.stderr)
+        chk("TC-REGR-0036", "…and that fallback run still gets a throw-away HOME (not the caller's), deleted after it",
+            bool(seen3) and os.path.realpath(seen3) != os.path.realpath(realhome) and not os.path.exists(seen3)
+            and not os.path.exists(os.path.join(realhome, ".scalp-app")), (seen3, r.stdout))
+    else:
+        print("  skip TC-REGR-0035/0036 (this Python has no pytest to fall back to)")
+    RS2 = load(os.path.join(d, "scripts", "run_suites.py"), "rs_t2")
+    RS2.fallback_pythons = lambda: [vpy, None]          # no Python here has pytest
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc2 = RS2.main(["backend/app/x/test_pyt.py"])
+    chk("TC-REGR-0037", "run_suites.py: when no Python has pytest, a pytest suite is 'not runnable here' (exit 0), "
+        "never a failure",
+        rc2 == 0 and "0 passed, 0 failed, 1 not runnable here" in buf.getvalue()
+        and "needs a package this Python lacks: pytest" in buf.getvalue(), buf.getvalue())
+    os.remove(os.path.join(d, "backend/app/x/test_pyt.py"))
+    shutil.rmtree(os.path.join(d, "backend", "venv"))
+    shutil.rmtree(realhome, ignore_errors=True)
     for _ in range(3):
         tool(d, "run", "--out", out, "--no-build", "--keep", "2", "--only", "backend/app/x/test_bad.py", env=PORT)
     runs = [x for x in os.listdir(out) if x[:2] == "20"]
