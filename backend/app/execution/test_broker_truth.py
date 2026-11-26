@@ -165,8 +165,38 @@ def t_threads():
     check("ledger is safe under 20 threads", not errs, str(errs[:2]))
 
 
+def t_test_run_guard():
+    """── TEST_RUN_GUARD_20261126 ── (DEF-105) TC-EXEC-0258 / 0259: a hand-run suite never writes the real state dir."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    bt_dir = str(Path(__file__).resolve().parents[2])          # backend/
+    body = ("import sys; sys.path.insert(0, sys.argv[1])\n"
+            "from app.execution import broker_truth as bt\n"
+            "bt.note_app_order('Z1'); bt._flush_app_orders() if hasattr(bt, '_flush_app_orders') else None\n"
+            "import time; time.sleep(1.5)\n")
+    for tc, name, want_file in (("TC-EXEC-0258", "test_probe_hand_run.py", False), ("TC-EXEC-0259", "live_probe.py", True)):
+        home = tempfile.mkdtemp(prefix="bt_guard_")
+        d = tempfile.mkdtemp(prefix="bt_guard_src_")
+        f = os.path.join(d, name)
+        open(f, "w").write(body)
+        env = {k: v for k, v in os.environ.items() if k != "SCALP_TEST_MODE"}
+        env["HOME"] = home
+        r = subprocess.run([sys.executable, f, bt_dir], env=env, capture_output=True, text=True, timeout=120)
+        state = Path(home) / ".scalp-app" / "state"
+        files = sorted(state.glob("app_orders_*.txt")) if state.exists() else []
+        got = bool(files) and "Z1" in files[0].read_text()
+        check(f"{tc} {'hand-run test script' if not want_file else 'non-test program (the live path)'} "
+              f"{name}: app_orders day file {'written' if want_file else 'NOT written'} in its HOME",
+              r.returncode == 0 and got == want_file, (r.returncode, r.stderr[-300:], files))
+        shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
-    for fn in (t_strict_reads, t_session, t_ledger, t_own_net_qty, t_unregistered_strategy_from_db_rows, t_threads):
+    for fn in (t_strict_reads, t_session, t_ledger, t_own_net_qty, t_unregistered_strategy_from_db_rows, t_threads,
+               t_test_run_guard):
         try:
             fn()
         except Exception as e:

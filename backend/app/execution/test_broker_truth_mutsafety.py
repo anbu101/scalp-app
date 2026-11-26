@@ -753,7 +753,7 @@ check(f"{TC} spent stop, GTT list unreadable → kept with a try", n == 1 and di
 
 # ── 0243 live paths, defaults, several GTTs in one pass ──────────────────
 TC = "TC-EXEC-0243"
-_env_home, _env_tm = os.environ.get("HOME"), os.environ.pop("SCALP_TEST_MODE", None)
+_env_home, _env_tm = os.environ.get("HOME"), os.environ.pop("SCALP_TEST_MODE", None); os.environ["SCALP_TEST_MODE"] = "0"   # TEST_RUN_GUARD_20261126: "0" = behave as live (a test_*.py run counts as a test otherwise)
 LIVE = TMP / "livehome"
 os.environ["HOME"] = str(LIVE)
 try:
@@ -795,8 +795,8 @@ try:
     check(f"{TC} live: a new day with no file starts empty", BT.app_order_ids() == set(), BT.app_order_ids())
 finally:
     os.environ["HOME"] = _env_home or ""
-    if _env_tm is not None:
-        os.environ["SCALP_TEST_MODE"] = _env_tm
+    os.environ.pop("SCALP_TEST_MODE", None)
+    if _env_tm is not None: os.environ["SCALP_TEST_MODE"] = _env_tm   # noqa: E701
     BT._APP_ORDERS_DAY[0] = ""
     BT.reset_app_orders()
 

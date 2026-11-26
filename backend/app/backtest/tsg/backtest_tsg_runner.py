@@ -201,11 +201,19 @@ def cap_gap(pool: List[Tuple[str, float]], pick, cap: float, meta_by_sym: Dict[s
     k1 = (meta_by_sym.get(nxt[0]) or {}).get("strike")
     if k0 is None or k1 is None:
         return None
-    gap = abs(float(k1) - float(k0))
-    if gap <= CHAIN_GAP_MAX_STEPS * step + 1e-6:
+    # ── CHAIN_GAP_FIX_20261126 ── (DEF-106) count the strikes MISSING between the pick and the next
+    # strike above the cap, not their distance: with several strikes at the pick's premium (a flat
+    # far-OTM tail) the tie-break can pick a far one whose neighbours are all there, and the
+    # distance alone skipped whole chains (18 of 30 days on test_tsg_sl_per_lot's corpus).
+    have = {round(float((meta_by_sym.get(s) or {}).get("strike")), 2) for s, _p in pool
+            if (meta_by_sym.get(s) or {}).get("strike") is not None}
+    lo, hi = sorted((float(k0), float(k1)))
+    n_between = int(round((hi - lo) / step)) - 1
+    missing = sum(1 for i in range(1, n_between + 1) if round(lo + i * step, 2) not in have)
+    if missing < CHAIN_GAP_MAX_STEPS:
         return None
     return (f"{pick[0]} @{float(pick[1]):.2f} vs next {nxt[0]} @{float(nxt[1]):.2f} "
-            f"({gap:.0f} pts apart, cap {cap:g})")
+            f"({hi - lo:.0f} pts apart, {missing} strikes missing between them, cap {cap:g})")
 # ── CHAIN_GAP_20261126 END ──
 
 

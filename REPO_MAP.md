@@ -42,7 +42,7 @@ Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core
 - `execution/execution_router.py` ExecutionRouter:19 — strategies get this, not the executor; every method they call needs a forward
 - `execution/zerodha_executor.py` — Kite orders/GTTs (+angel_, base_, executor_factory, strategy_executor)
 - `execution/exit_order_driver.py` drive_exit_order:70 — live exit re-peg/cancel/confirm until flat, never a model price
-- `execution/broker_truth.py` LEDGER:471 — strict reads (BrokerUnreadable, never [] = flat); LEDGER = who holds what on a shared contract
+- `execution/broker_truth.py` LEDGER:487 — strict reads (BrokerUnreadable, never [] = flat); LEDGER = who holds what on a shared contract
 - `execution/kill_switch.py` — per-strategy kill: close, cancel GTTs, verify flat
 - `api/telegram_api.py` notify_critical:1690 — critical alerts: bell always, Telegram never for PAPER
 - `api_server.py` BackgroundScheduler:869 — routes, launches (_boot_guard), APScheduler (misfire 3600, coalesce); jobs/scheduler_observability.py

@@ -708,7 +708,16 @@ def _chain_tests():
     # TC-TSG-0133 no pick, or a strike unknown to the metadata → no verdict (None)
     assert cap_gap(pool, None, 120.0, meta, 100.0) is None
     assert cap_gap([("X", 5.0), ("Y", 200.0)], ("X", 5.0), 120.0, {}, 50.0) is None
+    # TC-TSG-0134 (CHAIN_GAP_FIX_20261126, DEF-106) a flat far-OTM tail: many strikes share the pick's
+    # premium and the tie-break picks a far one; every strike is recorded, so it is NOT a gap
+    rows = [(24000 + 50 * k, 59.9) for k in range(0, 12)] + [(24600, 75.0), (24650, 125.0), (24700, 175.0)]
+    pool, meta = ladder(rows, "CE")
+    far = ("NIFTY24000CE", 59.9)                 # what a symbol tie-break could return
+    assert cap_gap(pool, far, 85.0, meta, 50.0) is None, cap_gap(pool, far, 85.0, meta, 50.0)
+    pool2, meta2 = ladder([(24000, 59.9), (24650, 125.0)], "CE")
+    assert cap_gap(pool2, ("NIFTY24000CE", 59.9), 85.0, meta2, 50.0) is not None   # the strikes between ARE missing
     print("  ok  6 CHAIN_GAP_20261126 tests (TC-TSG-0128…0133)")
+    print("  ok  TC-TSG-0134 a flat far-OTM tail with every strike recorded is not a chain gap (DEF-106)")
 
 
 _chain_tests()

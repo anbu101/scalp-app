@@ -487,8 +487,29 @@ def preflight(work, ws, rel, kind, timeout=600):
     return "" if r.returncode == 0 else f"fails unmutated (exit {r.returncode})"
 
 
-def write_survivors(ws, mod, mm, env):
+# ── MUT_FLAKY_RETRY_20261126 ── (DEF-084) "Failed to run clean test" means mutmut tested NO mutant.
+# survivors.txt then said "0 survivors", which reads like a perfect score; now it says what happened.
+CLEAN_FAIL = "Failed to run clean test"
+CLEAN_FAIL_STATUS = "FAILED: mutmut's clean test pass failed, NO mutants tested (see mutmut.log)"
+
+
+def clean_test_failed(log_path, start=0) -> bool:
+    """True when this run's part of mutmut.log (from byte `start`) has mutmut's clean-pass failure."""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(start)
+            return CLEAN_FAIL.encode() in f.read()
+    except OSError:
+        return False
+
+
+def write_survivors(ws, mod, mm, env, clean_failed=False):
     rel = MODULES[mod]["file"]
+    if clean_failed:
+        with open(os.path.join(ws, "survivors.txt"), "w", encoding="utf-8") as f:
+            f.write(f"# NO MUTANTS TESTED in {rel}: mutmut's clean test pass failed (see mutmut.log).\n"
+                    f"# This is not a 0-survivor result. Rerun the module on an idle Mac.\n")
+        return
     res = read_results(ws, rel)
     names = sorted(n for n, c in res.items() if status_of(c) == "survived")
     out = []
@@ -551,6 +572,7 @@ def run_module(work, mod, jobs, budget_min, fresh, state):
     with open(os.path.join(ws, "mutmut.log"), "a", encoding="utf-8") as log:
         log.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} {FENCE} run -j {jobs}\n")
         log.flush()
+        log_start = log.tell()                     # ── MUT_FLAKY_RETRY_20261126 ── this run's part of the log
         p = subprocess.Popen([mm, "run", "--max-children", str(jobs)], cwd=ws, env=env, stdout=log,
                              stderr=subprocess.STDOUT, start_new_session=True)
         low = []
@@ -594,7 +616,10 @@ def run_module(work, mod, jobs, budget_min, fresh, state):
             stop.set()
             sweep_tmp(tmp, 0)
     st["seconds"] = st.get("seconds", 0) + (time.time() - t0)
-    write_survivors(ws, mod, mm, env)
+    clean_failed = clean_test_failed(os.path.join(ws, "mutmut.log"), log_start)   # ── MUT_FLAKY_RETRY_20261126 ──
+    if clean_failed:
+        st["status"] = CLEAN_FAIL_STATUS
+    write_survivors(ws, mod, mm, env, clean_failed=clean_failed)
     sweep_tmp(tmp, 0)
     save_state(work, state)
 

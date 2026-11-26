@@ -163,8 +163,27 @@ def run_suite(rel, kind, root=ROOT, limit_s=None):
     return out["rc"]
 
 
+# ── MUT_FLAKY_RETRY_20261126 ── (DEF-084) a suite whose fork failed while NO mutant was active
+# (mutmut's clean pass "" or its stats pass "stats") is run once more. On 22 Nov one fork died
+# importing numpy ('Could not parse python long as longdouble', intermittent, worse under load)
+# and the whole broker_truth run ended at "Failed to run clean test" with nothing tested. A real
+# failure fails twice; a mutant run ("<module>__mutmut_<n>") and the forced-fail check ("fail")
+# are never retried, so a killed mutant is never hidden.
+def _no_mutant_active() -> bool:
+    try:
+        from mutmut.mutation.trampoline import get_mutant_under_test
+        name = get_mutant_under_test()
+    except Exception:
+        name = os.environ.get("MUTANT_UNDER_TEST", "")
+    return name in ("", "stats")
+
+
 @pytest.mark.parametrize("rel,kind,secs", [(s["path"], s["kind"], s.get("secs", 30.0)) for s in CFG["suites"]],
                          ids=[s["path"].replace("/", "__") for s in CFG["suites"]])
 def test_suite(rel, kind, secs):
     rc = run_suite(rel, kind, limit_s=max(60.0, 10.0 * secs))
+    if rc != 0 and _no_mutant_active():
+        print(f"[MUT_FLAKY_RETRY_20261126] {rel}: exited {rc} with no mutant active (clean / stats pass) "
+              f"— running it once more", flush=True)
+        rc = run_suite(rel, kind, limit_s=max(60.0, 10.0 * secs))
     assert rc == 0, f"{rel} exited {rc}"

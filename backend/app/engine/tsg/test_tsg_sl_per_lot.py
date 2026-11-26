@@ -280,7 +280,7 @@ def t_backtest():
         o = run(ORIG, {"legs": legs(10), "mtm_sl": 3000})
         check("legacy config ≡ ORIGINAL runner row-for-row", K(o) == K(leg10))
         check("legacy summary net identical", o["summary"]["net_pnl"] == leg10["summary"]["net_pnl"])
-        _later = {"mtm_check", "mtm_sl_hard_mult", "mtm_hard_stop_days"}   # ── TSG_MTM_INTRABAR_FIX1_20261101 ── keys added by later fences
+        _later = {"mtm_check", "mtm_sl_hard_mult", "mtm_hard_stop_days", "days_chain_gap"}   # ── TSG_MTM_INTRABAR_FIX1_20261101 ── keys added by later fences (+ CHAIN_GAP_20261126, DEF-106)
         check("legacy diag keys identical (no per-lot key leaks)",
               set(o["summary"].get("diag_tsg", {})) - _later == set(leg10["summary"].get("diag_tsg", {})) - _later)
     else:

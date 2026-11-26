@@ -163,12 +163,28 @@ _APP_ORDERS_DAY: List[str] = [""]
 _APP_ORDERS_LOCK = threading.Lock()
 
 
-def _app_orders_file():
+# ── TEST_RUN_GUARD_20261126 ── (DEF-105 / DEF-044) a test run never touches the real
+# ~/.scalp-app/state. SCALP_TEST_MODE=1 (set by run_suites / the master suite) was the only
+# switch, so a suite run BY HAND (python3 test_x.py, pytest, test_ic_gtt_strict.py's own
+# runner) wrote its fake order ids into the real app_orders_<day>.txt, and every later run
+# that day read them back as the app's own orders (DEF-044). A pytest process or a script
+# named test_*.py now counts as a test run too. The live app is neither.
+def _test_run() -> bool:
     import os
+    import sys
+    tm = os.environ.get("SCALP_TEST_MODE")
+    if tm in ("1", "0"):                       # explicit: "1" test, "0" behave as live (path checks)
+        return tm == "1"
+    main = os.path.basename(sys.argv[0]) if getattr(sys, "argv", None) else ""
+    return "pytest" in sys.modules or main.startswith("test_")
+
+
+def _app_orders_file():
+    import os  # noqa: F401
     import time as _t
     from pathlib import Path
     day = _t.strftime("%Y%m%d")
-    if os.environ.get("SCALP_TEST_MODE") == "1":
+    if _test_run():
         return day, None                      # tests: memory only
     return day, Path.home() / ".scalp-app" / "state" / f"app_orders_{day}.txt"
 
@@ -485,7 +501,7 @@ LEDGER = LiveLedger()
 def _kill_dir():
     import os
     from pathlib import Path
-    if os.environ.get("SCALP_TEST_MODE") == "1":       # never the real state dir
+    if _test_run():                                    # never the real state dir (TEST_RUN_GUARD_20261126)
         import tempfile
         global _KILL_TMP
         try:
@@ -677,7 +693,7 @@ _INTENT_LOCK = threading.RLock()
 
 def _intent_file(sid: str) -> Path:
     d = INTENT_DIR
-    if d is None and os.environ.get("SCALP_TEST_MODE") == "1":    # tests never touch the real folder
+    if d is None and _test_run():                     # tests never touch the real folder (TEST_RUN_GUARD_20261126)
         import tempfile
         d = Path(tempfile.gettempdir()) / f"scalp_intent_{os.getpid()}"
     d = d or (Path.home() / ".scalp-app" / "state")

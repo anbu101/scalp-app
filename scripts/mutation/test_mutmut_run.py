@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# scripts/mutation/test_mutmut_run.py — ── MUTMUT_20261117 ── (TD-043) TC-MUT-0001…0012 · MUT_SKIP_LOGS_20261122 · MUT_TMP_SWEEP_20261122
+# scripts/mutation/test_mutmut_run.py — ── MUTMUT_20261117 ── (TD-043) [+ MUT_FLAKY_RETRY_20261126: TC-MUT-0013…0015] TC-MUT-0001…0012 · MUT_SKIP_LOGS_20261122 · MUT_TMP_SWEEP_20261122
 #
 # Checks the weekend mutation runner without mutmut: scope and suite choice,
 # the safety rails (work folder, environment, network block), the per-suite
@@ -257,6 +257,42 @@ chk("TC-MUT-0012", "disk under 2 GB free: mutmut stopped at once, status 'paused
     took < 15 and st["m"]["status"].startswith("paused (disk low: 1.5 GB free)"), (took, st))
 chk("TC-MUT-0012", "the module's temp folder is empty after the run (its 3 leaked folders gone)",
     bool(seen) and os.path.isdir(tm) and os.listdir(tm) == [], os.listdir(tm))
+
+# ── MUT_FLAKY_RETRY_20261126 ── (DEF-084) TC-MUT-0013…0015
+_lg = os.path.join(tempfile.mkdtemp(prefix="mutlog_"), "mutmut.log")
+with open(_lg, "w") as f:
+    f.write("old run\nFailed to run clean test\n==== new run\n")
+_off = len("old run\nFailed to run clean test\n")
+_ok = R.clean_test_failed(_lg, 0) and not R.clean_test_failed(_lg, _off)
+with open(_lg, "a") as f:
+    f.write("Running clean tests\nFailed to run clean test\n")
+chk("TC-MUT-0013", "a run whose own part of mutmut.log says 'Failed to run clean test' is flagged; an earlier run's "
+    "failure is not", _ok and R.clean_test_failed(_lg, _off), _lg)
+_sw = tempfile.mkdtemp(prefix="mutsurv_")
+R.write_survivors(_sw, next(iter(R.MODULES)), None, {}, clean_failed=True)
+_txt = open(os.path.join(_sw, "survivors.txt")).read()
+chk("TC-MUT-0014", "clean pass failed: survivors.txt says NO MUTANTS TESTED (never '0 survivors'); status text says so",
+    "NO MUTANTS TESTED" in _txt and "0 survivors" not in _txt and "NO mutants tested" in R.CLEAN_FAIL_STATUS, _txt)
+with open(os.path.join(ws, "app/pkg/test_flaky.py"), "w") as f:
+    f.write("import os,sys\nm=os.path.join(os.path.dirname(os.path.abspath(__file__)),'flaky.marker')\n"
+            "if os.path.exists(m):\n    sys.exit(0)\nopen(m,'w').close()\nsys.exit(1)\n")
+probe2 = ("import os,sys;sys.path.insert(0,%r);import test_mut_suites as S;S.ROOT=%r\n"
+          "os.environ['MUTANT_UNDER_TEST']=sys.argv[1]\n"
+          "m=os.path.join(%r,'app/pkg/flaky.marker')\n"
+          "os.path.exists(m) and os.remove(m)\n"
+          "try:\n    S.test_suite.__wrapped__('app/pkg/test_flaky.py','script',1.0) if hasattr(S.test_suite,'__wrapped__') "
+          "else S.test_suite('app/pkg/test_flaky.py','script',1.0)\n    print('PASSED')\n"
+          "except AssertionError as e:\n    print('FAILED', e)\n") % (os.path.join(ws, "tests"), ws, ws)
+_r = {}
+for name in ("", "stats", "app.pkg.mod.x_f__mutmut_1", "fail"):
+    pr = subprocess.run([sys.executable, "-c", probe2, name], capture_output=True, text=True, timeout=180, cwd=ws)
+    _r[name or "clean"] = ("PASSED" in pr.stdout, "MUT_FLAKY_RETRY_20261126" in pr.stdout, pr.stdout[-200:] + pr.stderr[-200:])
+chk("TC-MUT-0015", "a suite that fails once is retried once in the clean and stats passes (passes), never for a "
+    "mutant or the forced-fail check (fails, no retry)",
+    _r["clean"][:2] == (True, True) and _r["stats"][:2] == (True, True)
+    and _r["app.pkg.mod.x_f__mutmut_1"][:2] == (False, False) and _r["fail"][:2] == (False, False), _r)
+shutil.rmtree(os.path.dirname(_lg), ignore_errors=True)
+shutil.rmtree(_sw, ignore_errors=True)
 
 for d in (home, ws, fake, work):
     shutil.rmtree(d, ignore_errors=True)
