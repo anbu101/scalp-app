@@ -17,7 +17,7 @@ The system is split into four clear layers:
 ### API Layer
 - api_server.py: FastAPI entry point
 - api/zerodha_routes.py: Login, callback, status
-- api/broker_routes.py: Read-only broker truth
+- Broker reads: execution/broker_truth.py (strict reads; api/broker_routes.py, never mounted, was removed by CRED_FILES_REMOVE_20261126)
 
 ### Auth
 - ZerodhaTokenManager
