@@ -157,11 +157,11 @@ chk("long TP fills AT the limit price, not the bar high",
 chk("spot-triggered SL fills at the option CLOSE (market exit)",
     resolve_exit(is_sell=False, entry_px=150, tp_px=160, spot_stop=100,
                  direction=UP, opt_bar=B(150, 151, 130, 133),
-                 spot_bar=B(110, 112, 99, 101)) == ("SL", 133))
+                 spot_bar=B(110, 112, 99, 101)) == ("SL_SPOT", 133))   # TEST_TREE_CLEANUP_20261126 (DEF-048): SL_SPOT since CBO_PREM_SL_20260830
 chk("SL WINS when both are touched in one minute (D3 tie-break)",
     resolve_exit(is_sell=False, entry_px=150, tp_px=160, spot_stop=100,
                  direction=UP, opt_bar=B(150, 165, 130, 140),
-                 spot_bar=B(110, 118, 99, 101)) == ("SL", 140))
+                 spot_bar=B(110, 118, 99, 101)) == ("SL_SPOT", 140))   # TEST_TREE_CLEANUP_20261126 (DEF-048)
 chk("a quiet minute closes nothing",
     resolve_exit(is_sell=False, entry_px=150, tp_px=160, spot_stop=100,
                  direction=UP, opt_bar=B(150, 155, 148, 152),
@@ -169,7 +169,7 @@ chk("a quiet minute closes nothing",
 chk("DOWN trades stop on spot HIGH, not spot low",
     resolve_exit(is_sell=False, entry_px=150, tp_px=160, spot_stop=120,
                  direction=DOWN, opt_bar=B(150, 152, 148, 149),
-                 spot_bar=B(110, 121, 108, 119)) == ("SL", 149))
+                 spot_bar=B(110, 121, 108, 119)) == ("SL_SPOT", 149))
 chk("short TP triggers on option LOW reaching the limit",
     resolve_exit(is_sell=True, entry_px=150, tp_px=140, spot_stop=100,
                  direction=UP, opt_bar=B(150, 151, 139, 141),

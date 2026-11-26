@@ -33,12 +33,10 @@ from pathlib import Path
 
 # Known hits that are NOT live bugs. Keep this list short and justified —
 # every entry is a promise that someone checked.
-BASELINE = {
-    # Orphaned legacy file: class ZerodhaBroker with no __init__ and bare
-    # `kite` refs. The live class is brokers/zerodha_broker.py; nothing
-    # imports this module. DELETE IT, then remove this baseline entry.
-    "app/brokers/zerodha.py",
-}
+BASELINE: set = set()
+# ── TEST_TREE_CLEANUP_20261126 ── (DEF-045) the one entry, the orphaned
+# app/brokers/zerodha.py (no __init__, bare `kite` refs; the live class is
+# brokers/zerodha_broker.py), was deleted. Add a hit here only with a reason.
 
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "venv", ".venv",
              "build", "dist", "site-packages"}

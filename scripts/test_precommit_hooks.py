@@ -211,9 +211,10 @@ chk("TC-HOOKS-0043", "no market-hours push hook left: scripts/hooks/market_hours
     not os.path.exists(os.path.join(H, "market_hours_push.py")))
 rt = open(os.path.join(ROOT, "ruff.toml"), encoding="utf-8").read()
 sel = re.findall(r'"([A-Z]+\d*)",\s*#', rt)
-chk("TC-HOOKS-0028", "ruff.toml selects errors only (E9, F63, F7, F82), no fixing, one baselined file",
+chk("TC-HOOKS-0028", "ruff.toml selects errors only (E9, F63, F7, F82), no fixing, no baselined file "
+    "(TEST_TREE_CLEANUP_20261126: the orphaned brokers/zerodha.py was deleted, DEF-045)",
     sel == ["E9", "F63", "F7", "F82"] and "force-exclude = true" in rt
-    and re.findall(r'^"([^"]+)" = \[', rt, re.M) == ["backend/app/brokers/zerodha.py"], (sel, rt[-200:]))
+    and re.findall(r'^"([^"]+)" = \[', rt, re.M) == [] and "per-file-ignores" not in rt, (sel, rt[-200:]))
 
 print("\n" + ("ALL PRE-COMMIT HOOK CHECKS PASSED" if F == 0 else f"{F} FAILURES"))
 sys.exit(1 if F else 0)

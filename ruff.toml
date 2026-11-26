@@ -14,7 +14,5 @@ select = [
   "F82",  # undefined names (F821/F822/F823)
 ]
 
-[lint.per-file-ignores]
-# Baseline, same as check_undefined_names.py: orphaned legacy module, imported
-# by nothing, 10 x undefined `kite` (DEF-045). Delete the file, then this line.
-"backend/app/brokers/zerodha.py" = ["F821"]
+# ── TEST_TREE_CLEANUP_20261126 ── (DEF-045) no per-file baseline left: the orphaned
+# backend/app/brokers/zerodha.py (10 x undefined `kite`) was deleted.

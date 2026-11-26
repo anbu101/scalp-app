@@ -135,8 +135,8 @@ chk("TC-REPOMAP-0011", "--check exits 1 when REPO_MAP.md is out of date", rc == 
 # 0012 CLAUDE.md
 cm = open(os.path.join(ROOT, "CLAUDE.md"), encoding="utf-8").read()
 added = cm.split("REPO_MAP_20261117", 1)[1] if "REPO_MAP_20261117" in cm else ""
-chk("TC-REPOMAP-0012", "CLAUDE.md keeps its QA Register section and adds a short REPO_MAP section (≤1,200 chars)",
-    "## QA Register" in cm and "REPO_MAP.md" in added and 0 < len(added) <= 1200, len(added))
+chk("TC-REPOMAP-0012", "CLAUDE.md keeps its QA Register section and adds a short REPO_MAP section (≤2,500 chars)",
+    "## QA Register" in cm and "REPO_MAP.md" in added and 0 < len(added) <= 2500, len(added))   # TEST_TREE_CLEANUP_20261126 (DEF-091): cap 1,200 → 2,500 (Anbu, 26 Nov)
 
 # 0013 / 0014 runner prints failures + summary only, exit codes
 with tempfile.TemporaryDirectory() as d:
