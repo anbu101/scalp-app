@@ -232,7 +232,7 @@ Not suites (left out): `backend/app/test_selector.py` (a scratch print of pick_s
 | `frontend/uitest/test_ui_dash_system.py` | ui | d5ae7b800046 | TC-DSYS-0001…0020 |
 | `frontend/uitest/test_ui_debug_menu.py` | ui | ff0ec51dbf8d | TC-DBG-0001…0006 |
 | `frontend/uitest/test_ui_fleet.py` | ui | 3f8a89eed17a | — |
-| `frontend/uitest/test_ui_index.py` | ui | 88039b19e790 | TC-CALM-0046, TC-IDX-0001…0011, TC-IDX-0024…0027 |
+| `frontend/uitest/test_ui_index.py` | ui | 788fd0c9e677 | TC-CALM-0046, TC-IDX-0001…0011, TC-IDX-0024…0027 |
 | `frontend/uitest/test_ui_leg_bar.py` | ui | 43a87d0d5536 | TC-LEGBAR-0101…0107 |
 | `frontend/uitest/test_ui_live_chart.py` | ui | 383ce7bfdb55 | TC-LCHT-0001…0017 |
 | `frontend/uitest/test_ui_lvb_nav.py` | ui | 52af8f278450 | TC-LVBS-0001…0003, TC-NAV-0001…0006 |

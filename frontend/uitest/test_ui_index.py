@@ -8,6 +8,7 @@ test_ui_index.py — INDEX_PATH_20261117: NIFTY / BANKNIFTY drawn behind the Das
 """
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,7 +19,8 @@ from calm_fixture import INDICES, MARKET, PRE_INDICES, pre_open        # noqa: E
 U.start()
 from playwright.sync_api import sync_playwright                        # noqa: E402
 
-CHROME = os.environ.get("CHROME") or "/usr/bin/google-chrome"
+CHROME = os.environ.get("CHROME") or next((p for p in ("/usr/bin/google-chrome",   # ── IDX_TEST_FIX_20261126 ── a Mac finds Chrome too
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") if os.path.exists(p)), None)
 BASE = "http://127.0.0.1:47321/"
 SET = U.app_settings_api.SETTINGS_FILE
 fails, N, errs = [], [0], []
@@ -90,7 +92,9 @@ with sync_playwright() as p:
     n0 = len(pg._idx)
     pg.wait_for_timeout(10000)
     check("TC-IDX-0007", n0 >= 1 and len(pg._idx) - n0 == 0, f"index line read once, then every 30 s ({n0} at load, {len(pg._idx) - n0} in 10 s)")
-    check("TC-IDX-0008", "▲" not in pg.inner_text("[data-testid=calm-root]"), "the old index badges are gone (the chips replace them)")
+    # IDX_TEST_FIX_20261126: the old badge read "▲ +102.5 (+0.41%)"; the hero's own "Open ▲ ₹56,518" (HERO_SPLIT_20261120) is not one
+    old_badge = re.findall(r"[▲▼]\s*[+\-−]?[\d,]+\.\d+\s*\(", pg.inner_text("[data-testid=calm-root]"))
+    check("TC-IDX-0008", not old_badge, f"the old index badges are gone (the chips replace them) {old_badge[:2]}")
     errs += pg._errors
     ctx.close()
 
@@ -142,14 +146,14 @@ with sync_playwright() as p:
     g = pg.evaluate("""(() => { const r = (s) => document.querySelector(s).getBoundingClientRect();
       const txt = (el) => { const x = document.createRange(); x.selectNodeContents(el); return x.getClientRects()[0].left; };
       const box = document.querySelector('[data-testid=calm-index-chips]');
-      return { place: box.dataset.place, split: r('[data-testid=calm-hero-split]'), nifty: r('[data-index=NIFTY]'), bank: r('[data-index=BANKNIFTY]'),
+      return { place: box.dataset.place, split: r('[data-testid=calm-hero-split]'), splitText: r('[data-testid=calm-hero-split] [data-part]:first-child > span:first-child'),   /* IDX_TEST_FIX_20261126: the box is pulled left to hide the first divider; its text is what lines up */ nifty: r('[data-index=NIFTY]'), bank: r('[data-index=BANKNIFTY]'),
                chart: r('[data-testid=calm-chart]'), figText: txt(document.querySelector('[data-testid=calm-hero-figure]')),
                niftyText: txt(document.querySelector('[data-index=NIFTY] b')), svgs: box.querySelectorAll('svg').length,
                dashes: [...box.querySelectorAll('span')].filter(s => getComputedStyle(s).borderTopStyle === 'dashed').length }; })()""")
     # WEEK_ON_DATELINE_20261120: the period cards are gone, so the chips sit under the closed / open line
-    check("TC-IDX-0025", g["place"] == "under" and g["nifty"]["top"] >= g["split"]["bottom"] and abs(g["nifty"]["left"] - g["split"]["left"]) < 1
+    check("TC-IDX-0025", g["place"] == "under" and g["nifty"]["top"] >= g["split"]["bottom"] and abs(g["nifty"]["left"] - g["splitText"]["left"]) < 1
           and abs(g["nifty"]["top"] - g["bank"]["top"]) < 1 and g["bank"]["left"] > g["nifty"]["right"] and g["chart"]["left"] > g["bank"]["right"],
-          f"1440 px: NIFTY and BANKNIFTY side by side under the closed / open line, left edge on the column's, chart to the right ({g['nifty']}, {g['split']})")
+          f"1440 px: NIFTY and BANKNIFTY side by side under the closed / open line, chip's left edge on the line's first label, chart to the right (chip {g['nifty']['left']}, label {g['splitText']['left']}, line box {g['split']['left']})")
     check("TC-IDX-0026", g["svgs"] == 0 and g["dashes"] == 0,
           f"no dash and no mini line on the moved chips ({g['svgs']} svg, {g['dashes']} dashes)")
     # ── HERO_FIT_20261120: MTM 80 px, the closed / open line stays 17 px, and the chart's plot is as tall as the
