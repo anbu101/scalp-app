@@ -74,6 +74,11 @@ def _drop_partial_days(pack) -> list:
             return []
         c = _RD.connect()
         try:
+            try:                                            # ── CHAIN_GAP_20261126 ── (DEF-077)
+                from app.recorder import rec_pull as _RP
+                _RP.regrade_chain_once(c)                   # a thin front-week chain is 'partial' too
+            except Exception:
+                pass
             bad = [r[0] for r in c.execute("SELECT day FROM day_status WHERE COALESCE(quality,'') <> 'clean' ORDER BY day")]
         finally:
             c.close()

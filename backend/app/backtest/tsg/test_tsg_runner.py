@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from backtest_tsg_runner import (  # noqa: E402
     leg_mtm, simulate_tsg_day, norm_tsg_leg, DEFAULT_TSG_LEGS,
+    cap_gap, chain_step,          # ── CHAIN_GAP_20261126 ──
 )
 
 HEDGES = {"L1": "L3", "L2": "L4"}
@@ -671,3 +672,43 @@ def _intrabar_tests():
 
 
 _intrabar_tests()
+
+
+# ── CHAIN_GAP_20261126 ── (DEF-077) TC-TSG-0128…0133: a SELL pick far from the
+# next recorded strike above its cap means the chain near the cap is missing.
+def _chain_tests():
+    def ladder(rows, t="PE"):
+        pool = [(f"NIFTY{k}{t}", px) for k, px in rows]
+        meta = {f"NIFTY{k}{t}": {"strike": float(k)} for k, _ in rows}
+        return pool, meta
+
+    def pick(pool, cap):
+        el = [(s_, p) for s_, p in pool if p <= cap]
+        return sorted(el, key=lambda c: (-c[1], c[0]))[0] if el else None
+
+    # TC-TSG-0128 the 22 Oct 2026 recorded PE chain: 21400 @5.50 then 22700 @220.15 → gap
+    pool, meta = ladder([(21100, 3.55), (21250, 4.4), (21400, 5.5), (22700, 220.15), (22750, 251.4)])
+    n = cap_gap(pool, pick(pool, 120.0), 120.0, meta, chain_step("NIFTY"))
+    assert n and "1300 pts apart" in n and "NIFTY21400PE" in n, n
+    # TC-TSG-0129 a whole chain (20 Nov 2026: 25350 @101.75, 25400 @122.45) → no gap
+    pool, meta = ladder([(25250, 68.8), (25300, 83.6), (25350, 101.75), (25400, 122.45), (25450, 146.85)])
+    assert cap_gap(pool, pick(pool, 120.0), 120.0, meta, 50.0) is None
+    # TC-TSG-0130 one strike missing (100 pts on NIFTY) is tolerated; three steps are not
+    pool, meta = ladder([(25300, 83.6), (25350, 101.75), (25450, 146.85)])
+    assert cap_gap(pool, pick(pool, 120.0), 120.0, meta, 50.0) is None
+    pool, meta = ladder([(25300, 83.6), (25350, 101.75), (25500, 175.15)])
+    assert cap_gap(pool, pick(pool, 120.0), 120.0, meta, 50.0) is not None
+    # TC-TSG-0131 nothing recorded above the cap (expiry-day chain below the cap) → the pick stands
+    pool, meta = ladder([(25300, 20.0), (25350, 31.0), (25400, 45.0)])
+    assert cap_gap(pool, pick(pool, 120.0), 120.0, meta, 50.0) is None
+    # TC-TSG-0132 BANKNIFTY strikes are 100 apart: 200 pts is one missing strike, tolerated
+    assert chain_step("BANKNIFTY") == 100.0 and chain_step("NIFTY") == 50.0
+    pool, meta = ladder([(51000, 90.0), (51200, 140.0)], "CE")
+    assert cap_gap(pool, pick(pool, 120.0), 120.0, meta, chain_step("BANKNIFTY")) is None
+    # TC-TSG-0133 no pick, or a strike unknown to the metadata → no verdict (None)
+    assert cap_gap(pool, None, 120.0, meta, 100.0) is None
+    assert cap_gap([("X", 5.0), ("Y", 200.0)], ("X", 5.0), 120.0, {}, 50.0) is None
+    print("  ok  6 CHAIN_GAP_20261126 tests (TC-TSG-0128…0133)")
+
+
+_chain_tests()

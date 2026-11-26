@@ -172,6 +172,43 @@ def leg_mtm(action: str, entry: float, mark: float, qty: int) -> float:
     return d * qty
 
 
+# ── CHAIN_GAP_20261126 BEGIN ── (DEF-077, TD-096)
+# A SELL leg's pick is the highest premium ≤ its cap. In a whole chain the
+# strike just past it (the cheapest premium above the cap) is its neighbour,
+# one strike away. When the two sit more than CHAIN_GAP_MAX_STEPS strikes
+# apart, the strikes in between — the ones a live order near the cap would
+# have sold — are missing from the data, and the backtest would sell a far,
+# cheap strike instead (22 Oct 2026 recorded chain: L2 sold 21400PE @5.80
+# against a ₹120 cap, the next recorded PE was 22700 @220). The day is
+# skipped (days_chain_gap). No strike above the cap at all proves nothing
+# (an expiry-day chain can sit wholly below the cap): the pick stands.
+# Wings (BUY, a few rupees, far out) are not checked.
+CHAIN_GAP_MAX_STEPS = 2
+
+
+def chain_step(underlying: str) -> float:
+    return 100.0 if str(underlying or "").upper() == "BANKNIFTY" else 50.0
+
+
+def cap_gap(pool: List[Tuple[str, float]], pick, cap: float, meta_by_sym: Dict[str, dict],
+            step: float) -> Optional[str]:
+    """None when the chain is whole at the cap, else a note naming the gap."""
+    above = [(s, p) for s, p in pool if p and p > cap]
+    if not above or not pick:
+        return None
+    nxt = sorted(above, key=lambda c: (c[1], c[0]))[0]
+    k0 = (meta_by_sym.get(pick[0]) or {}).get("strike")
+    k1 = (meta_by_sym.get(nxt[0]) or {}).get("strike")
+    if k0 is None or k1 is None:
+        return None
+    gap = abs(float(k1) - float(k0))
+    if gap <= CHAIN_GAP_MAX_STEPS * step + 1e-6:
+        return None
+    return (f"{pick[0]} @{float(pick[1]):.2f} vs next {nxt[0]} @{float(nxt[1]):.2f} "
+            f"({gap:.0f} pts apart, cap {cap:g})")
+# ── CHAIN_GAP_20261126 END ──
+
+
 def simulate_tsg_day(
     leg_specs: List[dict],
     minutes: List[int],
@@ -821,6 +858,7 @@ def _run_tsg_backtest_impl(
     diag = {
         "days_total": len(sim_days), "days_entered": 0,
         "days_uncovered": 0, "days_no_short_strike": 0,
+        "days_chain_gap": 0,            # ── CHAIN_GAP_20261126 ──
         # ── DTE_LOT_MULT_20260911 ──
         "dte_lot_mult": {str(k): v for k, v in dte_lot_mult.items()},
         "dte_skipped_days": 0, "dte_scaled_days": 0, "dte_unknown_days": 0,
@@ -1018,6 +1056,13 @@ def _run_tsg_backtest_impl(
         for leg in _legs_day:   # ── DTE_LOT_MULT_20260911 ──
             pool = cand.get(leg["opt_type"], [])
             pick = select_strike(pool, leg["premium_max"])
+            if pick is not None and leg["action"] == "SELL":     # ── CHAIN_GAP_20261126 ──
+                _gap = cap_gap(pool, pick, leg["premium_max"], meta_by_sym, chain_step(underlying))
+                if _gap:
+                    write_audit_log(f"[BACKTEST][{strategy_id}] {d}: {leg['id']} chain gap at the cap — "
+                                    f"{_gap} — day skipped")
+                    skip_day = "chain_gap"
+                    break
             if pick is not None:
                 sym = pick[0]
                 m = meta_by_sym.get(sym, {})
@@ -1457,6 +1502,7 @@ def _run_tsg_backtest_impl(
         f"({diag['syn_pnl_share_pct']}% by |P&L|), "
         f"skips: uncovered {diag['days_uncovered']} / "
         f"noShort {diag['days_no_short_strike']} / "
+        f"chainGap {diag.get('days_chain_gap', 0)} / "
         f"noEntryPx {diag['days_no_entry_price']}, "
         f"BANK {diag['bank_mode'] if diag['mtm_bank_target'] > 0 else 'off'} "
         f"events {diag['bank_events']} on {diag['bank_days']}d "

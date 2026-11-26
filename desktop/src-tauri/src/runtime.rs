@@ -100,39 +100,87 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
     Ok((backend_dir, backend_binary))
 }
 
+// >>> WATCHDOG_RESTART_20261126 BEGIN (start guard + reaping) <<<
+// DEF-029: the watchdog could never restart the backend. Two faults:
+//  1. BACKEND_STARTING was set by every start and cleared only on the early
+//     returns, never after a successful spawn (nor when resolve_backend_paths
+//     failed), so every later start_backend() said "already starting".
+//  2. BACKEND_PROCESS kept the Child of a backend that had crashed, so the
+//     "process already exists" check refused the restart as well.
+// Now a StartingGuard clears the flag on every return path, and a Child that
+// has exited is reaped (taken out) before the check. A Child that is still
+// running is left alone even when the port is silent (a slow boot is not a
+// crash), so the watchdog never kills or doubles a live backend.
+struct StartingGuard;
+
+impl StartingGuard {
+    fn acquire() -> Option<StartingGuard> {
+        BACKEND_STARTING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| StartingGuard)
+    }
+}
+
+impl Drop for StartingGuard {
+    fn drop(&mut self) {
+        BACKEND_STARTING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Drop the handle of a backend process that has exited. Returns true while a
+/// process that is still running is held.
+fn reap_exited(slot: &mut Option<Child>) -> bool {
+    let exited = match slot.as_mut() {
+        None => return false,
+        Some(child) => match child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!("[RUNTIME] Previous backend process exited ({status}); handle released");
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                eprintln!("[RUNTIME] Could not query the backend process ({e}); treating it as running");
+                false
+            }
+        },
+    };
+    if exited {
+        *slot = None;
+    }
+    slot.is_some()
+}
+
 pub fn start_backend() -> Result<(), String> {
     let thread_id = std::thread::current().id();
     eprintln!("[RUNTIME] start_backend() called from thread {:?}", thread_id);
 
-    // Atomic check-and-set to prevent race conditions
-    if BACKEND_STARTING.compare_exchange(
-        false,
-        true,
-        Ordering::SeqCst,
-        Ordering::SeqCst
-    ).is_err() {
-        eprintln!("[RUNTIME] Backend already starting, skipping (thread {:?})", thread_id);
-        return Ok(());
-    }
+    // Atomic check-and-set to prevent race conditions; the guard clears the
+    // flag on every return below.
+    let _starting = match StartingGuard::acquire() {
+        Some(g) => g,
+        None => {
+            eprintln!("[RUNTIME] Backend already starting, skipping (thread {:?})", thread_id);
+            return Ok(());
+        }
+    };
 
     eprintln!("[RUNTIME] Thread {:?} won the race, proceeding with start", thread_id);
 
     // Check if backend is already running by testing the port
     if backend_http_alive() {
         eprintln!("[RUNTIME] Backend already running on port 47321");
-        BACKEND_STARTING.store(false, Ordering::SeqCst);
         return Ok(());
     }
 
-    // Also check process handle
+    // Also check process handle (a crashed backend's handle is reaped first)
     {
-        let process_guard = BACKEND_PROCESS.lock().unwrap();
-        if process_guard.is_some() {
-            eprintln!("[RUNTIME] Backend process already exists");
-            BACKEND_STARTING.store(false, Ordering::SeqCst);
+        let mut process_guard = BACKEND_PROCESS.lock().unwrap();
+        if reap_exited(&mut process_guard) {
+            eprintln!("[RUNTIME] Backend process already exists (still running)");
             return Ok(());
         }
     }
+// >>> WATCHDOG_RESTART_20261126 END (start guard + reaping) <<<
 
     // Resolve paths AFTER all checks pass
     let (backend_dir, backend_binary) = resolve_backend_paths()?;
@@ -148,10 +196,7 @@ pub fn start_backend() -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| {
-            BACKEND_STARTING.store(false, Ordering::SeqCst);
-            format!("Failed to start backend: {e}")
-        })?;
+        .map_err(|e| format!("Failed to start backend: {e}"))?;
 
     eprintln!("[RUNTIME] Backend process spawned with PID: {:?}", child.id());
 
@@ -382,6 +427,45 @@ fn start_tailscale_funnel() {
    WATCHDOGS
    ========================================================= */
 
+// >>> WATCHDOG_RESTART_20261126 BEGIN (update pause) <<<
+// Once the backend is stopped for an update install (stop_backend_for_update)
+// or the window is closing, the watchdog must not bring it back: on Windows a
+// restarted backend re-locks the DLLs the installer is replacing, and on every
+// platform it would run the old build mid-install. The pause lasts for the
+// rest of this process: a good install relaunches the app, and a failed one
+// tells the user to quit and reopen Scalp before trading (UpdateBanner.jsx).
+static WATCHDOG_PAUSED: AtomicBool = AtomicBool::new(false);
+
+pub fn pause_watchdog(reason: &str) {
+    if !WATCHDOG_PAUSED.swap(true, Ordering::SeqCst) {
+        eprintln!("[WATCHDOG] Paused: {reason}");
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum WatchdogStep {
+    Paused,
+    Healthy,
+    GaveUp,
+    Restart,
+}
+
+/// One watchdog tick: paused beats everything, a live port resets the
+/// attempts, and after MAX_RESTARTS failed tries it stops trying.
+const MAX_RESTARTS: u8 = 3;
+
+fn watchdog_step(paused: bool, alive: bool, attempts: u8) -> WatchdogStep {
+    if paused {
+        WatchdogStep::Paused
+    } else if alive {
+        WatchdogStep::Healthy
+    } else if attempts >= MAX_RESTARTS {
+        WatchdogStep::GaveUp
+    } else {
+        WatchdogStep::Restart
+    }
+}
+
 pub fn start_backend_watchdog() {
     if cfg!(debug_assertions) {
         eprintln!("[WATCHDOG] Disabled in dev mode");
@@ -394,21 +478,104 @@ pub fn start_backend_watchdog() {
         loop {
             thread::sleep(Duration::from_secs(15));
 
-            if backend_http_alive() {
-                *restart_attempts().lock().unwrap() = 0;
-                continue;
-            }
-
+            let paused = WATCHDOG_PAUSED.load(Ordering::SeqCst);
+            let alive = !paused && backend_http_alive();
             let mut attempts = restart_attempts().lock().unwrap();
-            if *attempts >= 3 {
-                continue;
+            match watchdog_step(paused, alive, *attempts) {
+                WatchdogStep::Paused => {}
+                WatchdogStep::Healthy => *attempts = 0,
+                WatchdogStep::GaveUp => {}
+                WatchdogStep::Restart => {
+                    *attempts += 1;
+                    eprintln!("[WATCHDOG] Backend not answering on 47321 — restart attempt {}/{}",
+                              *attempts, MAX_RESTARTS);
+                    if let Err(e) = start_backend() {
+                        eprintln!("[WATCHDOG] Restart failed: {e}");
+                    }
+                }
             }
-
-            *attempts += 1;
-            let _ = start_backend();
         }
     });
 }
+
+#[cfg(test)]
+mod watchdog_restart_tests {
+    use super::*;
+
+    // the start-flag tests share BACKEND_STARTING: one at a time
+    static FLAG_LOCK: Mutex<()> = Mutex::new(());
+
+    // TC-DESK-0001
+    #[test]
+    fn tc_desk_0001_start_flag_clears_after_a_start() {
+        let _l = FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        BACKEND_STARTING.store(false, Ordering::SeqCst);
+        {
+            let g = StartingGuard::acquire();
+            assert!(g.is_some());
+            assert!(StartingGuard::acquire().is_none(), "a second start while one runs is refused");
+        }
+        assert!(!BACKEND_STARTING.load(Ordering::SeqCst), "the flag is clear once the start returns");
+        assert!(StartingGuard::acquire().is_some(), "so the watchdog can start again");
+    }
+
+    // TC-DESK-0002
+    #[test]
+    fn tc_desk_0002_flag_clears_on_an_early_error_return() {
+        let _l = FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        fn failing_start() -> Result<(), String> {
+            let _g = StartingGuard::acquire().ok_or("busy")?;
+            Err("Backend binary not found".to_string())?;
+            Ok(())
+        }
+        BACKEND_STARTING.store(false, Ordering::SeqCst);
+        assert!(failing_start().is_err());
+        assert!(!BACKEND_STARTING.load(Ordering::SeqCst));
+    }
+
+    // TC-DESK-0003
+    #[cfg(unix)]
+    #[test]
+    fn tc_desk_0003_exited_backend_handle_is_reaped() {
+        let mut slot = Some(Command::new("true").spawn().expect("spawn true"));
+        let t0 = Instant::now();
+        while reap_exited(&mut slot) && t0.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(slot.is_none(), "a crashed backend no longer blocks the restart");
+    }
+
+    // TC-DESK-0004
+    #[cfg(unix)]
+    #[test]
+    fn tc_desk_0004_running_backend_is_left_alone() {
+        let mut slot = Some(Command::new("sleep").arg("5").spawn().expect("spawn sleep"));
+        assert!(reap_exited(&mut slot), "a running backend counts as running");
+        assert!(slot.is_some());
+        let _ = slot.as_mut().unwrap().kill();
+        let _ = slot.as_mut().unwrap().wait();
+        assert!(!reap_exited(&mut None));
+    }
+
+    // TC-DESK-0005
+    #[test]
+    fn tc_desk_0005_watchdog_steps() {
+        assert_eq!(watchdog_step(false, true, 2), WatchdogStep::Healthy);
+        assert_eq!(watchdog_step(false, false, 0), WatchdogStep::Restart);
+        assert_eq!(watchdog_step(false, false, MAX_RESTARTS - 1), WatchdogStep::Restart);
+        assert_eq!(watchdog_step(false, false, MAX_RESTARTS), WatchdogStep::GaveUp);
+    }
+
+    // TC-DESK-0006
+    #[test]
+    fn tc_desk_0006_paused_for_update_never_restarts() {
+        assert_eq!(watchdog_step(true, false, 0), WatchdogStep::Paused);
+        assert_eq!(watchdog_step(true, true, 0), WatchdogStep::Paused);
+        pause_watchdog("test");
+        assert!(WATCHDOG_PAUSED.load(Ordering::SeqCst));
+    }
+}
+// >>> WATCHDOG_RESTART_20261126 END (update pause) <<<
 
 pub fn start_watchdog() {
     start_backend_watchdog();

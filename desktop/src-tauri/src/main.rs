@@ -34,6 +34,9 @@ mod commands;
 #[tauri::command]
 async fn stop_backend_for_update() -> String {
     eprintln!("[MAIN] stop_backend_for_update invoked (pre-update cleanup)");
+    // WATCHDOG_RESTART_20261126 (DEF-029): pause the watchdog first, so it
+    // cannot restart the backend while the installer replaces its files.
+    runtime::pause_watchdog("backend stopped for an update install");
     let res = tauri::async_runtime::spawn_blocking(|| {
         runtime::stop_backend();
         kill_process_on_port(47321);
@@ -120,6 +123,7 @@ fn main() {
             window.on_window_event(|event| {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
                     eprintln!("[MAIN] Window closing, cleaning up backend...");
+                    runtime::pause_watchdog("window closing"); // WATCHDOG_RESTART_20261126
                     kill_process_on_port(47321);
                     runtime::stop_backend();
                     // >>> SCALP_UI_SERVE: removed runtime::stop_frontend_dev_server(); <<<
@@ -172,6 +176,7 @@ fn main() {
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 eprintln!("[MAIN] Window destroyed, final cleanup...");
+                runtime::pause_watchdog("window destroyed"); // WATCHDOG_RESTART_20261126
                 kill_process_on_port(47321);
                 runtime::stop_backend();
                 // >>> SCALP_UI_SERVE: removed runtime::stop_frontend_dev_server(); <<<

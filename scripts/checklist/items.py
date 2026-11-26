@@ -1,6 +1,7 @@
 # scripts/checklist/items.py — ── RELIABILITY_GATE_20261118 ── (TD-048)
 #                              ── ISOLATED_HOME_20261122 ── CL-15 (DEF-094)
 #                              ── VET_MODE_FOLLOW_20261125 ── CL-16 (DEF-102)
+#                              ── HOOK_NO_ADD_20261126 ── CL-17 (DEF-060)
 #
 # The reliability checklist. Each item has
 #   trigger  — something you can read from the staged diff (paths + added lines)
@@ -361,6 +362,25 @@ def cl16(ctx):
     return True, out, f"{len(fs)} engine file(s) scanned"
 
 
+
+# ── CL-17 a pre-commit hook never stages files (DEF-060) ──────────────
+GIT_ADD = re.compile(r"""["']git["']\s*,\s*["'](add|stage)["']""")      # subprocess.run(["git", "add", …])
+
+
+def cl17(ctx):
+    fs = [f for f in ctx.files if f.status != "D" and f.path.startswith("scripts/hooks/") and f.path.endswith(".py")]
+    if not fs:
+        return False, [], ""
+    out = []
+    for f in fs:
+        for n, t in enumerate(f.new_text().splitlines(), 1):
+            if GIT_ADD.search(t) and not t.strip().startswith("#"):
+                out.append(f"{f.path}:{n}: a pre-commit hook runs `git add` — when the file also has unstaged edits, "
+                           f"pre-commit cannot restore its stash and those edits are left only in ~/.cache/pre-commit "
+                           f"(DEF-060). Rewrite the file, exit 1, and say 'git add it and commit again'.")
+                break
+    return True, out, f"{len(fs)} hook file(s) scanned"
+
 ITEMS = [
     dict(id="CL-01", kind="auto", title="No hard-coded credentials", fn=cl01,
          trigger="an added line assigns a 16+ character literal to a key / secret / token / password name",
@@ -429,4 +449,10 @@ ITEMS = [
          check="the executor is not built only under `if mode == LIVE` at arm — pre-build it whatever the mode, "
                "read the mode at entry (engine/test_mode_follow_fleet.py)",
          incidents="DEF-102 (25 Nov: VET armed PAPER at 08:30, Settings LIVE at 08:46, the 09:20 entry booked PAPER)"),
+    dict(id="CL-17", kind="auto", title="A pre-commit hook never stages files", fn=cl17,
+         trigger="a hook script under scripts/hooks/ is added or changed",
+         check="no `git add` / `git stage` call: a hook that regenerates a file rewrites it, exits 1 and asks "
+               "for `git add … and commit again`",
+         incidents="DEF-060 (18 Nov: repo-map-refresh git-added REPO_MAP.md that also had unstaged edits; the "
+                   "commit aborted with 'patch does not apply', the edits left only in ~/.cache/pre-commit)"),
 ]

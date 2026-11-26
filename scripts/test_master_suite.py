@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # scripts/test_master_suite.py — ── MASTER_SUITE_20261122 ── (TD-079) TC-REGR-0001…0029
 #                           ── ISOLATED_HOME_20261122 ── (DEF-094) TC-REGR-0030…0033
+#                           ── HOOK_NO_ADD_20261126 ── (DEF-060) TC-REGR-0011 reworded: the hook never stages
 #
 # The master regression suite (scripts/regression/master_suite.py), its weekly
 # scheduler (schedule.py) and its pre-commit hook, checked in throw-away git
@@ -166,12 +167,18 @@ try:
 
     # ── hook ──
     git(d, "add", "-A")
+    _, idx0 = git(d, "ls-files", "-s", "scripts/regression/MASTER_SUITE.md")
     rh = subprocess.run([sys.executable, os.path.join(d, "scripts/hooks/master_suite_refresh.py")], cwd=d, env=ENV,
                         capture_output=True, text=True, timeout=300)
-    _, staged = git(d, "diff", "--cached", "--name-only")
+    _, idx1 = git(d, "ls-files", "-s", "scripts/regression/MASTER_SUITE.md")
+    staged = "" if idx0 == idx1 else "scripts/regression/MASTER_SUITE.md"   # the hook changed the index
     rc3, o3 = tool(d, "check")
-    chk("TC-REGR-0011", "the pre-commit hook refreshes a stale MASTER_SUITE.md, stages it, and never blocks",
-        rh.returncode == 0 and "scripts/regression/MASTER_SUITE.md" in staged and rc3 == 0, rh.stdout + staged + o3)
+    # HOOK_NO_ADD_20261126 (DEF-060): rewrite only, never git add; the commit stops once with 'git add … and commit again'
+    chk("TC-REGR-0011", "the pre-commit hook refreshes a stale MASTER_SUITE.md in the working tree, does NOT stage it, "
+        "and stops the commit (exit 1) with 'git add … and commit again'",
+        rh.returncode == 1 and "scripts/regression/MASTER_SUITE.md" not in staged and rc3 == 0
+        and "git add scripts/regression/MASTER_SUITE.md" in rh.stdout, rh.stdout + staged + o3)
+    git(d, "add", "scripts/regression/MASTER_SUITE.md")
     rh2 = subprocess.run([sys.executable, os.path.join(d, "scripts/hooks/master_suite_refresh.py")], cwd=d, env=ENV,
                          capture_output=True, text=True, timeout=300)
     chk("TC-REGR-0012", "the hook is silent when the manifest is current", rh2.returncode == 0 and not rh2.stdout.strip(),

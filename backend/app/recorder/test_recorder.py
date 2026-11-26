@@ -634,6 +634,44 @@ _old.mkdir()
 check("both places hold data → refuses to merge", RD.relocate_from_old().get("ok") is False)
 _sh.rmtree(str(_old))
 
+# ── CHAIN_GAP_20261126 ── (DEF-077) TC-REC-0131…0136: a thin front-week chain is not 'clean'
+print("── CHAIN_GAP_20261126: front-week chain coverage")
+_cc = RD.connect()
+_cc.execute("DELETE FROM meta WHERE key=?", (RP.CHAIN_CHECK_KEY,))
+_cc.commit()
+check("TC-REC-0131 a fully recorded synthetic day: no chain note", RP.week_chain_note(_cc, D) is None,
+      RP.week_chain_note(_cc, D))
+_q0 = RP.day_status(_cc, D).get("quality")
+check("TC-REC-0132 re-grade leaves a whole-chain 'clean' day clean (and runs once)",
+      _q0 == "clean" and RP.regrade_chain_once(_cc) == [] and RD.get_meta(_cc, RP.CHAIN_CHECK_KEY) == RP.CHAIN_CHECK_VERSION,
+      _q0)
+# thin the front week of day D: keep 2 CE and 2 PE strikes of EXP_DAY (the 22 Oct 2026 shape)
+_ds = RP.day_start(D)
+_ks = sorted({r[0] for r in _cc.execute("SELECT DISTINCT strike FROM main.backtest_candles_1m WHERE expiry=? AND ts>=? "
+                                         "AND ts<?", (EXP_DAY.isoformat(), _ds, _ds + 86400))})
+_keep = _ks[len(_ks) // 2 - 1: len(_ks) // 2 + 1]
+_cc.execute("DELETE FROM main.backtest_candles_1m WHERE expiry=? AND ts>=? AND ts<? AND strike NOT IN (?,?)",
+            (EXP_DAY.isoformat(), _ds, _ds + 86400, _keep[0], _keep[1]))
+_cc.commit()
+_note = RP.week_chain_note(_cc, D)
+check("TC-REC-0133 front week thinned to 2 CE / 2 PE strikes: the note names the expiry and the counts",
+      _note and EXP_DAY.isoformat() in _note and "only 2 CE / 2 PE" in _note, _note)
+check("TC-REC-0134 the one-off re-grade already ran: a second call changes nothing",
+      RP.regrade_chain_once(_cc) == [] and RP.day_status(_cc, D).get("quality") == "clean")
+_cc.execute("DELETE FROM meta WHERE key=?", (RP.CHAIN_CHECK_KEY,))
+_cc.commit()
+_moved = RP.regrade_chain_once(_cc)
+_st = RP.day_status(_cc, D)
+check("TC-REC-0135 re-grade (first run on a DB): the thin 'clean' day becomes 'partial', note kept",
+      _moved == [D.isoformat()] and _st.get("quality") == "partial" and _note in json.loads(_st.get("notes") or "[]"),
+      (_moved, _st))
+_cc.execute("UPDATE day_status SET quality='clean', notes=NULL WHERE day=?", (D.isoformat(),))
+_cc.commit()
+_st = RP._save_status(_cc, D, final=True, notes=[], errors=0, now=ts_of(D, 15, 41))
+check("TC-REC-0136 the final grade of a thin day is 'partial' with the note (not 'clean')",
+      _st.get("quality") == "partial" and any("chain incomplete" in n for n in json.loads(_st.get("notes") or "[]")), _st)
+_cc.close()
+
 print(f"\n{PASSES[0]} passed, {len(FAILS)} failed")
 if FAILS:
     print("FAILED:", FAILS)

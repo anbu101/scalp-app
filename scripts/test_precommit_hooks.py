@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# scripts/test_precommit_hooks.py  — ── PRECOMMIT_20261117 ── (TD-042) TC-HOOKS-0001…0028, 0043
+# scripts/test_precommit_hooks.py  — ── PRECOMMIT_20261117 ── (TD-042) TC-HOOKS-0001…0028, 0043, 0048…0049
 # PUSH_ANYTIME_20261118: market-hours push hook removed — TC-HOOKS-0016…0021 retired.
 # MASTER_SUITE_20261122: TC-HOOKS-0026/0027 count the master-suite-refresh hook (6 hooks, 5 local).
+# HOOK_NO_ADD_20261126 (DEF-060): TC-HOOKS-0022 now wants the refresh left unstaged + exit 1; TC-HOOKS-0048/0049 new.
 #
 # Unit checks of the three local hooks and the config, in throw-away folders and
 # git repos (never this repo's index). The pre-commit framework itself is not
@@ -125,9 +126,11 @@ put(d, "src.txt", "v2\n")
 git(d, "add", "src.txt")
 rc, out = run("repo_map_refresh.py", cwd=d)
 _, staged = git(d, "diff", "--cached", "--name-only")
-chk("TC-HOOKS-0022", "stale REPO_MAP.md is regenerated and staged for this commit",
-    rc == 0 and "refreshed" in out and "REPO_MAP.md" in staged and open(os.path.join(d, "REPO_MAP.md")).read() == "fresh v2\n",
-    (rc, out, staged))
+chk("TC-HOOKS-0022", "stale REPO_MAP.md is regenerated in the working tree, NOT staged, and the commit stops "
+    "(exit 1) with 'git add REPO_MAP.md and commit again' (HOOK_NO_ADD_20261126)",
+    rc == 1 and "git add REPO_MAP.md" in out and "REPO_MAP.md" not in staged
+    and open(os.path.join(d, "REPO_MAP.md")).read() == "fresh v2\n", (rc, out, staged))
+git(d, "add", "REPO_MAP.md")
 git(d, "commit", "-q", "-m", "c2")
 rc, out = run("repo_map_refresh.py", cwd=d)
 chk("TC-HOOKS-0023", "current REPO_MAP.md: nothing staged, nothing printed", rc == 0 and out == "", out)
@@ -138,6 +141,55 @@ os.remove(os.path.join(d, "scripts/gen_repo_map.py"))
 rc, out = run("repo_map_refresh.py", cwd=d)
 chk("TC-HOOKS-0025", "no generator in the checkout: silent no-op", rc == 0 and out == "", out)
 shutil.rmtree(d, ignore_errors=True)
+
+
+# ── HOOK_NO_ADD_20261126 (DEF-060): REPO_MAP.md stale AND with unstaged edits ──
+def _map_repo(prefix):
+    d = tempfile.mkdtemp(prefix=prefix)
+    git(d, "init", "-q")
+    put(d, "scripts/gen_repo_map.py", STUB)
+    shutil.copy(os.path.join(H, "repo_map_refresh.py"), os.path.join(d, "scripts", "repo_map_refresh.py"))
+    put(d, "src.txt", "v1\n")
+    put(d, "REPO_MAP.md", "fresh v1\n")
+    put(d, ".gitignore", ".pc/\n")
+    git(d, "add", "-A")
+    git(d, "commit", "-q", "-m", "base")
+    put(d, "src.txt", "v2\n")
+    git(d, "add", "src.txt")
+    with open(os.path.join(d, "REPO_MAP.md"), "a") as f:
+        f.write("my unstaged edit\n")
+    return d
+
+
+d = _map_repo("rmdirty_")
+_, idx_before = git(d, "ls-files", "-s", "REPO_MAP.md")
+rc, out = run("repo_map_refresh.py", cwd=d)
+_, idx_after = git(d, "ls-files", "-s", "REPO_MAP.md")
+chk("TC-HOOKS-0048", "stale map with unstaged edits: the hook leaves the index alone (REPO_MAP.md's staged blob "
+    "unchanged) and stops the commit", rc == 1 and idx_before == idx_after and idx_before.strip() != "",
+    (rc, out, idx_before, idx_after))
+shutil.rmtree(d, ignore_errors=True)
+
+_pc = shutil.which("pre-commit")
+if not _pc:
+    print("  skip TC-HOOKS-0049 (pre-commit not installed: pip install pre-commit)")
+else:
+    d = _map_repo("rmpc_")
+    put(d, ".pre-commit-config.yaml", "repos:\n  - repo: local\n    hooks:\n      - id: repo-map-refresh\n"
+        "        name: REPO_MAP.md current\n        entry: python3 scripts/repo_map_refresh.py\n"
+        "        language: system\n        always_run: true\n        pass_filenames: false\n")
+    pcenv = dict(PRE_COMMIT_HOME=os.path.join(d, ".pc"))
+    git(d, "add", ".pre-commit-config.yaml")
+    subprocess.run([_pc, "install"], cwd=d, env=dict(ENV, **pcenv), capture_output=True, text=True, timeout=120)
+    r = subprocess.run(["git", "commit", "-m", "c2"], cwd=d, env=dict(ENV, **pcenv), capture_output=True,
+                       text=True, timeout=300)
+    _, log = git(d, "log", "--oneline")
+    wt = open(os.path.join(d, "REPO_MAP.md")).read()
+    chk("TC-HOOKS-0049", "real pre-commit, stale map + unstaged REPO_MAP.md edits: the commit is refused and the "
+        "unstaged edits are still in the working tree (not only in pre-commit's cache)",
+        r.returncode != 0 and len(log.strip().splitlines()) == 1 and "my unstaged edit" in wt
+        and "patch does not apply" not in r.stdout + r.stderr, (r.returncode, r.stdout[-600:], r.stderr[-600:], wt))
+    shutil.rmtree(d, ignore_errors=True)
 
 # ── config ───────────────────────────────────────────────────────────
 cfg = open(os.path.join(ROOT, ".pre-commit-config.yaml"), encoding="utf-8").read()

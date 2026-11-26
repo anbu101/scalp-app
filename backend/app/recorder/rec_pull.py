@@ -448,6 +448,83 @@ def pull_special_spot(conn, kite, d: date, *, now: Optional[int] = None) -> dict
 # ── VET_FEED_PARITY_20261109 END ──
 
 
+# ── CHAIN_GAP_20261126 BEGIN ── (DEF-077, TD-096) front-week chain coverage
+# 22 Oct 2026 was graded 'clean' (98.9 % of its band) although only 3 CE and
+# 2 PE strikes of that week's expiry (27 Oct) were recorded near spot: it was
+# pulled on 30 Oct, after that expiry had left Kite, and with no dated
+# instrument snapshot the band never knew those contracts, so they were
+# neither pulled nor counted lost. A Tigris backtest then sold a ₹5.80 PE
+# against a ₹120 cap. A final day now also needs the front-week expiry (the
+# NSE calendar's, holiday-shifted) recorded on CHAIN_MIN_SHARE of the
+# CHAIN_STEPS strikes each side of the 09:15 ATM (where a premium-capped short
+# is sold), CE and PE alike; otherwise it is 'partial', so recorded-data
+# backtests skip it and the Run tab lists it. Measured on the recorder corpus,
+# 15 Oct – 26 Nov 2026: thin days hold 9–36 % of those strikes, every good day
+# 100 %.
+CHAIN_STEPS = 5
+CHAIN_MIN_SHARE = 0.8
+CHAIN_CHECK_KEY = "chain_check"
+CHAIN_CHECK_VERSION = "CHAIN_GAP_20261126"
+
+
+def week_chain_note(conn, d: date) -> Optional[str]:
+    """None when day d's front-week chain is recorded around spot, else a note
+    saying what is missing. No spot, or no calendar: None (graded elsewhere)."""
+    ds = day_start(d)
+    r0 = conn.execute("SELECT open FROM main.backtest_candles_1m WHERE instrument_token=? AND ts>=? AND ts<? "
+                      "ORDER BY ts LIMIT 1", (RD.SPOT_TOKEN, ds, ds + 86400)).fetchone()
+    if not r0 or not r0[0]:
+        return None
+    try:
+        from app.backtest.engine.expiry_calendar import expected_expiry_for_day
+        exp = expected_expiry_for_day(d).isoformat()
+    except Exception:
+        return None
+    atm = round(float(r0[0]) / STRIKE_STEP) * STRIKE_STEP
+    lo, hi = atm - CHAIN_STEPS * STRIKE_STEP, atm + CHAIN_STEPS * STRIKE_STEP
+    want = 2 * CHAIN_STEPS + 1
+    have = dict(conn.execute(
+        "SELECT instrument_type, COUNT(DISTINCT strike) FROM main.backtest_candles_1m WHERE underlying=? AND expiry=? "
+        "AND ts>=? AND ts<? AND strike BETWEEN ? AND ? AND instrument_type IN ('CE','PE') GROUP BY instrument_type",
+        (RD.UNDERLYING, exp, ds, ds + 86400, lo, hi)).fetchall())
+    ce, pe = int(have.get("CE") or 0), int(have.get("PE") or 0)
+    if min(ce, pe) >= CHAIN_MIN_SHARE * want:
+        return None
+    return (f"week expiry {exp}: only {ce} CE / {pe} PE of the {want} strikes {lo:.0f}–{hi:.0f} "
+            f"(09:15 ATM ±{CHAIN_STEPS}) recorded — chain incomplete")
+
+
+def regrade_chain_once(conn) -> List[str]:
+    """One-off for the days graded 'clean' before this check: a day whose
+    front-week chain is thin becomes 'partial' (with the note). Runs once per
+    recorder DB (meta chain_check); returns the days it moved."""
+    try:
+        if RD.get_meta(conn, CHAIN_CHECK_KEY) == CHAIN_CHECK_VERSION:
+            return []
+        rows = conn.execute("SELECT day, notes FROM day_status WHERE quality='clean' AND final_at IS NOT NULL "
+                            "ORDER BY day").fetchall()
+    except Exception:
+        return []
+    moved = []
+    for day, old in rows:
+        try:
+            note = week_chain_note(conn, date.fromisoformat(day))
+        except Exception:
+            note = None
+        if note:
+            try:
+                prev = json.loads(old) if old else []
+            except Exception:
+                prev = [str(old)]
+            conn.execute("UPDATE day_status SET quality='partial', notes=? WHERE day=?",
+                         (json.dumps(sorted(set(prev + [note])))[:2000], day))
+            moved.append(day)
+    conn.commit()
+    RD.set_meta(conn, CHAIN_CHECK_KEY, CHAIN_CHECK_VERSION)
+    return moved
+# ── CHAIN_GAP_20261126 END ──
+
+
 def _save_status(conn, d: date, *, final: bool, notes: List[str], errors: int, now: int) -> dict:
     ds = day_start(d)
     key = d.isoformat()
@@ -471,6 +548,11 @@ def _save_status(conn, d: date, *, final: bool, notes: List[str], errors: int, n
         quality = "clean"
     else:
         quality = "partial"
+    if quality == "clean":                                  # ── CHAIN_GAP_20261126 ──
+        _cn = week_chain_note(conn, d)
+        if _cn:
+            quality = "partial"
+            notes = list(notes) + [_cn]
     done = final and (errors == 0 or attempts >= FINAL_RETRIES)
     conn.execute("INSERT INTO day_status (day, band_n, pulled_n, lost_n, error_n, bars, spot_bars, completeness, "
                  "quality, last_pull_at, final_at, attempts, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "

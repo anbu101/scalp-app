@@ -2,6 +2,7 @@
 # scripts/test_reliability_checklist.py — ── RELIABILITY_GATE_20261118 ── (TD-048, TD-049) TC-GATE-0001…0040
 #                                     ── ISOLATED_HOME_20261122 ── (DEF-094) TC-GATE-0055…0056
 #                                     ── VET_MODE_FOLLOW_20261125 ── (DEF-102) TC-GATE-0059…0061
+#                                     ── HOOK_NO_ADD_20261126 ── (DEF-060) TC-GATE-0062…0064; 0038/0040 count 17 items
 #
 # Checks of the diff-triggered checklist (scripts/checklist/items.py) and the commit gate
 # (scripts/hooks/reliability_checklist.py) in throw-away git repos — never this repo's index.
@@ -170,6 +171,17 @@ rc, out, fin = one(d, "backend/app/engine/bb_options/bb_rt_x.py",
                    "        executor = get_executor_for_strategy('BB_V1')\n    return executor\n")
 chk("TC-GATE-0061", "CL-16: a LIVE branch plus a PAPER pre-build (the BB / HA shape) passes",
     status_of(fin, "CL-16") == "pass", fin)
+rc, out, fin = one(d, "scripts/hooks/regen_x.py",
+                   "import subprocess\nsubprocess.run(['python3', 'gen.py'])\nsubprocess.run([\"git\", \"add\", \"MAP.md\"])\n")
+chk("TC-GATE-0062", "CL-17: a hook script that runs git add fails (DEF-060)", status_of(fin, "CL-17") == "fail", fin)
+rc, out, fin = one(d, "scripts/hooks/regen_x.py",
+                   "import subprocess, sys\nsubprocess.run(['python3', 'gen.py'])\n"
+                   "# never: subprocess.run(['git', 'add', 'MAP.md'])\nprint('refreshed — git add MAP.md and commit again')\n"
+                   "sys.exit(1)\n")
+chk("TC-GATE-0063", "CL-17: a hook that rewrites, exits 1 and only tells you to git add passes",
+    status_of(fin, "CL-17") == "pass", fin)
+rc, out, fin = one(d, "scripts/regen_tool.py", "import subprocess\nsubprocess.run(['git', 'add', 'x'])\n")
+chk("TC-GATE-0064", "CL-17: a git add outside scripts/hooks/ does not trigger it", status_of(fin, "CL-17") is None, fin)
 rc, out, fin = one(d, "backend/app/engine/vet/vet_exit.py", "if now_ts > deadline_ts:\n    close_trade(x)\n")
 chk("TC-GATE-0018", "CL-08 and CL-12: a ts comparison and a close in engine code need acks",
     status_of(fin, "CL-08") == "needs-ack" and status_of(fin, "CL-12") == "needs-ack", fin)
@@ -287,8 +299,8 @@ git(d, "commit", "-qm", "c1", "--no-verify")
 rc, out = cli("--range", "HEAD~1..HEAD")
 chk("TC-GATE-0037", "--range A..B replays a past commit", rc == 1 and "CL-02 fail" in out, out)
 rc, out = cli("--list")
-chk("TC-GATE-0038", "--list shows 16 items, each with trigger, check and incidents",
-    "16 items" in out and out.count("incidents:") == 16 and out.count("trigger:") == 16, out[:300])
+chk("TC-GATE-0038", "--list shows 17 items, each with trigger, check and incidents",
+    "17 items" in out and out.count("incidents:") == 17 and out.count("trigger:") == 17, out[:300])
 commit(d, "x")
 rc, out = cli("--report")
 chk("TC-GATE-0039", "--report summarises the log", rc == 0 and "commits logged" in out, out)
@@ -298,8 +310,8 @@ shutil.rmtree(d, ignore_errors=True)
 ns = {}
 exec(compile(open(ITEMS).read(), ITEMS, "exec"), ns)
 ids = [i["id"] for i in ns["ITEMS"]]
-chk("TC-GATE-0040", "items: unique ids CL-01…CL-16, kind auto|ack, every item names its incidents",
-    ids == [f"CL-{n:02d}" for n in range(1, 17)] and all(i["kind"] in ("auto", "ack") and i["incidents"]
+chk("TC-GATE-0040", "items: unique ids CL-01…CL-17, kind auto|ack, every item names its incidents",
+    ids == [f"CL-{n:02d}" for n in range(1, 18)] and all(i["kind"] in ("auto", "ack") and i["incidents"]
                                                          and i["trigger"] and i["check"] for i in ns["ITEMS"]), ids)
 
 print("\n" + ("ALL RELIABILITY CHECKLIST CHECKS PASSED" if F == 0 else f"{F} FAILURES"))

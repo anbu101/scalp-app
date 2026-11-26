@@ -1453,6 +1453,11 @@ def _recorded_info() -> dict:
         if _RD.db_path().exists():
             c = _RD.connect()
             try:
+                try:                                        # ── CHAIN_GAP_20261126 ── (DEF-077)
+                    from app.recorder import rec_pull as _RP
+                    _RP.regrade_chain_once(c)               # before 'recorded_from' and the partial days
+                except Exception:
+                    pass
                 r = c.execute("SELECT MIN(day) FROM day_status WHERE quality='clean'").fetchone()
                 first = r[0] if r else None
             finally:
