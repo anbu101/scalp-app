@@ -375,3 +375,51 @@ def monitor_position_day(pos: Dict, opt_candles: List[dict],
             "sl_price": sl_price, "tp_price": tp_price,
             "exit_ts": exit_ts, "exit_price": exit_price,
             "exit_reason": reason, "ambiguous_fill": ambiguous}
+
+
+# ── OPEN_MIN_STOP_20261126 BEGIN ── (DEF-080, TD-098) runner-side fill model
+# monitor_position_day above decides WHEN a stop triggers and stays the live
+# parity reference (test_tma_live_core / test_tma2_live_core), so it is not
+# edited. This adds a FILL model the runners apply to its result: a stop
+# TOUCHED (not gapped) inside the 09:15 IST candle fills at the midpoint
+# between the stop and that candle's worst price (its HIGH for a short, its
+# LOW for a long) instead of exactly at the stop. The opening minute moves
+# too fast for a stop order to fill at its level: 16 Nov 2026 Timberwolf
+# 25050CE, stop 213.58, candle 212.10 / 290.60 / 212.10 / 288.80 — live
+# filled 251.05 (midpoint 252.09); 20 Nov 25450PE, stop 186.14, candle
+# 180.00 / 208.50 / 165.55 / 198.50 — paper 198.50 (midpoint 197.32).
+# Later minutes filled within ₹0–2.6 of the stop and keep the stop price;
+# a gap through the stop already fills at the open.
+OPEN_MINUTE_OF_DAY_S = 9 * 3600 + 15 * 60
+_IST_OFFSET_S = 5 * 3600 + 30 * 60
+
+
+def is_open_minute(ts: int) -> bool:
+    return (int(ts) + _IST_OFFSET_S) % 86400 == OPEN_MINUTE_OF_DAY_S
+
+
+def open_minute_stop_fill(res: Optional[Dict], candles: List[dict], short: bool) -> Optional[Dict]:
+    """res (monitor_position_day's exit) with the opening-minute stop fill
+    applied; res itself (same object) when the rule does not apply."""
+    if not res or res.get("exit_reason") != "SL" or res.get("sl_price") is None:
+        return res
+    ts = int(res["exit_ts"])
+    if not is_open_minute(ts):
+        return res
+    c = next((x for x in candles if int(x["ts"]) == ts), None)
+    if c is None:
+        return res
+    sl, o = float(res["sl_price"]), float(c["open"])
+    if short:
+        worst = float(c["high"])
+        if o >= sl or worst <= sl:          # gapped (filled at the open) / not past the stop
+            return res
+    else:
+        worst = float(c["low"])
+        if o <= sl or worst >= sl:
+            return res
+    out = dict(res)
+    out["exit_price"] = round((sl + worst) / 2.0, 2)
+    out["open_minute_fill"] = True
+    return out
+# ── OPEN_MIN_STOP_20261126 END ──

@@ -13,6 +13,8 @@ import tempfile
 
 os.environ.setdefault("SCALP_APP_HOME", tempfile.mkdtemp(prefix="pf_code_"))
 
+from app.utils.mpl_fonts import require_fonts   # noqa: E402  ── TEST_FIXES_20261126 ── (DEF-088)
+require_fonts("test_portfolio_pdf_codename.py")
 import matplotlib.axes                                   # noqa: E402
 import app.backtest.report.portfolio_pdf as P            # noqa: E402
 from app.config.strategy_display import STRATEGY_DISPLAY, codename   # noqa: E402

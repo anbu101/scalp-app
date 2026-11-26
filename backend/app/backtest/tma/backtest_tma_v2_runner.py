@@ -132,6 +132,7 @@ try:
         sl_tp_levels, warmup_bars, xover_exit_ts_v2,
     )
     from app.backtest.tma.backtest_tma_runner import TMATrade
+    from app.backtest.tma.tma_v1_engine import open_minute_stop_fill   # ── OPEN_MIN_STOP_20261126 ──
     from app.backtest.pst.pst_indicators import aggregate
     from app.backtest.ic.ic_v1_engine import select_strike
     from app.backtest.ic import ic_synth_wing as SW
@@ -142,6 +143,7 @@ except ImportError:  # standalone tests
         sl_tp_levels, warmup_bars, xover_exit_ts_v2,
     )
     from backtest_tma_runner import TMATrade  # type: ignore
+    from tma_v1_engine import open_minute_stop_fill  # type: ignore   # ── OPEN_MIN_STOP_20261126 ──
     from pst_indicators import aggregate  # type: ignore
     from ic_v1_engine import select_strike  # type: ignore
     import ic_synth_wing as SW  # type: ignore
@@ -780,6 +782,10 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                     mtm_cut_ts=(eod_ts if (cut_neg_mtm and hard_ts is None)
                                 else None))
                 res = _patch_partial_day_close(res, pos, hard_ts)
+                _r0 = res                                         # ── OPEN_MIN_STOP_20261126 ── (DEF-080)
+                res = open_minute_stop_fill(res, cands, str(pos.get("action", "BUY")).upper() == "SELL")
+                if res is not _r0:
+                    diag["open_minute_stop_fills"] = diag.get("open_minute_stop_fills", 0) + 1
                 if res is not None:
                     _emit_pos_trade(res, pos)
                     pos_busy[slot] = res["exit_ts"] + 60
@@ -972,6 +978,10 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 mtm_cut_ts=(eod_ts if (cut_neg_mtm and hard_ts is None)
                             else None))
             res = _patch_partial_day_close(res, pos, hard_ts)
+            _r0 = res                                         # ── OPEN_MIN_STOP_20261126 ── (DEF-080)
+            res = open_minute_stop_fill(res, sel["candles"], str(pos.get("action", "BUY")).upper() == "SELL")
+            if res is not _r0:
+                diag["open_minute_stop_fills"] = diag.get("open_minute_stop_fills", 0) + 1
             taken_today += 1
             diag["signals_taken"] += 1
             if res is not None:

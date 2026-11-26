@@ -129,6 +129,15 @@ _app_datas = _app_data_files()
 # NOTE: matplotlib MUST NOT appear in `excludes` — and neither may PIL/Pillow,
 # which matplotlib imports internally for image handling (Agg PNG save).
 mpl_datas = collect_data_files("matplotlib")
+# ── TEST_FIXES_20261126 ── (DEF-088/089) the EOD card and the portfolio PDF lay
+# text out in matplotlib's DejaVu fonts; a matplotlib install that has lost them
+# would bundle silently and render in a fallback font. Stop the build instead.
+_mpl_font_files = {os.path.basename(src) for src, _dst in mpl_datas}
+_mpl_missing = [f for f in ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf")
+                if f not in _mpl_font_files]
+if _mpl_missing:
+    raise SystemExit("FONT_GUARD: this Python's matplotlib lacks " + ", ".join(_mpl_missing)
+                     + " — reinstall it (pip install --force-reinstall --no-deps matplotlib) and build again")
 mpl_hidden = collect_submodules("matplotlib.backends")
 
 # ----------------------------------------------------------------------

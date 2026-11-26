@@ -20,7 +20,8 @@ from calm_fixture import METERS, paper_only, pre_open, mix_scene                
 U.start()
 from playwright.sync_api import sync_playwright                        # noqa: E402
 
-CHROME = os.environ.get("CHROME") or "/usr/bin/google-chrome"
+CHROME = os.environ.get("CHROME") or next((p for p in ("/usr/bin/google-chrome",   # ── TEST_FIXES_20261126 ── a Mac finds Chrome too
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") if os.path.exists(p)), None)
 BASE = "http://127.0.0.1:47321/"
 SET = U.app_settings_api.SETTINGS_FILE
 fails, N, errs = [], [0], []
@@ -209,7 +210,9 @@ with sync_playwright() as p:
     pg.wait_for_selector("[data-testid=calm-card]", timeout=60000)
     pg.wait_for_timeout(1500)
     geo = pg.evaluate("({sw: document.documentElement.scrollWidth, vw: innerWidth})")
-    pg.click("[data-testid=calm-hero] [aria-pressed=false]")
+    # ── TEST_FIXES_20261126 ── (DEF-092) the Live | Paper switch, not the first unpressed button in the hero:
+    # since the This week / This month chips (data-period) and the index chips (data-index) joined it, that was "Week".
+    pg.click("[data-testid=calm-hero] button[aria-pressed=false]:not([data-period]):not([data-index])")
     pg.wait_for_timeout(300)
     flip = pg.get_attribute("[data-testid=calm-hero]", "data-book")
     pg.click("[data-strategy=TMA_V2] [data-testid=calm-meter]")

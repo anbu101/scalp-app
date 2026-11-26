@@ -17,6 +17,8 @@ from pathlib import Path
 TMP = Path(tempfile.mkdtemp(prefix="pf_redact_"))
 os.environ.setdefault("SCALP_APP_HOME", str(TMP / "home"))
 
+from app.utils.mpl_fonts import require_fonts   # noqa: E402  ── TEST_FIXES_20261126 ── (DEF-088)
+require_fonts("test_portfolio_pdf_redact.py")
 import matplotlib.axes                                         # noqa: E402
 import app.backtest.report.portfolio_pdf as P                  # noqa: E402
 

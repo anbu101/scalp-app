@@ -19,6 +19,9 @@ import sys
 import tempfile
 import time
 
+from app.utils.mpl_fonts import require_fonts   # noqa: E402  ── TEST_FIXES_20261126 ── (DEF-089)
+require_fonts("test_eod_card_v2.py")
+
 import app.api.telegram_summary_card as C
 import app.api.telegram_summary_data as D
 import app.api.telegram_summary_send as S
