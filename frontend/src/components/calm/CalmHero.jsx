@@ -107,7 +107,7 @@ function Mini({ path, prev, up }) {
 // ── TICKERS_UNDER_20261120 ── under: the desktop traded hero puts the chips under the Today /
 // This week / This month cards, side by side, without the dash or the mini line, and with the
 // cards' 16 px inner padding so their text lines up with the cards' (the chart's footer still
-// names the dashed index; the selected chip keeps its accent outline)
+// names the dashed index; the selected chip is filled, no accent outline — DASH_TIDY_20261126)
 function IndexChips({ market, on, toggle, compact, start = false, under = false }) {   // ── INDEX_LEFT_20261118 ── start: left-align (pre-open hero)
   return (
     <div role="group" aria-label="Show an index on the chart" data-testid="calm-index-chips" data-place={under ? "under" : undefined}
@@ -123,7 +123,7 @@ function IndexChips({ market, on, toggle, compact, start = false, under = false 
             title={sel ? `Hide ${k} from the chart` : `Draw ${k}'s move behind your MTM line`}
             style={{ display: "inline-flex", alignItems: "center", gap: under ? 6 : SP.sm, flexShrink: 0, minHeight: 36, cursor: "pointer", font: "inherit",
               ...T.meta, fontSize: 13, color: C.ink, borderRadius: RADIUS.pill, padding: `${SP.xs + 2}px ${under ? SP.lg : SP.md + 2}px`,
-              background: sel ? C.surface : "transparent", border: `1px solid ${sel ? C.accent : C.line}`, boxShadow: sel ? `inset 0 0 0 1px ${C.accent}` : "none" }}>   {/* ── SELECT_ACCENT_20261117 ── theme accent, like the selected card */}
+              background: sel ? C.surface : "transparent", border: `1px solid ${C.line}` }}>   {/* ── SELECT_ACCENT_20261117 ──   ── DASH_TIDY_20261126 ── selected = filled, no accent outline */}
             {!under && <span aria-hidden="true" style={{ width: 14, borderTop: `2px dashed ${sel ? INDEX_COLOR[k] : C.muted}` }} />}
             <b style={{ fontWeight: 600 }}>{k}</b>
             <span style={{ ...T.num }}>{fmtPx(m.ltp)}</span>

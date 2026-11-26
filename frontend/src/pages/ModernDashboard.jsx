@@ -30,7 +30,6 @@ import { useIsMobile } from "../hooks/useIsMobile";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { useMarketData } from "../context/MarketDataContext";
 import StrategyHost, { META } from "../components/StrategyHost";
-import DebugPanel from "../components/DebugPanel";
 import MarketBadge from "../components/MarketBadge";
 import FleetKpis from "../components/fleet/FleetKpis";
 import FleetChart from "../components/fleet/FleetChart";
@@ -205,8 +204,7 @@ export default function ModernDashboard() {
         <StrategyHost ltpMap={ltpMap} focus={shownFocus} onFocus={pick} rail={false} recent="collapsed" />
       </div>
 
-      {/* Global, all-strategy debug tool — admin licenses only */}
-      {isAdminUi && <DebugPanel />}
+      {/* ── DASH_TIDY_20261126 ── the Debug tools live on Settings (admin) now */}
     </div>
   );
 }

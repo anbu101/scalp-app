@@ -120,6 +120,7 @@ export default function DebugPanel({ rows: rowsProp = null }) {
       <button
         onClick={openDrawer}
         title="Open debug tools"
+        data-testid="debug-open"   /* ── DASH_TIDY_20261126 ── */
         style={{
           position:     "fixed",
           bottom:       isMobile ? "calc(58px + env(safe-area-inset-bottom) + 10px)" : 36,

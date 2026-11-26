@@ -26,3 +26,7 @@ that page.
 ## NIFTY / BANKNIFTY behind the MTM chart (INDEX_PATH_20261117)
 
     PYTHONPATH=../backend python3 uitest/test_ui_index.py       # 11 checks, layout "modern"
+
+## Debug tools on Settings, admin only (DASH_TIDY_20261126)
+
+    PYTHONPATH=../backend python3 uitest/test_ui_debug_menu.py  # 6 checks: no pill on any Dashboard layout; admin Settings has it; user Settings does not

@@ -28,9 +28,7 @@ import ModernDashboard from "./ModernDashboard";   // ── DASH_MODERN_2026092
 import { useAppSettings } from "../context/NotificationProvider";   // ── DASH_MODERN_20260925 ──
 import { normalizeLayout } from "../components/fleet/dashboardLayout";   // ── DASH_MODERN_20260925 ──
 import CalmDashboard from "./CalmDashboard";   // ── DASH_CALM_20261117 ──
-import DebugPanel from "../components/DebugPanel";
 import { ReplayHostProvider } from "../components/replay/ReplayHost";   // ── TRADE_REPLAY_STREAM_20261017 ── admin ▶ replay launchers
-import { useEntitlements } from "../hooks/useEntitlements";
 import { useMarketData } from "../context/MarketDataContext";
 import MarketBadge from "../components/MarketBadge"; // ── INDEX_BADGES_20260827 ──
 import { colors, spacing, typography, pnlStyle as _pnlStyle, alpha } from "../tokens";   // ── THEME_PHASE1_20260831 ── alpha()
@@ -156,7 +154,6 @@ function DashboardHeader({ indices }) {
 // mobile). The default export at the bottom of this file is the switch.
 function LegacyDashboard() {
   const isMobile = useIsMobile();
-  const { isAdminUi } = useEntitlements();
   const { ltpMap, indices, positions, positionsLoading } = useMarketData();
   // ACC2_D9: badge only when both accounts contribute rows; banner only when
   // the backend reports a configured account it could not read (fail-visible).
@@ -304,8 +301,7 @@ function LegacyDashboard() {
         </div>
       </div>
 
-      {/* Global, all-strategy debug tool — admin licenses only */}
-      {isAdminUi && <DebugPanel />}
+      {/* ── DASH_TIDY_20261126 ── the Debug tools live on Settings (admin) now */}
     </div>
   );
 }

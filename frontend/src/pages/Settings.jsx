@@ -11,6 +11,7 @@ import AccountSelector from "../components/AccountSelector"; // ACC2
 import PaperLotsSection, { adminPaperRows, isPaperLive } from "../components/PaperLotsSection";   // ── PAPER_LOTS_20261030 ──
 // ── UI_MASK ── non-admin licenses get the lots-only settings surface
 import LotsOnlySettings from "./LotsOnlySettings";
+import DebugPanel from "../components/DebugPanel";   // ── DASH_TIDY_20261126 ── admin Settings only
 // ── CAS_2026 ── single source of truth for session boundaries
 import { MARKET_START_HM, FNO_END_HM } from "../marketSession";
 
@@ -3448,6 +3449,9 @@ function AdminSettings() {
         )}
 
       </div>
+
+      {/* ── DASH_TIDY_20261126 ── moved from the Dashboard; AdminSettings renders for admin licences only */}
+      <DebugPanel />
     </div>
   );
 }

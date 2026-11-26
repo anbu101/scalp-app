@@ -21,7 +21,6 @@ import { useEntitlements } from "../hooks/useEntitlements";
 import { useMarketData } from "../context/MarketDataContext";
 import StrategyHost, { META } from "../components/StrategyHost";
 import { TodayRowsContext } from "../components/replay/ReplayHost";   // ── CHART_SAME_MTM_20261117 ──
-import DebugPanel from "../components/DebugPanel";
 import TodayStrip from "../components/fleet/TodayStrip";
 import { useBrokerCheck, BrokerBadge, BrokerIssues } from "../components/fleet/SystemChecks";
 import { useFleetToday } from "../components/fleet/useFleetToday";
@@ -242,7 +241,7 @@ export default function CalmDashboard() {
           </TodayRowsContext.Provider>
         </section>
 
-        {isAdminUi && <DebugPanel />}
+        {/* ── DASH_TIDY_20261126 ── the Debug tools live on Settings (admin) now */}
       </div>
     </div>
   );

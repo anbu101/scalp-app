@@ -130,9 +130,10 @@ with sync_playwright() as p:
         errs += pg._errors
         ctx.close()
     # WEEK_ON_DATELINE_20261120: no Today card any more (the selected Week link's accent is TC-CALM-0046)
-    ok = all(v["nifty"] == v["acc"] and v["week"] != v["acc"] and v["bank"] != v["acc"] and v["fAll"] == v["acc"] and v["fLive"] != v["acc"] for v in seen.values())
+    # DASH_TIDY_20261126: the selected index chip has NO accent outline any more — same border as the unselected one
+    ok = all(v["nifty"] != v["acc"] and v["nifty"] == v["bank"] and v["week"] != v["acc"] and v["fAll"] == v["acc"] and v["fLive"] != v["acc"] for v in seen.values())
     check("TC-IDX-0024", ok and len({v["acc"] for v in seen.values()}) >= 2,
-          f"selected NIFTY chip and All filter take the theme's accent colour, unselected ones don't ({ {k: (v['acc'], v['nifty'], v['fAll']) for k, v in seen.items()} })")
+          f"selected NIFTY chip keeps the plain border (no accent outline), same as BANKNIFTY; the All filter still takes the theme's accent ({ {k: (v['acc'], v['nifty'], v['bank'], v['fAll']) for k, v in seen.items()} })")
     # ── TICKERS_UNDER_20261120: desktop traded hero — the chips sit under the period cards, side by side,
     # no dash and no mini line, their text lined up with the cards' text; the chart fills the right column
     ctx, pg = open_dash(b)

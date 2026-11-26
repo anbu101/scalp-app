@@ -5,22 +5,22 @@ Open the file named here first. Line numbers are hints: `grep -n` to confirm, th
 
 ## Strategies — live · backtest · SL/ST/BT lines · panel (F/strategies/<id>/) · test suites
 Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core = fleet-wide live changes cover it.
-- **Icarus IC_V2** (+Indica IC_V1) core — E/ic/ (ic_group_manager, ic_live_core, ic_runtime) · B/ic/backtest_ic_runner.py QW:319 · SL:496–562 ST:2924–3133 BT:4415–4646 · ICPanel.jsx · tests E/ic 18, B/ic 4
-- **Timberwolf TMA_V2** core — E/tma2/ (tma2_live_core, tma2_selection_loop, tma2_trade_manager) · B/tma/backtest_tma_v2_runner.py QW:275 · SL:833–860 ST:2580–2724 BT:3955–4201 · TMA2Panel.jsx · tests E/tma2 9, B/tma 5
-- **Tigris TSG_V1** core — E/tsg/ (tsg_live_core, tsg_manager, tsg_runtime) · B/tsg/backtest_tsg_runner.py QW:290 · SL:868–889 ST:2826–2922 BT:4647–4710 · TSGV1Panel.jsx A/tsg_v1_state_routes.py · tests E/tsg 5, B/tsg 1
-- **Velvet VET_V1** core — E/vet/ (vet_live_core, vet_manager, vet_selection_loop) · B/vet/backtest_vet_runner.py QW:469 · SL:786–831 ST:2470–2579 BT:5353–5451 · VETPanel.jsx · tests E/vet 11, B/vet 8
-- **Ember EMC_V1** — E/emc/ · B/emc/backtest_emc_runner.py QW:386 · SL:733–754 ST:2435–2469 BT:4924–5037 · EMCPanel.jsx · tests E/emc 1, B/emc 1
-- **Tripwire LVB_V1** — E/lvb/ · SL:759–761 ST:2420–2434 · F/pages/LevelBreak.jsx A/lvb_routes.py · tests E/lvb 1
-- **Outrider ORB_V1** — E/orb/ · B/orb/backtest_orb_runner.py QW:416 · SL:693–721 ST:2379–2419 BT:5120–5202 · ORBPanel.jsx · tests E/orb 2, B/orb 1
-- **Breaker BRK_V1** — E/brk/ · B/brk/backtest_brk_runner.py QW:356 · SL:639–674 ST:2333–2378 BT:4775–4839 · BRKPanel.jsx A/brk_v1_state_routes.py · tests E/brk 2, B/brk 1
-- **Harbor HA_V1** — E/ha_options/ · B/ha/backtest_ha_runner.py QW:243 · SL:246–284 ST:2000–2194 BT:3766–3826 · HAPanel.jsx
-- **Bobbin BB_V1** — E/bb_options/ · B/bb/backtest_bb_runner.py QW:212 · SL:199–221 ST:1725–1917 · BBPanel.jsx
-- **Baobab BB_V2** — E/bb_v2/ · B/bb/backtest_bb_runner.py QW:212 · SL:226–241 ST:1918–1999 · BBV2Panel.jsx
+- **Icarus IC_V2** (+Indica IC_V1) core — E/ic/ (ic_group_manager, ic_live_core, ic_runtime) · B/ic/backtest_ic_runner.py QW:319 · SL:496–562 ST:2925–3134 BT:4415–4646 · ICPanel.jsx · tests E/ic 18, B/ic 4
+- **Timberwolf TMA_V2** core — E/tma2/ (tma2_live_core, tma2_selection_loop, tma2_trade_manager) · B/tma/backtest_tma_v2_runner.py QW:275 · SL:833–860 ST:2581–2725 BT:3955–4201 · TMA2Panel.jsx · tests E/tma2 9, B/tma 5
+- **Tigris TSG_V1** core — E/tsg/ (tsg_live_core, tsg_manager, tsg_runtime) · B/tsg/backtest_tsg_runner.py QW:290 · SL:868–889 ST:2827–2923 BT:4647–4710 · TSGV1Panel.jsx A/tsg_v1_state_routes.py · tests E/tsg 5, B/tsg 1
+- **Velvet VET_V1** core — E/vet/ (vet_live_core, vet_manager, vet_selection_loop) · B/vet/backtest_vet_runner.py QW:469 · SL:786–831 ST:2471–2580 BT:5353–5451 · VETPanel.jsx · tests E/vet 11, B/vet 8
+- **Ember EMC_V1** — E/emc/ · B/emc/backtest_emc_runner.py QW:386 · SL:733–754 ST:2436–2470 BT:4924–5037 · EMCPanel.jsx · tests E/emc 1, B/emc 1
+- **Tripwire LVB_V1** — E/lvb/ · SL:759–761 ST:2421–2435 · F/pages/LevelBreak.jsx A/lvb_routes.py · tests E/lvb 1
+- **Outrider ORB_V1** — E/orb/ · B/orb/backtest_orb_runner.py QW:416 · SL:693–721 ST:2380–2420 BT:5120–5202 · ORBPanel.jsx · tests E/orb 2, B/orb 1
+- **Breaker BRK_V1** — E/brk/ · B/brk/backtest_brk_runner.py QW:356 · SL:639–674 ST:2334–2379 BT:4775–4839 · BRKPanel.jsx A/brk_v1_state_routes.py · tests E/brk 2, B/brk 1
+- **Harbor HA_V1** — E/ha_options/ · B/ha/backtest_ha_runner.py QW:243 · SL:246–284 ST:2001–2195 BT:3766–3826 · HAPanel.jsx
+- **Bobbin BB_V1** — E/bb_options/ · B/bb/backtest_bb_runner.py QW:212 · SL:199–221 ST:1726–1918 · BBPanel.jsx
+- **Baobab BB_V2** — E/bb_v2/ · B/bb/backtest_bb_runner.py QW:212 · SL:226–241 ST:1919–2000 · BBV2Panel.jsx
 - **Glacier GC_V1** — E/gc/ · B/gc/backtest_gc_runner.py QW:304 · BT:4711–4774 · A/gc_v1_state_routes.py · tests E/gc 1, B/gc 1
-- **Tomahawk TMA_V1** — E/tma/ · B/tma/backtest_tma_runner.py QW:264 · SL:578–599 ST:2195–2332 BT:3827–3954 · TMAPanel.jsx · tests E/tma 3, B/tma 1
-- **Scala SCALP_V1** — backend/app/marketdata/zerodha_tick_engine.py + E/scalp_common/ · SL:92–194 ST:1548–1724 BT:3583–3681 · ScalpPanel.jsx A/scalp_v1_state.py
-- **Scenic SCALP_V3** — E/scalp_v3/ · B/runner/backtest_hedge_runner.py QW:223 · SL:320–365 ST:2725–2825 BT:3688–3730 · ScalpV3Panel.jsx
-- **Scribe SCALP_V5** — E/scalpv5/ · B/scalpv5/backtest_scalpv5_runner.py QW:231 · SL:392–433 ST:3134–3233 BT:3732–3765 · ScalpV5Panel.jsx
+- **Tomahawk TMA_V1** — E/tma/ · B/tma/backtest_tma_runner.py QW:264 · SL:578–599 ST:2196–2333 BT:3827–3954 · TMAPanel.jsx · tests E/tma 3, B/tma 1
+- **Scala SCALP_V1** — backend/app/marketdata/zerodha_tick_engine.py + E/scalp_common/ · SL:92–194 ST:1549–1725 BT:3583–3681 · ScalpPanel.jsx A/scalp_v1_state.py
+- **Scenic SCALP_V3** — E/scalp_v3/ · B/runner/backtest_hedge_runner.py QW:223 · SL:320–365 ST:2726–2826 BT:3688–3730 · ScalpV3Panel.jsx
+- **Scribe SCALP_V5** — E/scalpv5/ · B/scalpv5/backtest_scalpv5_runner.py QW:231 · SL:392–433 ST:3135–3234 BT:3732–3765 · ScalpV5Panel.jsx
 - **TVX_V1** (TradingView alerts, paper) — E/tvx/ · F/pages/TvAlerts.jsx A/tvx_routes.py · tests E/tvx 1
 - Backtest-only: CBO_V1 B/cbo/backtest_cbo_runner.py BT:5203–5352 · Fissure FVG_V1 B/fvg/backtest_fvg_runner.py BT:5038–5119 · ORV_V1 B/orv/backtest_orv_runner.py · Sabre STFC_V1 B/stfc/backtest_stfc_runner.py BT:4840–4923 · VAP_V1 B/vap/backtest_vap_runner.py BT:4202–4414
 - SCALP_V1 backtest = fall-through B/runner/backtest_runner.py QW:485.
@@ -31,7 +31,7 @@ Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core
 
 ## Tests — 186 backend scripts (exit code) + 20 pytest files
 - Failures + summary only: `python3 scripts/run_suites.py PATH...` — runs each suite its own way: scripts from backend/; pytest files (E/ic, backend/app/config, backend/app/db, backend/app/execution) via `-m pytest` from their folder; 2 BRK suites from the root. A pytest file run as a plain script exits 0 untested.
-- 226 suites (under backend/app/ unless shown): api/ 16 · backtest/ 56 · db/ 3 · engine/ 66 · execution/ 17 · jobs/ 3 · marketdata/ 4 · parity/ 8 · tests/ 8 · tools/ 5 · utils/ 3 · frontend/uitest/ 14 · scripts/ 4 · 19 more in 13 small folders
+- 227 suites (under backend/app/ unless shown): api/ 16 · backtest/ 56 · db/ 3 · engine/ 66 · execution/ 17 · jobs/ 3 · marketdata/ 4 · parity/ 8 · tests/ 8 · tools/ 5 · utils/ 3 · frontend/uitest/ 15 · scripts/ 4 · 19 more in 13 small folders
 - Fleet, one fake Kite account: `python3 scripts/run_suites.py E/test_fleet_adversarial.py E/test_fleet_live.py E/test_safety_layers.py`
 - Before a release: `python3 scripts/run_suites.py backend/app/execution/test_execution_router_contract.py` (E/ B/ A/ J/ prefixes work).
 - UI (Playwright, app closed): `cd frontend && CI=false npm run build && PYTHONPATH=../backend python3 uitest/test_ui_<name>.py` (frontend/uitest/README.md).
