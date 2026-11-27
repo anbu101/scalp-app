@@ -190,10 +190,12 @@ crontab -l | grep -q 'scalp-license-backup' || { echo "  !! backup cron was not 
 
 echo "  - first ADMIN license (only if DB is empty)"
 SECRET=$(cat secrets/admin_secret.txt)
-COUNT=$(curl -s "http://127.0.0.1:${PORT}/admin/list" -H "X-Admin-Secret: $SECRET" \
+# ── LICENSE_ADMIN_HTTPS_ONLY_20261127 ── /admin answers only over HTTPS; this call is on the droplet itself
+# (127.0.0.1), whose X-Forwarded-Proto uvicorn trusts, so it says "https".
+COUNT=$(curl -s "http://127.0.0.1:${PORT}/admin/list" -H "X-Forwarded-Proto: https" -H "X-Admin-Secret: $SECRET" \
         | ./venv/bin/python -c "import json,sys; print(len(json.load(sys.stdin)['licenses']))")
 if [ "$COUNT" = "0" ]; then
-  RESP=$(curl -s -X POST "http://127.0.0.1:${PORT}/admin/create" \
+  RESP=$(curl -s -X POST "http://127.0.0.1:${PORT}/admin/create" -H "X-Forwarded-Proto: https" \
       -H "Content-Type: application/json" -H "X-Admin-Secret: $SECRET" \
       -d '{"label":"Anbu - main","tier":"ADMIN"}')
   ADMIN_KEY=$(echo "$RESP" | ./venv/bin/python -c "import json,sys; print(json.load(sys.stdin)['license']['key'])")

@@ -45,7 +45,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 import db
@@ -75,6 +75,23 @@ notify.start_expiry_watcher(db.list_licenses)
 liveness_watch.start_watcher()   # ── LIVENESS 2026-09-01 ── dead-man's switch
 
 app = FastAPI(title="Scalp License Server", docs_url=None, redoc_url=None)
+
+
+# ── LICENSE_ADMIN_HTTPS_ONLY_20261127 ── (TD-111) /admin/* only over HTTPS (Caddy :8443). The License Admin
+# page moved there; on the plain port the admin secret would cross the internet in
+# clear. Caddy proxies from 127.0.0.1 with X-Forwarded-Proto: https, which uvicorn
+# trusts from 127.0.0.1 only (its default), so a request straight to :9100 stays
+# "http" even if it forges that header. The apps never call /admin; their
+# activate / heartbeat / liveness / min_version keep working on :9100 (fallback).
+def _admin_allowed(path: str, scheme: str) -> bool:
+    return not path.startswith("/admin") or scheme == "https"
+
+
+@app.middleware("http")
+async def _admin_https_only(request, call_next):
+    if not _admin_allowed(request.url.path, request.url.scheme):
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    return await call_next(request)
 
 # --------------------------------------------------
 # MODELS
