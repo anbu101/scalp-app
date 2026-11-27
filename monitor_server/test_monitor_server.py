@@ -1046,6 +1046,26 @@ check("TC-MONSRV-0088 no inline style attribute and no inline script on any page
       all(' style="' not in t and "<script>" not in t for t in pages_all),
       [i for i, t in enumerate(pages_all) if ' style="' in t or "<script>" in t])
 
+# ── the app's Arcade theme (FLEET_PORTAL_ARCADE_20261127, TD-128) ──
+APP_CSS = (HERE.parent / "frontend" / "src" / "index.css").read_text()
+arc = APP_CSS[APP_CSS.index(':root[data-theme="arcade"] {'):]
+arc = arc[:arc.index("}")]
+css_p = httpx.get(f"{BASE}/static/app.css").text
+fo = httpx.get(f"{BASE}/static/fonts/orbitron.woff2")
+fs = httpx.get(f"{BASE}/static/fonts/space-grotesk.woff2")
+fbad = httpx.get(f"{BASE}/static/fonts/nope.woff2")
+app_fonts = HERE.parent / "frontend" / "src" / "fonts"
+tokens = ["#0b0621", "#160c3a", "#1d1148", "#3b2a6e", "#f2e9ff", "#cdbff0", "#a493d6", "#39ff8c", "#ff4d6d", "#ff3cac", "#ffd23f"]
+check("TC-MONSRV-0089 the portal wears the app's Arcade theme: its colour tokens (violet page and cards, magenta "
+      "primary, neon-green profit, hot-pink loss, yellow warning), the magenta grid horizon, Orbitron headings and "
+      "Space Grotesk text — the fonts byte-for-byte the app's, served by the portal (CSP font-src 'self')",
+      all(t in arc for t in tokens) and all(t in css_p for t in tokens) and "Orbitron" in css_p and "Space Grotesk" in css_p
+      and "rgba(255,60,172,.22) 1px" in css_p and fo.status_code == 200 and fo.headers["content-type"] == "font/woff2"
+      and fo.content == (app_fonts / "orbitron-latin-wght-normal.woff2").read_bytes()
+      and fs.content == (app_fonts / "space-grotesk-latin-wght-normal.woff2").read_bytes() and fbad.status_code == 404
+      and "font-src 'self'" in httpx.get(f"{BASE}/login").headers.get("content-security-policy", ""),
+      [t for t in tokens if t not in css_p])
+
 uv.should_exit = True
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({OK[0]}/{OK[0] + len(FAILS)})")
 sys.exit(1 if FAILS else 0)

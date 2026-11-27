@@ -49,6 +49,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 import accounts   # ── PORTAL_USERS_ADMIN_20261127 ──
 import auth
 import pages
+import portal_fonts   # ── FLEET_PORTAL_ARCADE_20261127 ──
 import relay
 import store
 import watcher   # ── FLEET_WATCH_20261127 ──
@@ -62,7 +63,8 @@ _ingest_hits: dict = {}
 
 SEC_HEADERS = {
     # ── FLEET_PORTAL_REDESIGN_20261127 ── script-src/connect-src 'self': the live refresh (/static/app.js, no inline script)
-    "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self';"
+    # ── FLEET_PORTAL_ARCADE_20261127 ── font-src 'self': the Arcade theme's two fonts, served below
+    "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self';"
                                " form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
@@ -152,6 +154,14 @@ def healthz():
 @app.get("/static/app.css")
 def css():
     return Response(pages.CSS, media_type="text/css", headers={"Cache-Control": "max-age=3600"})
+
+
+@app.get("/static/fonts/{name}.woff2")   # ── FLEET_PORTAL_ARCADE_20261127 ── Orbitron / Space Grotesk (OFL-1.1)
+def font(name: str):
+    b = portal_fonts.font(name)
+    if b is None:
+        return Response(status_code=404)
+    return Response(b, media_type="font/woff2", headers={"Cache-Control": "max-age=86400"})
 
 
 @app.get("/favicon.ico")   # ── FLEET_PORTAL_REDESIGN_20261127 ── browsers ask; answer quietly
