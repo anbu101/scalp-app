@@ -33,6 +33,14 @@ IST = ZoneInfo("Asia/Kolkata")
 DB_PATH = Path(os.environ.get("MONSRV_DB", Path(__file__).resolve().parent / "monitor.db"))
 LICENSE_DB = Path(os.environ.get("MONSRV_LICENSE_DB", "/opt/scalp-license/licenses.db"))
 
+# ── FLEET_MEMBERSHIP_20261127 ── which machines are in the fleet. A NEW install waits for an admin's
+# approval ("pending") and nothing it sends is stored; "out" = removed by an admin
+# (its earlier data stays, hidden, and returns with "Add back"). MONSRV_NEW_MACHINES=auto
+# lets new installs straight in (tests; or if you ever want the old behaviour).
+NEW_MACHINES = os.environ.get("MONSRV_NEW_MACHINES", "approval")
+MEMBERSHIPS = ("in", "pending", "out")
+IN_FLEET = "device_key IN (SELECT key FROM devices WHERE membership='in')"
+
 ALERT_KINDS = ("CRITICAL", "ORDER_REJECTED", "SYSTEM_ALERT")
 TRADE_KINDS = ("TRADE_ENTRY", "TRADE_EXIT", "GROUP_ENTRY", "GROUP_EXIT")
 KNOWN_KINDS = ALERT_KINDS + TRADE_KINDS
@@ -105,6 +113,8 @@ def init_db() -> None:
         cols = {r[1] for r in c.execute("PRAGMA table_info(devices)")}
         if "relay" not in cols:
             c.execute("ALTER TABLE devices ADD COLUMN relay INTEGER NOT NULL DEFAULT 1")
+        if "membership" not in cols:      # ── FLEET_MEMBERSHIP_20261127 ── machines already reporting stay in the fleet
+            c.execute("ALTER TABLE devices ADD COLUMN membership TEXT NOT NULL DEFAULT 'in'")
 
 
 def ist_day(ts: Optional[float]) -> Optional[str]:
@@ -202,13 +212,14 @@ def upsert_device(lic: Dict[str, Any], machine_id: str, app_version: Optional[st
     with conn() as c:
         c.execute(
             "INSERT INTO devices (key, machine_id, label, tier, app_version, first_seen, last_seen,"
-            " last_ip, epoch, dropped) VALUES (?,?,?,?,?,?,?,?,?,?)"
+            " last_ip, epoch, dropped, membership) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(key) DO UPDATE SET machine_id=excluded.machine_id, label=excluded.label,"
             " tier=excluded.tier, app_version=COALESCE(excluded.app_version, devices.app_version),"
             " last_seen=excluded.last_seen, last_ip=excluded.last_ip, epoch=excluded.epoch,"
             " dropped=excluded.dropped",
             (lic["key"], machine_id, lic.get("label") or lic["key"][:8], lic.get("tier"),
-             (app_version or None), now, now, ip[:64], epoch[:64], int(dropped or 0)))
+             (app_version or None), now, now, ip[:64], epoch[:64], int(dropped or 0),
+             "in" if NEW_MACHINES == "auto" else "pending"))   # ── FLEET_MEMBERSHIP_20261127 ──
         return dict(c.execute("SELECT * FROM devices WHERE key=?", (lic["key"],)).fetchone())
 
 
@@ -276,8 +287,18 @@ def _rows(sql: str, args: tuple = ()) -> List[Dict[str, Any]]:
         return [dict(r) for r in c.execute(sql, args).fetchall()]
 
 
-def devices() -> List[Dict[str, Any]]:
-    return _rows("SELECT * FROM devices ORDER BY label COLLATE NOCASE")
+def devices(include_all: bool = False) -> List[Dict[str, Any]]:
+    """In-fleet machines; include_all=True adds waiting / removed ones (admin lists). ── FLEET_MEMBERSHIP_20261127 ──"""
+    if include_all:
+        return _rows("SELECT * FROM devices ORDER BY label COLLATE NOCASE")
+    return _rows("SELECT * FROM devices WHERE membership='in' ORDER BY label COLLATE NOCASE")
+
+
+def set_membership(key: str, membership: str) -> bool:   # ── FLEET_MEMBERSHIP_20261127 ──
+    if membership not in MEMBERSHIPS:
+        return False
+    with conn() as c:
+        return c.execute("UPDATE devices SET membership=? WHERE key=?", (membership, key)).rowcount == 1
 
 
 def device(key: str) -> Optional[Dict[str, Any]]:
@@ -297,7 +318,7 @@ def set_relay(key: str, on: bool) -> None:   # ── FLEET_RELAY_PER_MACHINE_20
 
 def snapshots() -> Dict[str, Dict[str, Any]]:
     out = {}
-    for r in _rows("SELECT * FROM snapshot"):
+    for r in _rows(f"SELECT * FROM snapshot WHERE {IN_FLEET}"):   # ── FLEET_MEMBERSHIP_20261127 ──
         try:
             r["data"] = json.loads(r["data"])
         except Exception:
@@ -309,6 +330,7 @@ def snapshots() -> Dict[str, Dict[str, Any]]:
 def unacked_counts(since: float) -> Dict[str, int]:
     rows = _rows("SELECT e.device_key, COUNT(*) AS n FROM events e LEFT JOIN acks a ON a.event_id=e.id"
                  " WHERE e.kind IN ('CRITICAL','ORDER_REJECTED') AND a.event_id IS NULL AND e.ts>=?"
+                 f" AND e.{IN_FLEET}"   # ── FLEET_MEMBERSHIP_20261127 ──
                  " GROUP BY e.device_key", (since,))
     return {r["device_key"]: r["n"] for r in rows}
 
@@ -317,7 +339,7 @@ def alerts(device_key: Optional[str], unacked_only: bool, since: float, limit: i
            strategy: Optional[str] = None) -> List[Dict[str, Any]]:
     sql = ("SELECT e.*, a.username AS ack_user, a.ts AS ack_ts, a.note AS ack_note FROM events e"
            " LEFT JOIN acks a ON a.event_id=e.id WHERE e.kind IN ('CRITICAL','ORDER_REJECTED','SYSTEM_ALERT')"
-           " AND e.ts>=?")
+           f" AND e.ts>=? AND e.{IN_FLEET}")   # ── FLEET_MEMBERSHIP_20261127 ──
     args: list = [since]
     if device_key:
         sql += " AND e.device_key=?"
@@ -345,7 +367,7 @@ def ack(event_id: int, username: str, note: str) -> bool:
 def events(day: str, device_key: Optional[str], kinds: Iterable[str], limit: int = 1000) -> List[Dict[str, Any]]:
     start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=IST).timestamp()
     kinds = tuple(kinds)
-    sql = (f"SELECT * FROM events WHERE ts>=? AND ts<? AND kind IN ({','.join('?' * len(kinds))})")
+    sql = (f"SELECT * FROM events WHERE ts>=? AND ts<? AND kind IN ({','.join('?' * len(kinds))}) AND {IN_FLEET}")   # ── FLEET_MEMBERSHIP_20261127 ──
     args: list = [start, start + 86400, *kinds]
     if device_key:
         sql += " AND device_key=?"
@@ -357,7 +379,7 @@ def events(day: str, device_key: Optional[str], kinds: Iterable[str], limit: int
 
 def legs(day_from: str, day_to: str, device_key: Optional[str], strategy_id: Optional[str],
          limit: int = 2000) -> List[Dict[str, Any]]:
-    sql = "SELECT * FROM legs WHERE ((day>=? AND day<=?) OR is_open=1)"
+    sql = f"SELECT * FROM legs WHERE ((day>=? AND day<=?) OR is_open=1) AND {IN_FLEET}"   # ── FLEET_MEMBERSHIP_20261127 ──
     args: list = [day_from, day_to]
     if device_key:
         sql += " AND device_key=?"
@@ -379,7 +401,7 @@ def legs(day_from: str, day_to: str, device_key: Optional[str], strategy_id: Opt
 
 def day_summaries(day: str) -> List[Dict[str, Any]]:
     out = []
-    for r in _rows("SELECT * FROM day_summary WHERE day=?", (day,)):
+    for r in _rows(f"SELECT * FROM day_summary WHERE day=? AND {IN_FLEET}", (day,)):   # ── FLEET_MEMBERSHIP_20261127 ──
         r["totals"] = json.loads(r["totals"] or "{}")
         r["rows"] = json.loads(r["rows"] or "[]")
         out.append(r)
@@ -390,7 +412,7 @@ def event_counts(day: str) -> Dict[str, Dict[str, int]]:
     """Per device: trade events streamed that day (for the summary's check)."""
     start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=IST).timestamp()
     out: Dict[str, Dict[str, int]] = {}
-    for r in _rows("SELECT device_key, kind, COUNT(*) AS n FROM events WHERE ts>=? AND ts<?"
+    for r in _rows(f"SELECT device_key, kind, COUNT(*) AS n FROM events WHERE ts>=? AND ts<? AND {IN_FLEET}"   # ── FLEET_MEMBERSHIP_20261127 ──
                    " GROUP BY device_key, kind", (start, start + 86400)):
         out.setdefault(r["device_key"], {})[r["kind"]] = r["n"]
     return out

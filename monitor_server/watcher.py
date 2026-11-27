@@ -111,7 +111,8 @@ def _hm(ts: Optional[float], now: float) -> str:
 
 
 def _on(dev: Dict[str, Any]) -> bool:
-    return bool(dev.get("enabled", 1)) and bool(dev.get("relay", 1))
+    return (bool(dev.get("enabled", 1)) and bool(dev.get("relay", 1))
+            and dev.get("membership", "in") == "in")   # ── FLEET_MEMBERSHIP_20261127 ──
 
 
 def check_offline(now: float) -> List[str]:

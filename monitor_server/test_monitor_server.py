@@ -10,6 +10,7 @@
 #                                        ── KITE_STATUS_PORTAL_20261127 ── (TD-112) TC-MONSRV-0058
 #                                        ── LICENSE_HTTPS_20261127 ── (TD-111) TC-MONSRV-0059
 #                                        ── ALERT_STRATEGY_INFER_20261127 ── TC-MONSRV-0060…0064
+#                                        ── FLEET_MEMBERSHIP_20261127 ── TC-MONSRV-0065…0070
 #
 # The Fleet Monitor service end to end: the real FastAPI app under uvicorn on
 # a free local port (no Starlette TestClient), a throw-away monitor.db and a
@@ -30,7 +31,8 @@ TMP = Path(tempfile.mkdtemp(prefix="monsrv_"))
 (TMP / "secrets").mkdir()
 os.environ.update(MONSRV_DB=str(TMP / "monitor.db"), MONSRV_LICENSE_DB=str(TMP / "licenses.db"),
                   MONSRV_SECRETS_DIR=str(TMP / "secrets"), MONSRV_LICENSE_TELEGRAM=str(TMP / "tg.json"),
-                  MONSRV_INSECURE_COOKIE="1", MONSRV_NO_WATCHER="1")
+                  MONSRV_INSECURE_COOKIE="1", MONSRV_NO_WATCHER="1",
+                  MONSRV_NEW_MACHINES="auto")   # the older checks expect new machines straight in; 0065+ set "approval"
 sys.path.insert(0, str(HERE))
 FAILS, OK = [], [0]
 
@@ -664,6 +666,75 @@ sys.path.insert(0, str(HERE.parent / "backend"))
 from app.config.strategy_display import STRATEGY_DISPLAY   # noqa: E402
 check("TC-MONSRV-0064 the portal's codename table matches the app's STRATEGY_DISPLAY (drift guard)",
       strategies.CODENAMES == {k: v[1] for k, v in STRATEGY_DISPLAY.items()})
+
+# ── fleet membership: approval, remove, add back (FLEET_MEMBERSHIP_20261127) ──
+mig_db = TMP / "old_mem.db"
+with sqlite3.connect(mig_db) as c:
+    c.execute("CREATE TABLE devices (key TEXT PRIMARY KEY, machine_id TEXT, label TEXT, tier TEXT, app_version TEXT,"
+              " first_seen REAL, last_seen REAL, last_ip TEXT, epoch TEXT, enabled INTEGER NOT NULL DEFAULT 1,"
+              " dropped INTEGER NOT NULL DEFAULT 0, relay INTEGER NOT NULL DEFAULT 1)")
+    c.execute("INSERT INTO devices (key, label) VALUES ('K-WAS', 'Was reporting')")
+_k = store.DB_PATH
+store.DB_PATH = mig_db
+store.init_db()
+with store.conn() as c:
+    mig = dict(c.execute("SELECT key, membership FROM devices").fetchone())
+store.DB_PATH = _k
+check("TC-MONSRV-0065 machines already reporting stay in the fleet when this change starts (membership 'in')",
+      mig == {"key": "K-WAS", "membership": "in"}, mig)
+
+with sqlite3.connect(TMP / "licenses.db") as c:
+    c.execute("INSERT OR REPLACE INTO licenses VALUES ('KEY-NEW', 'Newbie', 'STANDARD', 'HW-NEW', 0)")
+store.NEW_MACHINES = "approval"
+relay._reset_for_tests()
+drain()
+r_new = ingest("KEY-NEW", "HW-NEW", [ev(1, "CRITICAL", message="newbie boom"), ev(2, "TRADE_ENTRY", symbol="X")],
+               snapshot=dict(snap, totals={"net": 777}))
+with store.conn() as c:
+    kept = c.execute("SELECT COUNT(*) FROM events WHERE device_key='KEY-NEW'").fetchone()[0] + \
+        c.execute("SELECT COUNT(*) FROM snapshot WHERE device_key='KEY-NEW'").fetchone()[0]
+check("TC-MONSRV-0066 a NEW install waits for approval: told to hold off (enabled false, its events acked), nothing "
+      "it sent is kept, nothing goes to Telegram",
+      r_new.json() == {"ok": True, "acked": 2, "enabled": False} and store.device("KEY-NEW")["membership"] == "pending"
+      and kept == 0 and drain() == [], (r_new.json(), kept))
+
+vw_page, ad_page = vw.get("/").text, ad.get("/").text
+pages_v = [vw.get(u).text for u in ("/alerts?days=1", f"/trades?from={today}&to={today}", f"/timeline?day={today}", "/day")]
+check("TC-MONSRV-0067 a waiting machine is on no viewer page (Fleet, Alerts, Trades, Timeline, Day); admins see it "
+      "under 'Waiting for approval' with Add to fleet / Don't add",
+      "Newbie" not in vw_page and "Waiting for approval" not in vw_page and all("Newbie" not in t for t in pages_v)
+      and "Waiting for approval" in ad_page and "Newbie" in ad_page and "Add to fleet" in ad_page
+      and "Don&#x27;t add" in ad_page, ad_page[:300])
+
+vcs2 = auth.session(vw.cookies.get(auth.COOKIE))["csrf"]
+acs2 = auth.session(ad.cookies.get(auth.COOKIE))["csrf"]
+deny = vw.post("/devices/KEY-NEW/membership", data={"csrf": vcs2, "membership": "in"}).status_code
+nocsrf = ad.post("/devices/KEY-NEW/membership", data={"membership": "in"}).status_code
+okay = ad.post("/devices/KEY-NEW/membership", data={"csrf": acs2, "membership": "in"}).status_code
+r_after = ingest("KEY-NEW", "HW-NEW", [ev(3, "CRITICAL", message="now counted")], snapshot=dict(snap, totals={"net": 777}))
+check("TC-MONSRV-0068 Add to fleet (admin only, CSRF): from its next report the machine is stored and shown",
+      deny == 403 and nocsrf == 403 and okay == 303 and store.device("KEY-NEW")["membership"] == "in"
+      and r_after.json()["enabled"] is True and "Newbie" in vw.get("/").text
+      and any(a["summary"] == "now counted" for a in store.alerts("KEY-NEW", False, now - 600)), (deny, nocsrf, okay, r_after.json()))
+
+ad.post("/devices/KEY-RAVI/membership", data={"csrf": acs2, "membership": "out"})
+hidden_v = [vw.get(u).text for u in ("/", "/alerts?days=1", f"/trades?from={today}&to={today}", f"/timeline?day={today}", "/day")]
+r_out = ingest("KEY-RAVI", "HW-RAVI", [ev(9000, "CRITICAL", message="from a removed machine")])
+ad_out = ad.get("/").text
+check("TC-MONSRV-0069 Remove from fleet: the machine and its earlier data vanish from every page for everyone; it is "
+      "told to hold off and nothing new is kept; admins see it under 'Not in the fleet' with Add back",
+      all("Ravi &lt;b&gt;" not in t for t in hidden_v) and r_out.json()["enabled"] is False
+      and not any(a["summary"] == "from a removed machine" for a in store.alerts(None, False, now - 600))
+      and "Not in the fleet" in ad_out and "Add back" in ad_out and "Ravi &lt;b&gt;" in ad_out,
+      [("Ravi" in t) for t in hidden_v])
+ad.post("/devices/KEY-RAVI/membership", data={"csrf": acs2, "membership": "in"})
+back = vw.get("/alerts?days=1").text
+check("TC-MONSRV-0070 Add back restores the machine with its earlier data; the channel watcher never counts a "
+      "machine that is waiting or removed",
+      "Ravi &lt;b&gt;" in vw.get("/").text and "Ravi &lt;b&gt;" in back
+      and not watcher._on({"membership": "pending"}) and not watcher._on({"membership": "out"})
+      and watcher._on({"membership": "in"}))
+store.NEW_MACHINES = "auto"
 
 uv.should_exit = True
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({OK[0]}/{OK[0] + len(FAILS)})")

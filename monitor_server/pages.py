@@ -193,7 +193,46 @@ def kite_chip(b: Optional[Dict[str, Any]], now: float) -> str:
     return f'<span class="badge b-bad"{when}>Kite: NOT logged in</span>'
 
 
-def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram") -> str:   # ── FLEET_SWITCH_LABEL_20261127 ── channel
+def fleet_lists(user, others, now) -> tuple:
+    """── FLEET_MEMBERSHIP_20261127 ── admin-only lists: machines waiting for approval (top) and machines
+    not in the fleet (bottom), each with its button. Viewers never see them."""
+    if user.get("role") != "admin" or not others:
+        return "", ""
+
+    def row(d, label, value):
+        return (f'<tr><td>{e(d.get("label"))}</td><td class="muted">{e(d.get("tier") or "")} · '
+                f'v{e(d.get("app_version") or "?")}</td><td class="muted">seen {ago(d.get("last_seen"), now)}</td>'
+                f'<td><form class="inline" method="post" action="/devices/{e(d["key"])}/membership">'
+                f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
+                f'<input type="hidden" name="membership" value="{value}"><button>{label}</button></form></td></tr>')
+    pending = [d for d in others if d.get("membership") == "pending"]
+    out = [d for d in others if d.get("membership") == "out"]
+    top = ""
+    if pending:
+        top = ('<div class="card" style="margin-bottom:14px;border-color:var(--warn)"><h3>Waiting for approval '
+               f'<span class="badge b-warn">{len(pending)}</span></h3><div class="meta">New installs. Nothing they send is '
+               'kept until you add them; after that they start within 10 min.</div><div class="tw"><table>'
+               + "".join(_pending_row(d, user, now) for d in pending) + '</table></div></div>')
+    bottom = ""
+    if out:
+        bottom = ('<div class="card" style="margin-top:14px"><h3>Not in the fleet '
+                  f'<span class="badge b-idle">{len(out)}</span></h3><div class="meta">Hidden from every page and the '
+                  'channel; their earlier data comes back with Add back.</div><div class="tw"><table>'
+                  + "".join(row(d, "Add back", "in") for d in out) + '</table></div></div>')
+    return top, bottom
+
+
+def _pending_row(d, user, now) -> str:
+    def btn(label, value):
+        return (f'<form class="inline" method="post" action="/devices/{e(d["key"])}/membership" style="display:inline-flex">'
+                f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
+                f'<input type="hidden" name="membership" value="{value}"><button>{label}</button></form>')
+    return (f'<tr><td>{e(d.get("label"))}</td><td class="muted">{e(d.get("tier") or "")} · '
+            f'v{e(d.get("app_version") or "?")}</td><td class="muted">seen {ago(d.get("last_seen"), now)}</td>'
+            f'<td>{btn("Add to fleet", "in")} {btn("Don&#x27;t add", "out")}</td></tr>')
+
+
+def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram", others=()) -> str:   # ── FLEET_SWITCH_LABEL_20261127 ── channel
     total_net = total_open = online = 0
     cards = []
     for d in devs:
@@ -231,6 +270,9 @@ def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram"
                      f'<input type="hidden" name="enabled" value="{0 if d.get("enabled", 1) else 1}">'
                      f'<button>{"Pause sending" if d.get("enabled", 1) else "Resume sending"}</button></form>')
             # ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-117) per-machine Telegram switch
+            admin += (f'<form method="post" action="/devices/{e(d["key"])}/membership" style="margin-top:6px">'   # ── FLEET_MEMBERSHIP_20261127 ──
+                      f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
+                      f'<input type="hidden" name="membership" value="out"><button>Remove from fleet</button></form>')
             admin += (f'<form method="post" action="/devices/{e(d["key"])}/relay" style="margin-top:6px">'
                       f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
                       f'<input type="hidden" name="relay" value="{0 if d.get("relay", 1) else 1}">'
@@ -250,8 +292,9 @@ def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram"
     kpis = (_kpi("Fleet net today (LIVE)", money(total_net)) + _kpi("Open legs", str(total_open))
             + _kpi("Machines online", f"{online} / {len(devs)}")
             + _kpi("Unacknowledged alerts", str(sum(unacked.values()))))
-    body = (f'<div class="kpis">{kpis}</div><div class="grid">{"".join(cards) or "<p>No machine has reported yet.</p>"}</div>'
-            f'<p class="muted" style="margin-top:14px">Refreshes every 30 s · {dt(now)} IST</p>')
+    pend, out = fleet_lists(user, others, now)   # ── FLEET_MEMBERSHIP_20261127 ──
+    body = (pend + f'<div class="kpis">{kpis}</div><div class="grid">{"".join(cards) or "<p>No machine is in the fleet yet.</p>"}</div>' + out
+            + f'<p class="muted" style="margin-top:14px">Refreshes every 30 s · {dt(now)} IST</p>')
     return layout("Fleet", body, user, "/", refresh=30)
 
 

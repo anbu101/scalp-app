@@ -18,7 +18,8 @@ license server that every app depends on.
   GET  /timeline           every event of a day, in order (investigation)
   GET  /day                daily summary per machine + fleet
   POST /devices/{key}/enabled   admin: pause / resume an install's sending
-  POST /devices/{key}/relay     admin: that machine's criticals to Telegram on / off   ── FLEET_RELAY_PER_MACHINE_20261127 ──
+  POST /devices/{key}/relay     admin: that machine's criticals to Telegram on / off
+  POST /devices/{key}/membership  admin: in / out of the fleet (new installs wait for approval)   ── FLEET_MEMBERSHIP_20261127 ──   ── FLEET_RELAY_PER_MACHINE_20261127 ──
   GET/POST /setup/{token}  one-time link: the invited person sets password + authenticator
 
 ── PORTAL_USERS_ADMIN_20261127 ── accounts are managed from the License Admin page
@@ -127,6 +128,11 @@ async def ingest(request: Request):
     epoch = str(body.get("epoch") or "none")[:64]
     dev = store.upsert_device(lic, str(body.get("machine_id"))[:128], body.get("app_version"),
                               client_ip(request), epoch, int(body.get("dropped") or 0), now)
+    # ── FLEET_MEMBERSHIP_20261127 ── a machine not in the fleet (waiting for approval, or removed) is seen
+    # (last seen, version) but nothing it sends is kept; it is told to hold off.
+    if dev.get("membership", "in") != "in":
+        seqs = [int(e["seq"]) for e in events[:MAX_EVENTS] if isinstance(e, dict) and str(e.get("seq", "")).lstrip("-").isdigit()]
+        return {"ok": True, "acked": max(seqs) if seqs else None, "enabled": False}
     res = store.store_events(lic["key"], epoch, events[:MAX_EVENTS], now)
     if isinstance(body.get("snapshot"), dict):
         store.store_snapshot(lic["key"], body["snapshot"], now)
@@ -203,8 +209,9 @@ def fleet(request: Request):
     if not u:
         return _to_login()
     now = time.time()
+    others = [d for d in store.devices(include_all=True) if d.get("membership") != "in"] if u["role"] == "admin" else []
     return pages.fleet_page(u, store.devices(), store.snapshots(), store.unacked_counts(now - 7 * 86400),
-                            now, pages.now_ist_day(now), relay.target_label())   # ── FLEET_SWITCH_LABEL_20261127 ──
+                            now, pages.now_ist_day(now), relay.target_label(), others)   # ── FLEET_MEMBERSHIP_20261127 ── others
 
 
 @app.get("/alerts", response_class=HTMLResponse)
@@ -410,6 +417,20 @@ def day_summary(request: Request, day: str = ""):
     today = pages.now_ist_day()
     day = _day(day, today)
     return pages.day_page(u, store.devices(), store.day_summaries(day), store.event_counts(day), day)
+
+
+@app.post("/devices/{key}/membership")   # ── FLEET_MEMBERSHIP_20261127 ──
+async def device_membership(request: Request, key: str):
+    u = _user(request)
+    if not u:
+        return _to_login()
+    f = await _form(request)
+    if u["role"] != "admin" or not _csrf_ok(u, f):
+        return HTMLResponse("Not allowed.", status_code=403)
+    m = f.get("membership", "")
+    if m in ("in", "out") and store.set_membership(key, m):
+        store.audit(u["username"], "fleet_add" if m == "in" else "fleet_remove", key, client_ip(request))
+    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/devices/{key}/relay")   # ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-117)
