@@ -100,6 +100,11 @@ def init_db() -> None:
     with conn() as c:
         c.execute("PRAGMA journal_mode=WAL")
         c.executescript(SCHEMA)
+        # ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-117) per-machine "send its criticals to Telegram"; existing
+        # and new machines start ON (a duplicate beats a missed alert); admins switch it.
+        cols = {r[1] for r in c.execute("PRAGMA table_info(devices)")}
+        if "relay" not in cols:
+            c.execute("ALTER TABLE devices ADD COLUMN relay INTEGER NOT NULL DEFAULT 1")
 
 
 def ist_day(ts: Optional[float]) -> Optional[str]:
@@ -243,6 +248,11 @@ def device(key: str) -> Optional[Dict[str, Any]]:
 def set_enabled(key: str, enabled: bool) -> None:
     with conn() as c:
         c.execute("UPDATE devices SET enabled=? WHERE key=?", (1 if enabled else 0, key))
+
+
+def set_relay(key: str, on: bool) -> None:   # ── FLEET_RELAY_PER_MACHINE_20261127 ──
+    with conn() as c:
+        c.execute("UPDATE devices SET relay=? WHERE key=?", (1 if on else 0, key))
 
 
 def snapshots() -> Dict[str, Dict[str, Any]]:

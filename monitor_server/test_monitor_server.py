@@ -3,6 +3,7 @@
 #                                        ── PORTAL_USERS_ADMIN_20261127 ── (TD-113) TC-MONSRV-0031…0040
 #                                        ── MONITOR_DEPLOY_FILES_20261127 ── (DEF-110) TC-MONSRV-0041
 #                                        ── PORTAL_COPY_FIX_20261127 ── TC-MONSRV-0042
+#                                        ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-116, TD-117) TC-MONSRV-0006/0007 rewritten, 0043…0046
 #
 # The Fleet Monitor service end to end: the real FastAPI app under uvicorn on
 # a free local port (no Starlette TestClient), a throw-away monitor.db and a
@@ -49,6 +50,7 @@ import httpx      # noqa: E402
 import uvicorn    # noqa: E402
 import accounts   # noqa: E402
 import auth       # noqa: E402
+import pages      # noqa: E402
 import relay      # noqa: E402
 import server     # noqa: E402
 import store      # noqa: E402
@@ -139,14 +141,15 @@ q = drain()
 check("TC-MONSRV-0005 a new critical from a friend's install goes to the default chat; trade events are not relayed",
       len(q) == 1 and q[0][1] == "999" and "m10" in q[0][2] and "Ravi &lt;b&gt;" in q[0][2], q)
 ingest("KEY-ANBU", "HW-ANBU", [ev(1, "CRITICAL", message="anbu mac")])
-check("TC-MONSRV-0006 an ADMIN install is skipped for a target with admin_devices false (it pages Anbu itself)",
-      drain() == [])
+q = drain()
+check("TC-MONSRV-0006 an install on an ADMIN licence is relayed by default (a friend can hold one: TD-117)",
+      len(q) == 1 and "anbu mac" in q[0][2], q)
 (TMP / "secrets" / "monitor.json").write_text(
     '{"telegram_targets": [{"chat_id": "111", "admin_devices": false}, {"chat_id": "-100222", "admin_devices": true}]}')
 ingest("KEY-ANBU", "HW-ANBU", [ev(2, "ORDER_REJECTED", message="RMS")])
 q = drain()
-check("TC-MONSRV-0007 monitor.json targets: the group (admin_devices true) gets Anbu's installs too",
-      [x[1] for x in q] == ["-100222"], q)
+check("TC-MONSRV-0007 monitor.json targets: every listed chat gets the alert; an old admin_devices key is ignored",
+      sorted(x[1] for x in q) == ["-100222", "111"], q)
 relay._reset_for_tests()
 ingest("KEY-RAVI", "HW-RAVI", [ev(100 + i, "CRITICAL", message=f"c{i}") for i in range(10)])
 q = [x for x in drain() if x[1] == "111"]
@@ -421,6 +424,63 @@ inv9 = accounts.invite("iphone", "viewer")
 p9 = httpx.get(f"{BASE}/setup/{inv9['url'].rsplit('/', 1)[1]}").text
 check("TC-MONSRV-0042 the setup page tells iPhone users the link opens Passwords: tap + for a new entry, then "
       "come back for the code", "opens <b>Passwords</b>" in p9 and "<b>+</b>" in p9 and "6-digit code" in p9)
+
+# ── per-machine Telegram switch + Online window (FLEET_RELAY_PER_MACHINE_20261127) ──
+(TMP / "tg.json").write_text('{"bot_token": "123:abc", "chat_id": "999"}')
+relay._reset_for_tests()
+drain()
+store.set_relay("KEY-RAVI", False)
+ingest("KEY-RAVI", "HW-RAVI", [ev(900, "CRITICAL", message="muted")])
+off_q = drain()
+store.set_relay("KEY-RAVI", True)
+ingest("KEY-RAVI", "HW-RAVI", [ev(901, "CRITICAL", message="loud")])
+on_q = drain()
+check("TC-MONSRV-0043 a machine switched off sends nothing to Telegram (still stored for the portal); back on, it does",
+      off_q == [] and len(on_q) == 1 and "loud" in on_q[0][2]
+      and any(a["summary"] == "muted" for a in store.alerts("KEY-RAVI", False, now - 60)), (off_q, on_q))
+vw = httpx.Client(base_url=BASE, timeout=10, follow_redirects=False)
+ad = httpx.Client(base_url=BASE, timeout=10, follow_redirects=False)
+auth.add_user("relayview", "relay-view-pass-1")
+auth.add_user("relayadmin", "relay-admin-pass-1", "admin")
+for cl, nm, pw in ((vw, "relayview", "relay-view-pass-1"), (ad, "relayadmin", "relay-admin-pass-1")):
+    cl.post("/login", data={"username": nm, "password": pw,
+                            "code": auth.totp_at(auth.get_user(nm)["totp_secret"], int(time.time() // 30))})
+vcs = auth.session(vw.cookies.get(auth.COOKIE))["csrf"]
+acs = auth.session(ad.cookies.get(auth.COOKIE))["csrf"]
+r_v = vw.post("/devices/KEY-ANBU/relay", data={"csrf": vcs, "relay": "0"})
+r_n = ad.post("/devices/KEY-ANBU/relay", data={"relay": "0"})
+r_a = ad.post("/devices/KEY-ANBU/relay", data={"csrf": acs, "relay": "0"})
+card = ad.get("/").text
+vcard = vw.get("/").text
+check("TC-MONSRV-0044 the Fleet-card switch: viewer 403, no CSRF 403, admin turns it off; every viewer sees "
+      "'Telegram alerts off'; only admins get the button",
+      r_v.status_code == 403 and r_n.status_code == 403 and r_a.status_code == 303
+      and store.device("KEY-ANBU")["relay"] == 0 and "Telegram alerts off" in vcard
+      and "Telegram alerts: turn on" in card and "Telegram alerts: turn" not in vcard, (r_v.status_code, r_n.status_code, r_a.status_code))
+old_db = TMP / "old.db"
+with sqlite3.connect(old_db) as c:
+    c.execute("CREATE TABLE devices (key TEXT PRIMARY KEY, machine_id TEXT, label TEXT, tier TEXT, app_version TEXT,"
+              " first_seen REAL, last_seen REAL, last_ip TEXT, epoch TEXT, enabled INTEGER NOT NULL DEFAULT 1,"
+              " dropped INTEGER NOT NULL DEFAULT 0)")
+    c.execute("INSERT INTO devices (key, label) VALUES ('K-OLD', 'Old')")
+_keep = store.DB_PATH
+store.DB_PATH = old_db
+store.init_db()
+with store.conn() as c:
+    migrated = dict(c.execute("SELECT key, relay FROM devices").fetchone())
+store.DB_PATH = _keep
+check("TC-MONSRV-0045 an existing monitor.db gains the switch on start-up, every machine ON", migrated == {"key": "K-OLD", "relay": 1}, migrated)
+from datetime import datetime as _dt  # noqa: E402
+t_open = _dt(2026, 11, 27, 11, 0, tzinfo=store.IST).timestamp()      # a Friday, in market hours
+t_pre = _dt(2026, 11, 27, 8, 30, tzinfo=store.IST).timestamp()       # before the open
+dv = {"enabled": 1}
+st = [pages.status(dict(dv, last_seen=t_pre - 240), {"market_open": 0}, t_pre)[1],
+      pages.status(dict(dv, last_seen=t_pre - 500), {"market_open": 0}, t_pre)[1],
+      pages.status(dict(dv, last_seen=t_open - 240), {"market_open": 1}, t_open)[1],
+      pages.status(dict(dv, last_seen=t_open - 1200), {"market_open": 1}, t_open)[0]]
+check("TC-MONSRV-0046 Online follows the machine's check-in cadence: market closed 4 min → Online (8 min → Late); "
+      "market open 4 min → Late; 20 min in market hours → Offline (red) (TD-116)",
+      st == ["Online", "Late", "Late", "bad"], st)
 
 uv.should_exit = True
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({OK[0]}/{OK[0] + len(FAILS)})")

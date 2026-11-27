@@ -6,15 +6,16 @@ Telegram, so installs with no bot of their own (non-admin) still reach a
 phone. Config (all optional; relay is off when no target resolves):
 
   secrets/monitor.json
-    {"telegram_targets": [{"chat_id": "123", "admin_devices": false},
-                          {"chat_id": "-100…", "admin_devices": true}],
+    {"telegram_targets": [{"chat_id": "123"}, {"chat_id": "-100…"}],
      "bot_token": "…"}                 # optional: else the license server's
   /opt/scalp-license/secrets/telegram.json  {"bot_token", "chat_id"}
-    → used for the bot token, and as the one default target (admin_devices
-      false) when monitor.json lists none.
+    → used for the bot token, and as the one default target when
+      monitor.json lists none.
 
-admin_devices false = skip installs on an ADMIN licence (Anbu's own Macs,
-which already page him themselves); a group chat usually wants true.
+Which machines: ── FLEET_RELAY_PER_MACHINE_20261127 ── each machine has its own "Telegram alerts"
+switch on its Fleet card (admins change it; new machines start ON). Anbu
+turns it off for his own Macs, which already page him. An old
+"admin_devices" key in monitor.json is ignored.
 
 Floods: at most PER_MIN messages per install per minute; the rest fold into
 one "+N more" line. Backlog: an event older than STALE_S when it arrives
@@ -115,14 +116,16 @@ def plan(dev: Dict[str, Any], new_events: List[Dict[str, Any]], now: float) -> L
 def submit(dev: Dict[str, Any], new_events: List[Dict[str, Any]]) -> int:
     """Queue this batch's messages. Returns how many were queued."""
     try:
+        # ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-117) the machine's own switch decides, for every target.
+        # It replaced "skip ADMIN-licence installs": a friend can hold an ADMIN licence too.
+        if int(dev.get("relay", 1) or 0) == 0:
+            return 0
         cfg = config()
         if not cfg["bot_token"] or not cfg["targets"]:
             return 0
         msgs = plan(dev, new_events, time.time())
         n = 0
         for t in cfg["targets"]:
-            if str(dev.get("tier") or "").upper() == "ADMIN" and not t.get("admin_devices"):
-                continue
             for m in msgs:
                 try:
                     _q.put_nowait((cfg["bot_token"], str(t["chat_id"]), m))

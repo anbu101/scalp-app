@@ -18,6 +18,7 @@ license server that every app depends on.
   GET  /timeline           every event of a day, in order (investigation)
   GET  /day                daily summary per machine + fleet
   POST /devices/{key}/enabled   admin: pause / resume an install's sending
+  POST /devices/{key}/relay     admin: that machine's criticals to Telegram on / off   ── FLEET_RELAY_PER_MACHINE_20261127 ──
   GET/POST /setup/{token}  one-time link: the invited person sets password + authenticator
 
 ── PORTAL_USERS_ADMIN_20261127 ── accounts are managed from the License Admin page
@@ -402,6 +403,21 @@ def day_summary(request: Request, day: str = ""):
     today = pages.now_ist_day()
     day = _day(day, today)
     return pages.day_page(u, store.devices(), store.day_summaries(day), store.event_counts(day), day)
+
+
+@app.post("/devices/{key}/relay")   # ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-117)
+async def device_relay(request: Request, key: str):
+    u = _user(request)
+    if not u:
+        return _to_login()
+    f = await _form(request)
+    if u["role"] != "admin" or not _csrf_ok(u, f):
+        return HTMLResponse("Not allowed.", status_code=403)
+    if store.device(key):
+        on = f.get("relay") == "1"
+        store.set_relay(key, on)
+        store.audit(u["username"], "relay_on" if on else "relay_off", key, client_ip(request))
+    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/devices/{key}/enabled")

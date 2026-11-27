@@ -15,7 +15,8 @@ from urllib.parse import urlencode
 
 from store import IST
 
-ONLINE_S = 150
+ONLINE_S = 150          # market open: the app checks in every 60 s
+ONLINE_CLOSED_S = 420   # ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-116) market closed: every 300 s (+ slack)
 LATE_S = 900
 
 
@@ -74,7 +75,9 @@ def status(dev: Dict[str, Any], snap: Optional[Dict[str, Any]], now: float) -> t
         return "paused", "Paused"
     age = now - float(dev.get("last_seen") or 0)
     market = bool(snap and snap.get("market_open"))
-    if age <= ONLINE_S:
+    # ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-116) the window follows the machine's own cadence: its last
+    # snapshot said the market was closed → it checks in every 5 min, not every minute
+    if age <= (ONLINE_S if market else ONLINE_CLOSED_S):
         return "ok", "Online"
     if age <= LATE_S:
         return "warn", "Late"
@@ -203,10 +206,15 @@ def fleet_page(user, devs, snaps, unacked, now, today) -> str:
                      f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
                      f'<input type="hidden" name="enabled" value="{0 if d.get("enabled", 1) else 1}">'
                      f'<button>{"Pause sending" if d.get("enabled", 1) else "Resume sending"}</button></form>')
+            # ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-117) per-machine Telegram switch
+            admin += (f'<form method="post" action="/devices/{e(d["key"])}/relay" style="margin-top:6px">'
+                      f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
+                      f'<input type="hidden" name="relay" value="{0 if d.get("relay", 1) else 1}">'
+                      f'<button>{"Telegram alerts: turn off" if d.get("relay", 1) else "Telegram alerts: turn on"}</button></form>')
         cards.append(
             f'<div class="card"><h3>{e(d["label"])} <span class="badge b-{st_cls}">{st_txt}</span> {alert_link}</h3>'
             f'<div class="meta">seen {ago(d.get("last_seen"), now)} · v{e(d.get("app_version") or "?")}'
-            f' · {e(d.get("tier") or "")}</div>'
+            f' · {e(d.get("tier") or "")} · {"Telegram alerts on" if d.get("relay", 1) else "Telegram alerts off"}</div>'
             f'<div class="nums"><div><small>Net today</small>{money(tot.get("net"))}</div>'
             f'<div><small>Realised</small>{money(tot.get("realised"))}</div>'
             f'<div><small>Unrealised</small>{money(tot.get("unrealised"))}</div>'
