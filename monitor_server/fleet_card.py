@@ -245,7 +245,7 @@ def _draw(data: Dict[str, Any]) -> bytes:
     for i, (label, val, colr, sub) in enumerate(L["boxes"]):
         x = PAD + i * (bw + 12)
         p.rect(x, y, x + bw, y + 98, TILE)
-        p.text(x + 16, y + 12, label, 15, DIM)
+        p.text(x + 16, y + 12, p.clip(label, 15, bw - 32), 15, DIM)   # ── FLEET_CARD_LABEL_FIT_20261127 ── long names
         p.text(x + 16, y + 34, val, p.fit(val, 30, bw - 32, bold=True), colr, bold=True)
         p.text(x + 16, y + 72, p.clip(sub, 14, bw - 32), 14, DIM)
 

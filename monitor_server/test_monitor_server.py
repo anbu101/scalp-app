@@ -762,6 +762,27 @@ check("TC-MONSRV-0080 relay: the card goes as sendPhoto (multipart, image/png, c
       and b'name="photo"; filename="fleet-summary.png"' in body and b"Content-Type: image/png" in body
       and b"PNGDATA" in body and b'name="caption"' in body and "sendPhoto" in (HERE / "relay.py").read_text(),
       (ok_calls, fail_calls, plain_calls))
+# ── FLEET_CARD_LABEL_FIT_20261127 ── a real name ("Dhivakar Arunachalam booked") ran into the next box
+_drawn = []
+_orig_text = FC._Pen.text
+
+
+def _rec_text(self, x, y, s, size, fill, bold=False, right=False):
+    _drawn.append((x, y, s, self.w(s, size, bold), right))
+    return _orig_text(self, x, y, s, size, fill, bold, right)
+
+
+FC._Pen.text = _rec_text
+_long_png = FC.render({"date": "Fri 27 Nov 2026", "time": "15:50", "week": -19221.5, "month": -45905,
+                       "machines": [_m("Dhivakar Arunachalam Kandasamy", {"Icarus": (-2779, 1), "Timberwolf": (-4686, 2)}, 444, 8, 18782)]})
+FC._Pen.text = _orig_text
+_bw = (FC.W - 2 * FC.PAD - 3 * 12) / 4
+_box_labels = [d for d in _drawn if d[1] == 142]
+check("TC-MONSRV-0082 a long machine name never runs out of its box: the top box labels are shortened (…) to fit "
+      "inside their box",
+      _long_png and len(_box_labels) == 4 and _box_labels[0][2].endswith("…")
+      and all(d[0] + d[3] <= FC.PAD + i * (_bw + 12) + _bw - 16 + 0.5 for i, d in enumerate(_box_labels)),
+      [(d[2], round(d[0] + d[3])) for d in _box_labels])
 _req = (HERE / "requirements.txt").read_text()
 _dep = (HERE / "deploy-monitor.command").read_text()
 check("TC-MONSRV-0081 the droplet gets what the card needs: Pillow in requirements.txt (installed by the deploy), "
