@@ -5,6 +5,7 @@
 #                              ── PYTEST_FALLBACK_20261126 ── CL-18 (DEF-098; ported from e7ea184f, where it was CL-16)
 #                              ── FLEET_MONITOR_FIX_20261127 ── CL-19 (DEF-109)
 #                              ── MONITOR_DEPLOY_FILES_20261127 ── CL-20 (DEF-110)
+#                              ── RELEASE_STAMP_GUARD_20261127 ── CL-21 (DEF-112)
 #
 # The reliability checklist. Each item has
 #   trigger  — something you can read from the staged diff (paths + added lines)
@@ -450,6 +451,29 @@ def cl20(ctx):
                    f"import (DEF-110). Add it to the list (or `Ack: CL-20 <why>` for a local-only tool).")
     return True, out, f"{len(new)} new server module(s) checked"
 
+
+# ── CL-21 a release bump stamps the backend too ── RELEASE_STAMP_GUARD_20261127 ── (DEF-112)
+TAURI_CONF = "desktop/src-tauri/tauri.conf.json"
+STAMP = "backend/app/version_stamp.txt"
+VER_LINE = re.compile(r'^\s*"version"\s*:\s*"(\d+\.\d+\.\d+)"')
+
+
+def cl21(ctx):
+    conf = next((f for f in ctx.files if f.path == TAURI_CONF and f.status != "D"), None)
+    if conf is None:
+        return False, [], ""
+    new_v = next((m.group(1) for _, t in conf.added for m in [VER_LINE.match(t)] if m), None)
+    if not new_v:
+        return False, [], ""
+    stamp = next((f for f in ctx.files if f.path == STAMP and f.status != "D"), None)
+    got = (stamp.new_text().strip() if stamp else "")
+    if got == new_v:
+        return True, [], f"version {new_v} stamped"
+    return True, [f"{TAURI_CONF} bumps the version to {new_v} but {STAMP} "
+                  f"{'says ' + repr(got) if stamp else 'is not in this commit'} — the backend would report the old "
+                  f"version and every install would show a false update banner (DEF-112). Release with the repo-root "
+                  f"./deploy-scalp.command, which writes both."], ""
+
 ITEMS = [
     dict(id="CL-01", kind="auto", title="No hard-coded credentials", fn=cl01,
          trigger="an added line assigns a 16+ character literal to a key / secret / token / password name",
@@ -542,4 +566,9 @@ ITEMS = [
                "a local-only tool takes an ack",
          incidents="DEF-110 (27 Nov: accounts.py was not in deploy-monitor.command's list; scalp-monitor "
                    "crash-looped ~1 min on its first import)"),
+    dict(id="CL-21", kind="auto", title="A release version bump also stamps the backend", fn=cl21,
+         trigger="desktop/src-tauri/tauri.conf.json changes its top-level \"version\"",
+         check="backend/app/version_stamp.txt is in the same commit with the same version",
+         incidents="DEF-112 (27 Nov: v12.0.22 cut with the old desktop/deploy-scalp.command; builds reported "
+                   "v12.0.21 to the backend, every install showed a false update banner)"),
 ]
