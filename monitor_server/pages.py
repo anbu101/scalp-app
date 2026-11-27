@@ -294,6 +294,18 @@ last=Date.now();fails=0;}).catch(function(){fails++;}).then(function(){busy=fals
 if(m){setInterval(poll,%d);setInterval(tick,1000);document.addEventListener('visibilitychange',function(){if(!document.hidden)poll();});}
 })();""" % LIVE_POLL_MS
 
+def _ver(text: str) -> str:
+    """── FLEET_ASSET_VERSION_20261127 ── (TD-129) a fingerprint of the file: the page asks for app.css?v=<it>, so a
+    deploy that changes the look or the script is fetched at once (a new address), and an unchanged one can be cached."""
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
+
+
+CSS_VER = _ver(CSS)
+JS_VER = _ver(APP_JS)
+CSS_URL = f"/static/app.css?v={CSS_VER}"
+JS_URL = f"/static/app.js?v={JS_VER}"
+
 NAV = [("/", "Fleet", "▦"), ("/alerts", "Alerts", "⚠"), ("/trades", "Trades", "☰"), ("/timeline", "Timeline", "◷"),
        ("/day", "Day summary", "▤")]
 
@@ -314,13 +326,13 @@ def layout(title: str, body: str, user: Optional[Dict[str, Any]], active: str = 
             for h, t, ic in NAV) + "</nav>"
         who = (f'<form class="who" method="post" action="/logout"><input type="hidden" name="csrf" value="{e(user["csrf"])}">'
                f'<span>{e(user["username"])}</span><button>Log out</button></form>')
-        script = '<script src="/static/app.js" defer></script>'
+        script = f'<script src="{JS_URL}" defer></script>'
     if live:
         live_html = '<div class="live" id="live"><b></b><span>Live</span></div>'
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
             f'<meta name="theme-color" content="#0e0828"><title>{e(title)} · Fleet Monitor</title>'
-            f'<link rel="stylesheet" href="/static/app.css">{script}</head><body>'
+            f'<link rel="stylesheet" href="{CSS_URL}">{script}</head><body>'
             f'<header class="top"><a class="logo" href="/"><i></i>Fleet Monitor</a>{nav}{live_html}{who}</header>'
             f'<main{" data-live" if live else ""}>{body}{marker}</main>{tabs}</body></html>')
 

@@ -152,8 +152,14 @@ def healthz():
 
 
 @app.get("/static/app.css")
-def css():
-    return Response(pages.CSS, media_type="text/css", headers={"Cache-Control": "max-age=3600"})
+def css(v: str = ""):
+    return Response(pages.CSS, media_type="text/css", headers={"Cache-Control": _asset_cache(v, pages.CSS_VER)})
+
+
+def _asset_cache(v: str, current: str) -> str:
+    """── FLEET_ASSET_VERSION_20261127 ── (TD-129) the page's own versioned address may be kept for a year (a change
+    gets a new address); anything else (an old page, a bare URL) only for a minute."""
+    return "public, max-age=31536000, immutable" if v == current else "max-age=60"
 
 
 @app.get("/static/fonts/{name}.woff2")   # ── FLEET_PORTAL_ARCADE_20261127 ── Orbitron / Space Grotesk (OFL-1.1)
@@ -170,8 +176,8 @@ def favicon():
 
 
 @app.get("/static/app.js")   # ── FLEET_PORTAL_REDESIGN_20261127 ── the live refresh
-def js():
-    return Response(pages.APP_JS, media_type="text/javascript", headers={"Cache-Control": "max-age=3600"})
+def js(v: str = ""):
+    return Response(pages.APP_JS, media_type="text/javascript", headers={"Cache-Control": _asset_cache(v, pages.JS_VER)})
 
 
 def _partial(request: Request) -> bool:

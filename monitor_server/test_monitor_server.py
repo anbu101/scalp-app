@@ -233,7 +233,7 @@ check("TC-MONSRV-0019 Fleet page: the friend's install with its LIVE MTM; device
 al = viewer.get("/alerts?days=1")
 check("TC-MONSRV-0020 Alerts page lists criticals with the message escaped (no live <script>)",
       al.status_code == 200 and "&lt;script&gt;" in al.text and "<script>x" not in al.text
-      and al.text.count("<script") == 1 and '<script src="/static/app.js" defer></script>' in al.text)
+      and al.text.count("<script") == 1 and re.search(r'<script src="/static/app\.js\?v=[0-9a-f]{10}" defer></script>', al.text))
 with store.conn() as c:
     eid = c.execute("SELECT id FROM events WHERE kind='CRITICAL' AND device_key='KEY-RAVI' ORDER BY id LIMIT 1").fetchone()[0]
 csrf = auth.session(viewer.cookies.get(auth.COOKIE))["csrf"]
@@ -1065,6 +1065,26 @@ check("TC-MONSRV-0089 the portal wears the app's Arcade theme: its colour tokens
       and fs.content == (app_fonts / "space-grotesk-latin-wght-normal.woff2").read_bytes() and fbad.status_code == 404
       and "font-src 'self'" in httpx.get(f"{BASE}/login").headers.get("content-security-policy", ""),
       [t for t in tokens if t not in css_p])
+
+# ── versioned assets (FLEET_ASSET_VERSION_20261127, TD-129) ──
+import hashlib as _hl   # noqa: E402
+pg90 = vw.get("/").text
+css_v = re.search(r'href="/static/app\.css\?v=([0-9a-f]{10})"', pg90)
+js_v = re.search(r'src="/static/app\.js\?v=([0-9a-f]{10})"', pg90)
+c_new = httpx.get(f"{BASE}/static/app.css?v={css_v.group(1)}") if css_v else None
+c_old = httpx.get(f"{BASE}/static/app.css?v=0000000000")
+j_new = httpx.get(f"{BASE}/static/app.js?v={js_v.group(1)}") if js_v else None
+_keep_css = pages.CSS
+pages.CSS = pages.CSS + "/* changed */"
+changed = pages._ver(pages.CSS) != css_v.group(1) if css_v else False
+pages.CSS = _keep_css
+check("TC-MONSRV-0090 the page asks for app.css / app.js by a fingerprint of their content: a deploy that changes the "
+      "look or the script is fetched at once; the current version may be cached for a year, any other for a minute",
+      css_v and js_v and css_v.group(1) == _hl.sha256(c_new.text.encode()).hexdigest()[:10]
+      and js_v.group(1) == _hl.sha256(j_new.text.encode()).hexdigest()[:10]
+      and "immutable" in c_new.headers.get("cache-control", "") and "immutable" in j_new.headers.get("cache-control", "")
+      and c_old.headers.get("cache-control") == "max-age=60" and changed,
+      (css_v and css_v.group(1), c_new and c_new.headers.get("cache-control"), c_old.headers.get("cache-control")))
 
 uv.should_exit = True
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({OK[0]}/{OK[0] + len(FAILS)})")
