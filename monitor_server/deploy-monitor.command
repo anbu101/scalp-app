@@ -123,7 +123,7 @@ systemctl reload caddy 2>/dev/null || systemctl restart caddy
 
 echo "  - firewall (ufw)"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null
+  ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null; ufw allow 8443/tcp >/dev/null   # ── LICENSE_HTTPS_20261127 ── licence over HTTPS
   echo "      ufw: 80 and 443 opened"
 else
   echo "      ufw not active — skipping"
@@ -147,7 +147,10 @@ for i in $(seq 1 30); do
   sleep 3
 done
 case "$EXT" in
-  *'"ok":true'*) echo "      HTTPS OK: https://$HOSTNAME_TLS" ;;
+  *'"ok":true'*) echo "      HTTPS OK: https://$HOSTNAME_TLS"
+     LIC=$(curl -s -m 8 "https://$HOSTNAME_TLS:8443/health" || true)   # ── LICENSE_HTTPS_20261127 ──
+     case "$LIC" in *'"status":"ok"'*) echo "      licence server over HTTPS OK: https://$HOSTNAME_TLS:8443" ;;
+       *) echo "  !! https://$HOSTNAME_TLS:8443 not answering (apps fall back to plain HTTP). Firewall: allow TCP 8443." ;; esac ;;
   *)
     echo "  !! https://$HOSTNAME_TLS is not answering yet."
     echo "     - DigitalOcean Cloud Firewall: allow inbound TCP 80 and 443 (Networking → Firewalls)."

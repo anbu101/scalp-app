@@ -21,3 +21,18 @@
 		}
 	}
 }
+
+# ── LICENSE_HTTPS_20261127 ── (TD-111) the LICENSE server over HTTPS, same free name and certificate,
+# its own port (a separate origin from the portal). The app uses it first; the old
+# http://139.59.8.202:9100 stays as its fallback until every install is updated.
+139-59-8-202.sslip.io:8443 {
+	encode gzip
+	request_body {
+		max_size 1MB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	reverse_proxy 127.0.0.1:9100
+}

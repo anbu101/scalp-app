@@ -8,6 +8,7 @@
 #                                        ── FLEET_WATCH_20261127 ── (TD-112) TC-MONSRV-0049…0056
 #                                        ── FLEET_SWITCH_LABEL_20261127 ── TC-MONSRV-0044 reworded, 0057
 #                                        ── KITE_STATUS_PORTAL_20261127 ── (TD-112) TC-MONSRV-0058
+#                                        ── LICENSE_HTTPS_20261127 ── (TD-111) TC-MONSRV-0059
 #
 # The Fleet Monitor service end to end: the real FastAPI app under uvicorn on
 # a free local port (no Starlette TestClient), a throw-away monitor.db and a
@@ -614,6 +615,15 @@ srv_src = (HERE / "server.py").read_text()
 check("TC-MONSRV-0056 tick() sends the notices to the Telegram targets; the monitor starts the watcher at start-up",
       store_n == len(q) >= 1 and all(x[1] == "999" for x in q) and "watcher.start()" in srv_src, (store_n, q))
 store.DB_PATH = _keep_db
+
+cf2 = (HERE / "Caddyfile").read_text()
+lic_block = cf2[cf2.index("139-59-8-202.sslip.io:8443 {"):]
+dep2 = (HERE / "deploy-monitor.command").read_text()
+check("TC-MONSRV-0059 Caddy serves the LICENCE server over HTTPS on :8443 (same name and certificate, its own "
+      "origin) → 127.0.0.1:9100; the deploy opens 8443 and checks /health there (TD-111)",
+      "reverse_proxy 127.0.0.1:9100" in lic_block and "reverse_proxy 127.0.0.1:9200" not in lic_block
+      and "ufw allow 8443/tcp" in dep2 and ':8443/health' in dep2
+      and cf2.index("respond /internal/* 404") < cf2.index("reverse_proxy 127.0.0.1:9200"), lic_block[:120])
 
 uv.should_exit = True
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({OK[0]}/{OK[0] + len(FAILS)})")

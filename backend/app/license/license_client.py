@@ -67,9 +67,47 @@ from app.event_bus.audit_logger import write_audit_log
 # --------------------------------------------------
 
 # Env override is for testing only; the constant is the real config.
-LICENSE_SERVER_URL = os.environ.get(
-    "SCALP_LICENSE_SERVER", "http://139.59.8.202:9100"
-)
+# ── LICENSE_HTTPS_20261127 ── (TD-111) the licence server over HTTPS: Caddy on the droplet serves
+# it at :8443 with the free sslip.io certificate (same one as the Fleet Monitor).
+# The old plain-HTTP port stays the FALLBACK during the migration, used only on a
+# network error or a proxy answer (404/502/503/504), so a broken proxy or DNS can
+# never lock a licence out. Licence tokens are signed (Ed25519), so the fallback
+# can never hand the app a forged licence; it only shows the key on the wire, as
+# before. SCALP_LICENSE_SERVER (tests / dev) = that URL only, no fallback.
+_ENV_URL = os.environ.get("SCALP_LICENSE_SERVER")
+LICENSE_SERVER_URL = _ENV_URL or "https://139-59-8-202.sslip.io:8443"
+LICENSE_SERVER_FALLBACK = None if _ENV_URL else "http://139.59.8.202:9100"
+_FALLBACK_CODES = (404, 502, 503, 504)
+_fallback_state = [None]          # last logged state: "https" | "fallback"
+
+
+def _note(state: str, why: str = "") -> None:
+    if state != _fallback_state[0]:
+        _fallback_state[0] = state
+        try:
+            write_audit_log("[LICENSE] server over HTTPS" if state == "https" else
+                            f"[LICENSE] HTTPS unreachable ({why}) — using the plain-HTTP fallback")
+        except Exception:
+            pass
+
+
+def license_request(method: str, path: str, **kw):
+    """GET/POST to the licence server: HTTPS first, the plain-HTTP fallback on a
+    network error or a proxy answer. Same call shape as httpx.get/post(url, ...)."""
+    call = httpx.post if method.upper() == "POST" else httpx.get
+    try:
+        r = call(f"{LICENSE_SERVER_URL}{path}", **kw)
+        if LICENSE_SERVER_FALLBACK is None or r.status_code not in _FALLBACK_CODES:
+            if LICENSE_SERVER_FALLBACK is not None:
+                _note("https")
+            return r
+        why = f"HTTP {r.status_code}"
+    except httpx.TransportError as e:
+        if LICENSE_SERVER_FALLBACK is None:
+            raise
+        why = type(e).__name__
+    _note("fallback", why)
+    return call(f"{LICENSE_SERVER_FALLBACK}{path}", **kw)
 
 # >>> ============================================================ <<<
 # >>>  ⚠️  PASTE YOUR PUBLIC KEY BEFORE USING THIS FILE  ⚠️         <<<
@@ -327,12 +365,11 @@ def post_device(path: str, body: dict, timeout: float):
     wrong deploy order can never lock a user out. Against a current server
     the repeat is refused too (it already tried the legacy id): no new access.
     """
-    url = f"{LICENSE_SERVER_URL}{path}"
-    resp = httpx.post(url, json=body, timeout=timeout)
+    resp = license_request("POST", path, json=body, timeout=timeout)   # ── LICENSE_HTTPS_20261127 ──
     if body.get("legacy_machine_id") and _old_server_refused(resp):
         old = {k: v for k, v in body.items() if k != "legacy_machine_id"}
         old["machine_id"] = body["legacy_machine_id"]
-        resp = httpx.post(url, json=old, timeout=timeout)
+        resp = license_request("POST", path, json=old, timeout=timeout)
     return resp
 
 

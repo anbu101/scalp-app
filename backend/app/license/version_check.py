@@ -41,9 +41,9 @@ from app.event_bus.audit_logger import write_audit_log
 
 # Same server as the license client. Reuse the env override if present so
 # test setups point both at the same place.
-LICENSE_SERVER_URL = os.environ.get(
-    "SCALP_LICENSE_SERVER", "http://139.59.8.202:9100"
-)
+# ── LICENSE_HTTPS_20261127 ── the URL (HTTPS + plain fallback) lives in license_client; kept for
+# anything that still reads it here.
+LICENSE_SERVER_URL = os.environ.get("SCALP_LICENSE_SERVER", "https://139-59-8-202.sslip.io:8443")
 
 
 # --------------------------------------------------
@@ -205,7 +205,8 @@ def check_for_update(timeout: float = 5.0):
         current = _read_current_version()
         version_state.CURRENT_VERSION = current
 
-        resp = httpx.get(f"{LICENSE_SERVER_URL}/min_version", timeout=timeout)
+        from app.license.license_client import license_request     # ── LICENSE_HTTPS_20261127 ── HTTPS + fallback
+        resp = license_request("GET", "/min_version", timeout=timeout)
         data = resp.json()
         minimum = data.get("min_version")
         version_state.MIN_VERSION = minimum
