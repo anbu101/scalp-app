@@ -158,6 +158,45 @@ def _summary(kind: str, d: Dict[str, Any]) -> str:
             f"{(' ' + d['reason']) if kind == 'TRADE_EXIT' and d.get('reason') else ''}{tail}")[:300]
 
 
+def _with_strategy(kind: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """── ALERT_STRATEGY_INFER_20261127 ── an alert the app sent without a strategy gets the one its text names;
+    a strategy id without a codename gets its codename. Never raises."""
+    try:
+        import strategies
+        d = dict(data)
+        if not d.get("strategy_id") and kind in ALERT_KINDS:
+            sid, cn = strategies.infer(str(d.get("message") or ""))
+            if not sid:
+                sid, cn = strategies.infer(str(d.get("title") or ""))
+            if sid:
+                d["strategy_id"], d["codename"] = sid, cn
+        if d.get("strategy_id") and not d.get("codename"):
+            d["codename"] = strategies.codename(d["strategy_id"]) or d["strategy_id"]
+        return d
+    except Exception:
+        return data
+
+
+def backfill_strategies() -> int:
+    """── ALERT_STRATEGY_INFER_20261127 ── once at start-up: stored alerts without a strategy get the one their
+    text names. Idempotent (only rows still without one); returns rows updated."""
+    n = 0
+    with conn() as c:
+        rows = c.execute("SELECT id, kind, data FROM events WHERE (strategy_id IS NULL OR strategy_id='')"
+                         " AND kind IN ('CRITICAL','ORDER_REJECTED','SYSTEM_ALERT')").fetchall()
+        for r in rows:
+            try:
+                d = _with_strategy(r["kind"], json.loads(r["data"] or "{}"))
+            except Exception:
+                continue
+            if d.get("strategy_id"):
+                c.execute("UPDATE events SET strategy_id=?, codename=?, data=? WHERE id=?",
+                          (str(d["strategy_id"])[:40], str(d.get("codename") or "")[:60] or None,
+                           json.dumps(d, separators=(",", ":"))[:20000], r["id"]))
+                n += 1
+    return n
+
+
 def upsert_device(lic: Dict[str, Any], machine_id: str, app_version: Optional[str],
                   ip: str, epoch: str, dropped: int, now: float) -> Dict[str, Any]:
     with conn() as c:
@@ -191,6 +230,7 @@ def store_events(device_key: str, epoch: str, events: Iterable[Dict[str, Any]],
             acked = seq if acked is None else max(acked, seq)
             if kind not in KNOWN_KINDS:
                 continue
+            data = _with_strategy(kind, data)   # ── ALERT_STRATEGY_INFER_20261127 ──
             body = json.dumps(data, separators=(",", ":"))[:20000]
             cur = c.execute(
                 "INSERT OR IGNORE INTO events (device_key, epoch, seq, ts, received_at, kind,"
@@ -273,7 +313,8 @@ def unacked_counts(since: float) -> Dict[str, int]:
     return {r["device_key"]: r["n"] for r in rows}
 
 
-def alerts(device_key: Optional[str], unacked_only: bool, since: float, limit: int = 300) -> List[Dict[str, Any]]:
+def alerts(device_key: Optional[str], unacked_only: bool, since: float, limit: int = 300,
+           strategy: Optional[str] = None) -> List[Dict[str, Any]]:
     sql = ("SELECT e.*, a.username AS ack_user, a.ts AS ack_ts, a.note AS ack_note FROM events e"
            " LEFT JOIN acks a ON a.event_id=e.id WHERE e.kind IN ('CRITICAL','ORDER_REJECTED','SYSTEM_ALERT')"
            " AND e.ts>=?")
@@ -283,6 +324,9 @@ def alerts(device_key: Optional[str], unacked_only: bool, since: float, limit: i
         args.append(device_key)
     if unacked_only:
         sql += " AND a.event_id IS NULL AND e.kind IN ('CRITICAL','ORDER_REJECTED')"
+    if strategy:                                            # ── ALERT_STRATEGY_INFER_20261127 ──
+        sql += " AND (e.strategy_id=? OR e.codename=?)"
+        args += [strategy, strategy]
     sql += " ORDER BY e.ts DESC LIMIT ?"
     args.append(int(limit))
     return _rows(sql, tuple(args))

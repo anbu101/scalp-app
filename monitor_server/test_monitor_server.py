@@ -9,6 +9,7 @@
 #                                        ── FLEET_SWITCH_LABEL_20261127 ── TC-MONSRV-0044 reworded, 0057
 #                                        ── KITE_STATUS_PORTAL_20261127 ── (TD-112) TC-MONSRV-0058
 #                                        ── LICENSE_HTTPS_20261127 ── (TD-111) TC-MONSRV-0059
+#                                        ── ALERT_STRATEGY_INFER_20261127 ── TC-MONSRV-0060…0064
 #
 # The Fleet Monitor service end to end: the real FastAPI app under uvicorn on
 # a free local port (no Starlette TestClient), a throw-away monitor.db and a
@@ -624,6 +625,45 @@ check("TC-MONSRV-0059 Caddy serves the LICENCE server over HTTPS on :8443 (same 
       "reverse_proxy 127.0.0.1:9100" in lic_block and "reverse_proxy 127.0.0.1:9200" not in lic_block
       and "ufw allow 8443/tcp" in dep2 and ':8443/health' in dep2
       and cf2.index("respond /internal/* 404") < cf2.index("reverse_proxy 127.0.0.1:9200"), lic_block[:120])
+
+# ── strategy on alerts (ALERT_STRATEGY_INFER_20261127) ──
+import strategies   # noqa: E402
+inf = [strategies.infer("TMA_V2: SL GTT on NIFTY26D0126000PE triggered"),
+       strategies.infer("Velvet: no NIFTY tick for 30s — forcing a WebSocket reconnect"),
+       strategies.infer("Kite logged in at 08:46 — session ready for the open."),
+       strategies.infer("the circuit Breaker tripped"), strategies.infer("Exit order for IC_V2 not confirmed")]
+check("TC-MONSRV-0060 strategy read from an alert's text: an id anywhere, a codename that starts it; nothing for a "
+      "plain sentence or a codename-like word mid-text",
+      inf == [("TMA_V2", "Timberwolf"), ("VET_V1", "Velvet"), (None, None), (None, None), ("IC_V2", "Icarus")], inf)
+ingest("KEY-RAVI", "HW-RAVI", [ev(5000, "CRITICAL", message="TMA_V2: SL GTT triggered; buy-back not filled", severity="error"),
+                               ev(5001, "CRITICAL", strategy_id="IC_V2", message="named by the app"),
+                               ev(5002, "SYSTEM_ALERT", message="Kite logged in at 08:46", severity="info")])
+with store.conn() as c:
+    got = {r["seq"]: (r["strategy_id"], r["codename"]) for r in c.execute(
+        "SELECT seq, strategy_id, codename FROM events WHERE device_key='KEY-RAVI' AND seq IN (5000,5001,5002)")}
+check("TC-MONSRV-0061 on arrival: an alert without a strategy gets the one its text names; one the app named gets "
+      "its codename; a general system alert stays without one",
+      got == {5000: ("TMA_V2", "Timberwolf"), 5001: ("IC_V2", "Icarus"), 5002: (None, None)}, got)
+with store.conn() as c:
+    c.execute("INSERT INTO events (device_key, epoch, seq, ts, received_at, kind, summary, data) VALUES (?,?,?,?,?,?,?,?)",
+              ("KEY-RAVI", "OLD", 1, now, now, "CRITICAL", "Velvet: old one", '{"message": "Velvet: old one"}'))
+n_bf = store.backfill_strategies()
+n_bf2 = store.backfill_strategies()
+with store.conn() as c:
+    old_row = tuple(c.execute("SELECT strategy_id, codename FROM events WHERE epoch='OLD'").fetchone())
+check("TC-MONSRV-0062 start-up backfill names the strategy on alerts stored before this change; a second run changes nothing",
+      n_bf >= 1 and n_bf2 == 0 and old_row == ("VET_V1", "Velvet") and "store.backfill_strategies()" in (HERE / "server.py").read_text(),
+      (n_bf, n_bf2, old_row))
+al_all = ad.get("/alerts?days=1").text
+al_tw = ad.get("/alerts?days=1&strategy=Timberwolf").text
+check("TC-MONSRV-0063 Alerts: the Strategy column shows the codename; the Strategy filter lists the codenames seen and "
+      "narrows the list",
+      "<td>Timberwolf</td>" in al_all and '<option value="Timberwolf">' in al_all and "Icarus" in al_all
+      and "<td>Timberwolf</td>" in al_tw and "named by the app" not in al_tw, al_tw[:200])
+sys.path.insert(0, str(HERE.parent / "backend"))
+from app.config.strategy_display import STRATEGY_DISPLAY   # noqa: E402
+check("TC-MONSRV-0064 the portal's codename table matches the app's STRATEGY_DISPLAY (drift guard)",
+      strategies.CODENAMES == {k: v[1] for k, v in STRATEGY_DISPLAY.items()})
 
 uv.should_exit = True
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({OK[0]}/{OK[0] + len(FAILS)})")

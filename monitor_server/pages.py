@@ -261,12 +261,15 @@ def _device_select(devs, current: str) -> str:
     return f'<label>Machine<select name="device">{opts}</select></label>'
 
 
-def alerts_page(user, devs, rows, device, unacked_only, days) -> str:
+def alerts_page(user, devs, rows, device, unacked_only, days, strategy: str = "", names=()) -> str:   # ── ALERT_STRATEGY_INFER_20261127 ──
     labels = {d["key"]: d["label"] for d in devs}
     day_opts = "".join(f'<option value="{n}"{" selected" if n == days else ""}>{n} day{"s" if n > 1 else ""}</option>'
                        for n in (1, 7, 30, 90))
     filt = (f'<form class="filters" method="get">{_device_select(devs, device)}'
             f'<label>Period<select name="days">{day_opts}</select></label>'
+            + '<label>Strategy<select name="strategy"><option value="">All strategies</option>'
+            + "".join(f'<option value="{e(n)}"{" selected" if n == strategy else ""}>{e(n)}</option>' for n in names)
+            + '</select></label>'
             f'<label><span>&nbsp;</span><span><input type="checkbox" name="unacked" value="1"'
             f'{" checked" if unacked_only else ""}> unacknowledged only</span></label><button>Show</button></form>')
     trs = []

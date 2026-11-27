@@ -73,6 +73,7 @@ def _startup() -> None:
     accounts.init()            # ── PORTAL_USERS_ADMIN_20261127 ──
     _internal_token()
     store.housekeeping()
+    store.backfill_strategies()   # ── ALERT_STRATEGY_INFER_20261127 ──
     watcher.init()             # ── FLEET_WATCH_20261127 ── (TD-112) offline / daily summary / reminders
     if os.environ.get("MONSRV_NO_WATCHER") != "1":
         watcher.start()
@@ -207,13 +208,15 @@ def fleet(request: Request):
 
 
 @app.get("/alerts", response_class=HTMLResponse)
-def alerts(request: Request, device: str = "", unacked: str = "", days: int = 1):
+def alerts(request: Request, device: str = "", unacked: str = "", days: int = 1, strategy: str = ""):
     u = _user(request)
     if not u:
         return _to_login()
     days = days if days in (1, 7, 30, 90) else 1
-    rows = store.alerts(device or None, unacked == "1", time.time() - days * 86400)
-    return pages.alerts_page(u, store.devices(), rows, device, unacked == "1", days)
+    since = time.time() - days * 86400
+    rows = store.alerts(device or None, unacked == "1", since, strategy=strategy[:40] or None)   # ── ALERT_STRATEGY_INFER_20261127 ──
+    names = sorted({r["codename"] for r in store.alerts(device or None, False, since, limit=2000) if r.get("codename")})
+    return pages.alerts_page(u, store.devices(), rows, device, unacked == "1", days, strategy[:40], names)
 
 
 @app.post("/alerts/{event_id}/ack")
