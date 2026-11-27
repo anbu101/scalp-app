@@ -48,6 +48,7 @@ import auth
 import pages
 import relay
 import store
+import watcher   # ── FLEET_WATCH_20261127 ──
 
 MAX_BODY = 2_000_000
 MAX_EVENTS = 500
@@ -72,6 +73,9 @@ def _startup() -> None:
     accounts.init()            # ── PORTAL_USERS_ADMIN_20261127 ──
     _internal_token()
     store.housekeeping()
+    watcher.init()             # ── FLEET_WATCH_20261127 ── (TD-112) offline / daily summary / reminders
+    if os.environ.get("MONSRV_NO_WATCHER") != "1":
+        watcher.start()
 
 
 @app.middleware("http")

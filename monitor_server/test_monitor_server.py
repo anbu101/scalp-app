@@ -5,6 +5,7 @@
 #                                        ── PORTAL_COPY_FIX_20261127 ── TC-MONSRV-0042
 #                                        ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-116, TD-117) TC-MONSRV-0006/0007 rewritten, 0043…0046
 #                                        ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) TC-MONSRV-0047…0048
+#                                        ── FLEET_WATCH_20261127 ── (TD-112) TC-MONSRV-0049…0056
 #
 # The Fleet Monitor service end to end: the real FastAPI app under uvicorn on
 # a free local port (no Starlette TestClient), a throw-away monitor.db and a
@@ -25,7 +26,7 @@ TMP = Path(tempfile.mkdtemp(prefix="monsrv_"))
 (TMP / "secrets").mkdir()
 os.environ.update(MONSRV_DB=str(TMP / "monitor.db"), MONSRV_LICENSE_DB=str(TMP / "licenses.db"),
                   MONSRV_SECRETS_DIR=str(TMP / "secrets"), MONSRV_LICENSE_TELEGRAM=str(TMP / "tg.json"),
-                  MONSRV_INSECURE_COOKIE="1")
+                  MONSRV_INSECURE_COOKIE="1", MONSRV_NO_WATCHER="1")
 sys.path.insert(0, str(HERE))
 FAILS, OK = [], [0]
 
@@ -498,6 +499,99 @@ trp = ad.get(f"/trades?from={today}&to={today}&device=KEY-RAVI").text
 yday = pages.datetime.fromtimestamp(y_entry, store.IST).strftime("%d %b")
 check("TC-MONSRV-0048 a leg carried from yesterday shows its entry DATE in Trades (row dated by its exit)",
       f"{yday} " in trp and "NIFTY26D0126000PE" in trp, yday)
+
+# ── watcher: offline / daily summary / reminders (FLEET_WATCH_20261127) ──
+import json as _json      # noqa: E402
+import watcher            # noqa: E402
+from datetime import datetime as _wdt  # noqa: E402
+_keep_db = store.DB_PATH
+store.DB_PATH = TMP / "watch.db"
+store.init_db()
+watcher.init()
+
+
+def T(h, m, day=27):
+    return _wdt(2026, 11, day, h, m, tzinfo=store.IST).timestamp()
+
+
+def dev(key, label, relay_on, last_seen):
+    with store.conn() as c:
+        c.execute("INSERT OR REPLACE INTO devices (key, label, tier, first_seen, last_seen, epoch, relay) "
+                  "VALUES (?,?,?,?,?,?,?)", (key, label, "STANDARD", last_seen, last_seen, "E", 1 if relay_on else 0))
+
+
+def snapw(key, ts, market_open, totals=None, rows=None):
+    day = store.ist_day(ts)
+    with store.conn() as c:
+        c.execute("INSERT OR REPLACE INTO snapshot (device_key, ts, day, market_open, data) VALUES (?,?,?,?,?)",
+                  (key, ts, day, 1 if market_open else 0, "{}"))
+        if totals is not None:
+            c.execute("INSERT OR REPLACE INTO day_summary (device_key, day, ts, totals, rows) VALUES (?,?,?,?,?)",
+                      (key, day, ts, _json.dumps(totals), _json.dumps(rows or [])))
+
+
+dev("WA", "Ravi", True, T(10, 59))
+dev("WB", "Anbu - main", False, T(10, 59))
+dev("WC", "Kumar", True, T(15, 44, day=26))
+no_td = watcher.trading_day(T(11, 0))
+snapw("WB", T(9, 16), True)           # only the switched-OFF machine says "open": still makes it a trading day
+check("TC-MONSRV-0049 trading day = any machine's snapshot said the market is open (holiday-aware, no list); "
+      "market hours 09:15–15:30 IST of such a day",
+      no_td is False and watcher.trading_day(T(11, 0)) and not watcher.market_hours(T(9, 10))
+      and watcher.market_hours(T(11, 0)) and not watcher.market_hours(T(15, 35)), no_td)
+dev("WA", "Ravi", True, T(10, 56))
+m1 = watcher.check_offline(T(11, 0))
+m2 = watcher.check_offline(T(11, 1))
+check("TC-MONSRV-0050 offline: a switched-ON machine silent > 3 min in market hours → ONE alert (a machine switched "
+      "OFF never alerts); a machine that never started today counts, with its last-seen date",
+      len(m1) == 2 and any("OFFLINE</b> · Ravi" in x and "last seen 10:56" in x for x in m1)
+      and any("Kumar" in x and "26 Nov 15:44" in x for x in m1) and not any("Anbu" in x for x in m1) and m2 == [], m1)
+dev("WA", "Ravi", True, T(11, 4))
+b1 = watcher.check_offline(T(11, 5))
+b2 = watcher.check_offline(T(11, 6))
+check("TC-MONSRV-0051 back online: one '✅ BACK ONLINE' when it checks in again, then nothing",
+      len(b1) == 1 and "BACK ONLINE</b> · Ravi" in b1[0] and b2 == [], (b1, b2))
+dev("WA", "Ravi", True, T(15, 40))
+check("TC-MONSRV-0052 no offline alerts outside market hours (after 15:30, before 09:15)",
+      watcher.check_offline(T(16, 0)) == [] and watcher.check_offline(T(9, 0)) == [])
+snapw("WA", T(15, 45), False, {"net": -3404, "realised": -12542, "charges": 443, "closed_trades": 5, "open_legs": 6},
+      [{"id": "IC_V2", "codename": "Icarus", "state": "OPEN", "net": 1932},
+       {"id": "TMA_V2", "codename": "Timberwolf", "state": "CLOSED", "net": -4939},
+       {"id": "VET_V1", "codename": "Velvet", "state": "IDLE", "net": 0}])
+snapw("WB", T(15, 45), False, {"net": 999, "realised": 999, "closed_trades": 1})
+early = watcher.daily_summary(T(15, 49))
+summ = watcher.daily_summary(T(15, 50))
+again = watcher.daily_summary(T(15, 55))
+check("TC-MONSRV-0053 daily summary: none before 15:50; ONE at 15:50 with each switched-ON machine's net, realised, "
+      "charges, trades, carried legs and strategies, and the fleet net; switched-OFF machines left out",
+      early is None and summ and "FLEET SUMMARY" in summ and "<b>Ravi</b>: −₹3,404" in summ and "charges −₹443" in summ
+      and "5 closed" in summ and "6 leg(s) carried" in summ and "Icarus: +₹1,932" in summ and "Timberwolf: −₹4,939" in summ
+      and "Velvet" not in summ and "Anbu" not in summ and "Fleet net: −₹3,404" in summ and again is None, summ)
+check("TC-MONSRV-0054 no summary on a day no machine reported the market open (holiday / weekend)",
+      watcher.daily_summary(T(15, 50, day=28)) is None)
+with store.conn() as c:
+    for i, (k, kind, ts) in enumerate((("WA", "CRITICAL", T(11, 0)), ("WA", "CRITICAL", T(11, 1)),
+                                       ("WB", "CRITICAL", T(11, 0)), ("WA", "SYSTEM_ALERT", T(11, 0)),
+                                       ("WA", "ORDER_REJECTED", T(8, 0)))):
+        c.execute("INSERT INTO events (device_key, epoch, seq, ts, received_at, kind, summary, data) VALUES (?,?,?,?,?,?,?,?)",
+                  (k, "E", 100 + i, ts, ts, kind, f"msg{i}", "{}"))
+    acked_id = c.execute("SELECT id FROM events WHERE summary='msg1'").fetchone()[0]
+store.ack(acked_id, "anbu", "on it")
+r1 = watcher.reminders(T(11, 12))
+r2 = watcher.reminders(T(11, 20))
+check("TC-MONSRV-0055 reminder: a critical unacknowledged after 10 min is posted ONCE with the Alerts link; not when "
+      "acknowledged, not for a switched-OFF machine, not for system alerts, not when older than 2 h",
+      len(r1) == 1 and "NOT ACKNOWLEDGED</b> for 12 min · Ravi" in r1[0] and "msg0" in r1[0]
+      and "/alerts?unacked=1" in r1[0] and r2 == [], (r1, r2))
+relay._reset_for_tests()
+drain()
+dev("WA", "Ravi", True, T(13, 0))
+store_n = watcher.tick(T(13, 10))
+q = drain()
+srv_src = (HERE / "server.py").read_text()
+check("TC-MONSRV-0056 tick() sends the notices to the Telegram targets; the monitor starts the watcher at start-up",
+      store_n == len(q) >= 1 and all(x[1] == "999" for x in q) and "watcher.start()" in srv_src, (store_n, q))
+store.DB_PATH = _keep_db
 
 uv.should_exit = True
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({OK[0]}/{OK[0] + len(FAILS)})")

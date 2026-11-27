@@ -139,6 +139,28 @@ def submit(dev: Dict[str, Any], new_events: List[Dict[str, Any]]) -> int:
         return 0
 
 
+def broadcast(text: str) -> int:
+    """── FLEET_WATCH_20261127 ── (TD-112) one watcher notice (offline / back online / daily
+    summary / reminder) to every target. The caller has already applied the
+    machine's own Telegram switch. Returns how many were queued; never raises."""
+    try:
+        cfg = config()
+        if not cfg["bot_token"] or not cfg["targets"]:
+            return 0
+        n = 0
+        for t in cfg["targets"]:
+            try:
+                _q.put_nowait((cfg["bot_token"], str(t["chat_id"]), text))
+                n += 1
+            except queue.Full:
+                print("[RELAY] queue full — notice dropped")
+        _ensure_worker()
+        return n
+    except Exception as e:
+        print(f"[RELAY] broadcast failed: {e!r}")
+        return 0
+
+
 def _send(token: str, chat_id: str, text: str) -> bool:
     try:
         data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode": "HTML",
