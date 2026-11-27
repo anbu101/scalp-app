@@ -156,19 +156,29 @@ def daily_summary(now: float) -> Optional[str]:
         return None
     if not rows:
         return None
+    # ── FLEET_MTM_AND_SUMMARY_20261127 ── the app's Daily Summary: BOOKED (realised) P&L is the day's result;
+    # open legs and their P&L are listed apart as "not booked", never added to it.
     lines = [f"📊 <b>FLEET SUMMARY</b> · {_ist(now).strftime('%a %d %b')}"]
-    fleet = 0.0
+    fleet_r = fleet_c = 0.0
     for r in sorted(rows, key=lambda r: str(devs[r["device_key"]].get("label") or "")):
         t = r["totals"] or {}
-        fleet += float(t.get("net") or 0)
-        lines.append(f"\n<b>{escape(str(devs[r['device_key']].get('label') or 'machine'))}</b>: "
-                     f"{_money(t.get('net'))}  (realised {_money(t.get('realised'))}, charges "
-                     f"{_money(-float(t.get('charges') or 0))}) · {int(t.get('closed_trades') or 0)} closed"
-                     + (f" · {int(t.get('open_legs'))} leg(s) carried" if t.get("open_legs") else ""))
-        for s in r["rows"] or []:
-            if s.get("state") != "IDLE":
-                lines.append(f"   {escape(str(s.get('codename') or s.get('id')))}: {_money(s.get('net'))}")
-    lines.append(f"\n<b>Fleet net: {_money(fleet)}</b>\n{PORTAL}/day")
+        real, chg = float(t.get("realised") or 0), float(t.get("charges") or 0)
+        fleet_r += real
+        fleet_c += chg
+        n = int(t.get("closed_trades") or 0)
+        lines.append(f"\n<b>{escape(str(devs[r['device_key']].get('label') or 'machine'))}</b>")
+        lines.append(f"Live {_money(real)} booked · {n} trade{'' if n == 1 else 's'}")
+        lines.append(f"Charges {_money(-chg)} · net after charges {_money(real - chg)}")
+        if t.get("open_legs"):
+            lines.append(f"Open: {int(t['open_legs'])} leg(s), {_money(t.get('unrealised'))} (not booked)")
+        for s_ in r["rows"] or []:
+            if s_.get("state") == "IDLE":
+                continue
+            k = int(s_.get("closed_trades") or 0)
+            ol = int(s_.get("open_legs") or 0)
+            lines.append(f"   {escape(str(s_.get('codename') or s_.get('id')))}: {_money(s_.get('realised'))}"
+                         f" · {k} trade{'' if k == 1 else 's'}" + (f" · {ol} leg(s) open" if ol else ""))
+    lines.append(f"\n<b>Fleet: {_money(fleet_r)} booked · {_money(fleet_r - fleet_c)} after charges</b>\n{PORTAL}/day")
     return "\n".join(lines)
 
 

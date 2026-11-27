@@ -180,6 +180,14 @@ def _kpi(label: str, value: str) -> str:
     return f'<div class="kpi"><small>{e(label)}</small><span class="v">{value}</span></div>'
 
 
+def booked_net(t: Dict[str, Any]) -> Optional[float]:
+    """── FLEET_MTM_AND_SUMMARY_20261127 ── the app's "Net after charges": realised (booked) P&L minus charges."""
+    try:
+        return float(t.get("realised") or 0) - float(t.get("charges") or 0)
+    except Exception:
+        return None
+
+
 def kite_chip(b: Optional[Dict[str, Any]], now: float) -> str:
     """── KITE_STATUS_PORTAL_20261127 ── (TD-112) the machine's Kite session from its last snapshot.
     None = no fresh answer (outside 08:30–15:30, or an app older than v12.0.26)."""
@@ -242,16 +250,16 @@ def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram"
         online += st_cls == "ok"
         is_today = s.get("day") == today
         tot = (data.get("totals") or {}) if is_today else {}
-        total_net += float(tot.get("net") or 0)
+        total_net += float(tot.get("gross") or 0)   # ── FLEET_MTM_AND_SUMMARY_20261127 ── MTM, as the app's headline
         total_open += int(tot.get("open_legs") or 0)
         n_un = unacked.get(d["key"], 0)
         rows = "".join(
             f'<tr><td>{e(r.get("codename") or r.get("id"))}</td><td>{e(r.get("state"))}</td>'
             f'<td class="r">{e(r.get("open_legs"))}</td><td class="r">{e(r.get("closed_trades"))}</td>'
-            f'<td class="r">{money(r.get("net"))}</td></tr>'
+            f'<td class="r">{money(r.get("gross"))}</td></tr>'
             for r in (data.get("rows") or []) if is_today and r.get("state") != "IDLE")
         table = (f'<div class="tw"><table><tr><th>Strategy</th><th>State</th><th class="r">Open</th><th class="r">Closed</th>'
-                 f'<th class="r">Net</th></tr>{rows}</table></div>' if rows else '<p class="muted">No live trades today.</p>')
+                 f'<th class="r">MTM</th></tr>{rows}</table></div>' if rows else '<p class="muted">No live trades today.</p>')
         notes = []
         if data.get("error"):
             notes.append(f"Snapshot failed on the machine: {e(data['error'])}")
@@ -281,15 +289,16 @@ def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram"
             f'<div class="card"><h3>{e(d["label"])} <span class="badge b-{st_cls}">{st_txt}</span> {kite} {alert_link}</h3>'
             f'<div class="meta">seen {ago(d.get("last_seen"), now)} · v{e(d.get("app_version") or "?")}'
             f' · {e(d.get("tier") or "")} · {("sent to " if d.get("relay", 1) else "not sent to ") + e(channel)}</div>'   # ── FLEET_SWITCH_LABEL_20261127 ──
-            f'<div class="nums"><div><small>Net today</small>{money(tot.get("net"))}</div>'
+            f'<div class="nums"><div><small>MTM today</small>{money(tot.get("gross"))}</div>'   # ── FLEET_MTM_AND_SUMMARY_20261127 ── = the app's MTM
             f'<div><small>Realised</small>{money(tot.get("realised"))}</div>'
             f'<div><small>Unrealised</small>{money(tot.get("unrealised"))}</div>'
-            f'<div><small>Charges</small>{money(-float(tot["charges"])) if tot.get("charges") else "—"}</div>'   # ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) Net = Realised + Unrealised − Charges
+            f'<div><small>Charges</small>{money(-float(tot["charges"])) if tot.get("charges") else "—"}</div>'
+            f'<div><small>Booked after charges</small>{money(booked_net(tot)) if tot else "—"}</div>'   # ── FLEET_MTM_AND_SUMMARY_20261127 ──   # ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) Net = Realised + Unrealised − Charges
             f'<div><small>Open legs</small>{e(tot.get("open_legs", "—"))}</div>'
             f'<div><small>Closed trades</small>{e(tot.get("closed_trades", "—"))}</div>'
             f'<div><small>Risk to stops</small>{money(tot.get("risk_to_stops")) if tot.get("stops_known") else "—"}</div></div>'
             f'{note_html}{table}{admin}</div>')
-    kpis = (_kpi("Fleet net today (LIVE)", money(total_net)) + _kpi("Open legs", str(total_open))
+    kpis = (_kpi("Fleet MTM today (LIVE)", money(total_net)) + _kpi("Open legs", str(total_open))
             + _kpi("Machines online", f"{online} / {len(devs)}")
             + _kpi("Unacknowledged alerts", str(sum(unacked.values()))))
     pend, out = fleet_lists(user, others, now)   # ── FLEET_MEMBERSHIP_20261127 ──
@@ -380,33 +389,40 @@ def timeline_page(user, devs, rows, day, device) -> str:
 
 
 def day_page(user, devs, sums, counts, day) -> str:
+    """── FLEET_MTM_AND_SUMMARY_20261127 ── the app's Daily Summary: BOOKED (realised) P&L first, then charges and
+    net after charges; open legs and their unrealised P&L shown apart, never as the day's result."""
     labels = {d["key"]: d["label"] for d in devs}
     filt = (f'<form class="filters" method="get"><label>Day<input type="date" name="day" value="{e(day)}"></label>'
             f'<button>Show</button></form>')
-    cards, fleet = [], 0.0
+    cards, fleet_r, fleet_n = [], 0.0, 0.0
     for s in sorted(sums, key=lambda x: labels.get(x["device_key"], "")):
         t = s["totals"] or {}
-        fleet += float(t.get("net") or 0)
+        fleet_r += float(t.get("realised") or 0)
+        fleet_n += booked_net(t) or 0.0
         c = counts.get(s["device_key"], {})
         rows = "".join(f'<tr><td>{e(r.get("codename") or r.get("id"))}</td><td class="r">{e(r.get("closed_trades"))}</td>'
-                       f'<td class="r">{money(r.get("realised"))}</td><td class="r">{money(r.get("charges"), False)}</td>'
-                       f'<td class="r">{money(r.get("net"))}</td></tr>'
+                       f'<td class="r">{money(r.get("realised"))}</td><td class="r">{e(r.get("open_legs") or 0)}</td>'
+                       f'<td class="r">{money(r.get("unrealised")) if r.get("open_legs") else "—"}</td></tr>'
                        for r in s["rows"] if r.get("state") != "IDLE")
         cards.append(
             f'<div class="card"><h3>{e(labels.get(s["device_key"], s["device_key"][:8]))}</h3>'
             f'<div class="meta">last snapshot {hms(s["ts"])} IST · events streamed: '
             f'{c.get("TRADE_ENTRY", 0) + c.get("GROUP_ENTRY", 0)} entries, {c.get("TRADE_EXIT", 0) + c.get("GROUP_EXIT", 0)} exits, '
             f'{c.get("CRITICAL", 0) + c.get("ORDER_REJECTED", 0)} critical</div>'
-            f'<div class="nums"><div><small>Net</small>{money(t.get("net"))}</div>'
-            f'<div><small>Realised</small>{money(t.get("realised"))}</div>'
-            f'<div><small>Charges</small>{money(t.get("charges"), False)}</div>'
+            f'<div class="nums"><div><small>Booked (realised)</small>{money(t.get("realised"))}</div>'
+            f'<div><small>Charges</small>{money(-float(t.get("charges") or 0))}</div>'
+            f'<div><small>Net after charges</small>{money(booked_net(t))}</div>'
             f'<div><small>Closed trades</small>{e(t.get("closed_trades", "—"))}</div>'
-            f'<div><small>Open at last snapshot</small>{e(t.get("open_legs", "—"))}</div></div>'
-            + (f'<div class="tw"><table><tr><th>Strategy</th><th class="r">Closed</th><th class="r">Realised</th>'
-               f'<th class="r">Charges</th><th class="r">Net</th></tr>{rows}</table></div>' if rows else
+            f'<div><small>Open legs</small>{e(t.get("open_legs", 0))}</div>'
+            f'<div><small>Open P&amp;L (not booked)</small>{money(t.get("unrealised")) if t.get("open_legs") else "—"}</div></div>'
+            + (f'<div class="tw"><table><tr><th>Strategy</th><th class="r">Closed</th><th class="r">Booked</th>'
+               f'<th class="r">Open legs</th><th class="r">Open P&amp;L</th></tr>{rows}</table></div>' if rows else
                '<p class="muted">No live trades.</p>') + '</div>')
-    body = (filt + f'<div class="kpis">{_kpi("Fleet net (LIVE)", money(fleet))}{_kpi("Machines reporting", str(len(sums)))}</div>'
-            + (f'<div class="grid">{"".join(cards)}</div>' if cards else '<p class="muted">No snapshot for this day.</p>'))
+    body = (filt + f'<div class="kpis">{_kpi("Fleet booked (LIVE)", money(fleet_r))}{_kpi("After charges", money(fleet_n))}'
+            f'{_kpi("Machines reporting", str(len(sums)))}</div>'
+            + (f'<div class="grid">{"".join(cards)}</div>' if cards else '<p class="muted">No snapshot for this day.</p>')
+            + '<p class="muted" style="margin-top:12px">Booked = realised P&amp;L of trades closed that day, before '
+              'charges (the app\'s Daily Summary). Open legs are not counted in it.</p>')
     return layout("Day summary", body, user, "/day")
 
 

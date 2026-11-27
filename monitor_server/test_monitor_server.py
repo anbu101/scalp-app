@@ -12,6 +12,7 @@
 #                                        ── ALERT_STRATEGY_INFER_20261127 ── TC-MONSRV-0060…0064
 #                                        ── FLEET_MEMBERSHIP_20261127 ── TC-MONSRV-0065…0070
 #                                        ── FLEET_FROM_LICENSE_ADMIN_20261127 ── TC-MONSRV-0071…0073
+#                                        ── FLEET_MTM_AND_SUMMARY_20261127 ── 0019/0047/0053 reworded (MTM; booked-first summary), 0074
 #
 # The Fleet Monitor service end to end: the real FastAPI app under uvicorn on
 # a free local port (no Starlette TestClient), a throw-away monitor.db and a
@@ -127,7 +128,7 @@ check("TC-MONSRV-0003 a new outbox epoch with seq 1 again is a new event, not a 
 
 today = store.ist_day(now)
 snap = {"day": today, "market_open": True,
-        "totals": {"net": 1500, "realised": 1000, "unrealised": 500, "open_legs": 1, "closed_trades": 2},
+        "totals": {"net": 1500, "gross": 1500, "realised": 1000, "unrealised": 500, "open_legs": 1, "closed_trades": 2},
         "rows": [{"id": "IC_V2", "codename": "Icarus", "state": "OPEN", "open_legs": 1, "closed_trades": 2, "net": 1500}],
         "legs": [{"id": "LIVE:1", "strategy_id": "IC_V2", "symbol": "NIFTY26D0224000CE", "short": True, "qty": 75,
                   "entry": 20, "exit": 10, "entry_ts": now - 600, "exit_ts": now - 60, "open": False, "net": 700,
@@ -226,7 +227,7 @@ viewer.post("/login", data={"username": "ravi", "password": "viewer-pass-123", "
 admin = httpx.Client(base_url=BASE, timeout=10, follow_redirects=False)
 admin.post("/login", data={"username": "anbu", "password": "admin-pass-1234", "code": code(sec_a, 30)})
 fleet = viewer.get("/")
-check("TC-MONSRV-0019 Fleet page: the friend's install with its LIVE net; device text is escaped",
+check("TC-MONSRV-0019 Fleet page: the friend's install with its LIVE MTM; device text is escaped",
       fleet.status_code == 200 and "Ravi &lt;b&gt;" in fleet.text and "+₹1,500" in fleet.text
       and "<b>" not in fleet.text.split("<main>")[1].replace("<b>Fleet Monitor</b>", ""), fleet.text[:400])
 al = viewer.get("/alerts?days=1")
@@ -512,16 +513,19 @@ check("TC-MONSRV-0058 Kite status on the card: ✓ / trading off / NOT logged in
       and "Kite: NOT logged in" in kc_page, chips)
 
 # ── Charges on the card, carried legs dated (FLEET_OPEN_CADENCE_20261127) ──
-snap2 = dict(snap, totals={"net": -3404, "realised": -12542, "unrealised": 9581, "charges": 443,
-                           "open_legs": 6, "closed_trades": 5})
+snap2 = dict(snap, totals={"net": 5796, "gross": 6240, "realised": -12542, "unrealised": 18782, "charges": 444,
+                           "open_legs": 8, "closed_trades": 5})
 y_entry = now - 86400 - 3600
 snap2["legs"] = [{"id": "LIVE:carry", "strategy_id": "VET_V1", "symbol": "NIFTY26D0126000PE", "short": True, "qty": 65,
                   "entry": 198.75, "exit": 276.8, "entry_ts": y_entry, "exit_ts": now - 60, "open": False, "net": -5153,
                   "reason": "FLIP"}]
 ingest("KEY-RAVI", "HW-RAVI", snapshot=snap2)
 cardp = ad.get("/").text
-check("TC-MONSRV-0047 the Fleet card shows Charges, so Realised + Unrealised − Charges visibly equals Net (TD-119)",
-      "<small>Charges</small>" in cardp and "−₹443" in cardp and "−₹3,404" in cardp)
+check("TC-MONSRV-0047 the Fleet card leads with MTM like the app (+₹6,240 = realised + open), then Charges and "
+      "'Booked after charges' (−₹12,986); no 'Net today'",
+      "<small>MTM today</small><span class=\"pos\">+₹6,240</span>" in cardp and "−₹444" in cardp
+      and "<small>Booked after charges</small><span class=\"neg\">−₹12,986</span>" in cardp and "Net today" not in cardp
+      and "Fleet MTM today (LIVE)" in cardp, cardp[cardp.find("MTM today") - 50: cardp.find("MTM today") + 400])
 trp = ad.get(f"/trades?from={today}&to={today}&device=KEY-RAVI").text
 yday = pages.datetime.fromtimestamp(y_entry, store.IST).strftime("%d %b")
 check("TC-MONSRV-0048 a leg carried from yesterday shows its entry DATE in Trades (row dated by its exit)",
@@ -581,19 +585,22 @@ check("TC-MONSRV-0051 back online: one '✅ BACK ONLINE' when it checks in again
 dev("WA", "Ravi", True, T(15, 40))
 check("TC-MONSRV-0052 no offline alerts outside market hours (after 15:30, before 09:15)",
       watcher.check_offline(T(16, 0)) == [] and watcher.check_offline(T(9, 0)) == [])
-snapw("WA", T(15, 45), False, {"net": -3404, "realised": -12542, "charges": 443, "closed_trades": 5, "open_legs": 6},
-      [{"id": "IC_V2", "codename": "Icarus", "state": "OPEN", "net": 1932},
-       {"id": "TMA_V2", "codename": "Timberwolf", "state": "CLOSED", "net": -4939},
-       {"id": "VET_V1", "codename": "Velvet", "state": "IDLE", "net": 0}])
+snapw("WA", T(15, 45), False, {"net": 5796, "gross": 6240, "realised": -12542, "unrealised": 18782, "charges": 443.6,
+                                "closed_trades": 5, "open_legs": 8},
+      [{"id": "IC_V2", "codename": "Icarus", "state": "OPEN", "realised": -2779, "closed_trades": 1, "open_legs": 4, "net": 5367},
+       {"id": "TMA_V2", "codename": "Timberwolf", "state": "OPEN", "realised": -4686, "closed_trades": 2, "open_legs": 2, "net": -2114},
+       {"id": "VET_V1", "codename": "Velvet", "state": "IDLE", "realised": 0, "net": 0}])
 snapw("WB", T(15, 45), False, {"net": 999, "realised": 999, "closed_trades": 1})
 early = watcher.daily_summary(T(15, 49))
 summ = watcher.daily_summary(T(15, 50))
 again = watcher.daily_summary(T(15, 55))
-check("TC-MONSRV-0053 daily summary: none before 15:50; ONE at 15:50 with each switched-ON machine's net, realised, "
-      "charges, trades, carried legs and strategies, and the fleet net; switched-OFF machines left out",
-      early is None and summ and "FLEET SUMMARY" in summ and "<b>Ravi</b>: −₹3,404" in summ and "charges −₹443" in summ
-      and "5 closed" in summ and "6 leg(s) carried" in summ and "Icarus: +₹1,932" in summ and "Timberwolf: −₹4,939" in summ
-      and "Velvet" not in summ and "Anbu" not in summ and "Fleet net: −₹3,404" in summ and again is None, summ)
+check("TC-MONSRV-0053 daily summary like the app's: BOOKED (realised) P&L is the result, then charges and net after "
+      "charges; open legs and their P&L apart as 'not booked'; per-strategy booked; once at 15:50; switched-off left out",
+      early is None and summ and "FLEET SUMMARY" in summ and "Live −₹12,542 booked · 5 trades" in summ
+      and "Charges −₹444 · net after charges −₹12,986" in summ and "Open: 8 leg(s), +₹18,782 (not booked)" in summ
+      and "Icarus: −₹2,779 · 1 trade · 4 leg(s) open" in summ and "Timberwolf: −₹4,686 · 2 trades · 2 leg(s) open" in summ
+      and "+₹5,796" not in summ and "+₹6,240" not in summ and "Velvet" not in summ and "Anbu" not in summ
+      and "Fleet: −₹12,542 booked · −₹12,986 after charges" in summ and again is None, summ)
 check("TC-MONSRV-0054 no summary on a day no machine reported the market open (holiday / weekend)",
       watcher.daily_summary(T(15, 50, day=28)) is None)
 with store.conn() as c:
@@ -764,6 +771,12 @@ check("TC-MONSRV-0073 remove / add through the same API; a malformed key 400, an
       "status 400",
       o1.status_code == 200 and gone and b1 in (400, 404) and b2 == 404 and b3 == 400, (o1.text, b1, b2, b3))
 store.NEW_MACHINES = "auto"
+
+dayp = ad.get(f"/day?day={today}").text
+check("TC-MONSRV-0074 Day summary page: booked (realised) P&L first with charges and net after charges; open legs and "
+      "their P&L shown apart, not added to the day's result",
+      "Fleet booked (LIVE)" in dayp and "<small>Booked (realised)</small>" in dayp and "<small>Net after charges</small>" in dayp
+      and "Open P&amp;L (not booked)" in dayp and "Open legs are not counted in it" in dayp, dayp[:300])
 
 uv.should_exit = True
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({OK[0]}/{OK[0] + len(FAILS)})")
