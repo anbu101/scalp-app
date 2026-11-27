@@ -22,6 +22,12 @@ from app.config.lots_whitelist import LOTS_PATHS
 
 OUT = Path(__file__).parent / "strategy_defaults.json"
 
+# ── LICENSE_SYNC_ADMIN_ONLY_20261127 ── (TD-114) strategies that run only on Anbu's ADMIN licence
+# ("*" covers them). They are NOT licensable: not in server.py KNOWN_STRATEGY_IDS,
+# not an admin_ui.html chip, no template here. check_strategy_sync.py reads this.
+# To offer one to friends: add it to those two lists and remove it here.
+ADMIN_ONLY = {"LVB_V1"}   # Tripwire — Anbu 27 Nov: "only for me now"
+
 
 def _path_delete(obj, dotted):
     segs = dotted.split(".")
@@ -51,6 +57,8 @@ def _path_delete(obj, dotted):
 def main():
     out = {}
     for sid, cfg in DEFAULT_STRATEGY_CONFIGS.items():
+        if sid in ADMIN_ONLY:                      # ── LICENSE_SYNC_ADMIN_ONLY_20261127 ──
+            continue
         c = deepcopy(cfg)
         c.pop("trade_execution_mode", None)
         for p in LOTS_PATHS.get(sid, []):

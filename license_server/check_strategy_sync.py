@@ -12,7 +12,9 @@ exist", and every one of them has drifted at least once:
   strategy_defaults    .json            missing id → no template; extra id
                                         (a retired strategy) → stale template
 
-The source of truth is the app's DEFAULT_STRATEGY_CONFIGS. This check:
+The source of truth is the app's DEFAULT_STRATEGY_CONFIGS, less ADMIN_ONLY
+(gen_strategy_defaults.py: strategies only Anbu's ADMIN licence runs, never
+licensable — LICENSE_SYNC_ADMIN_ONLY_20261127, TD-114). This check:
   1. always: the three server-side lists must be the same set (no imports
      needed — server.py is read with ast, admin_ui.html with a regex);
   2. when the app backend imports (PYTHONPATH=backend, its deps installed):
@@ -65,6 +67,8 @@ def fresh_defaults():
         return None, f"{type(e).__name__}: {e}"
     out = {}
     for sid, cfg in DEFAULT_STRATEGY_CONFIGS.items():
+        if sid in getattr(g, "ADMIN_ONLY", set()):      # ── LICENSE_SYNC_ADMIN_ONLY_20261127 ── not licensable
+            continue
         c = deepcopy(cfg)
         c.pop("trade_execution_mode", None)
         for p in g.LOTS_PATHS.get(sid, []):
@@ -93,6 +97,17 @@ def main(server=HERE / "server.py", admin=HERE / "admin_ui.html", defaults=HERE 
     for name, s in lists.items():
         if s != union:
             bad.append(f"{name}: missing [{_fmt(union - s)}]")
+    # ── LICENSE_SYNC_ADMIN_ONLY_20261127 ── (TD-114) an admin-only strategy must stay OFF the licensable lists
+    try:
+        sys.path.insert(0, str(HERE))
+        import gen_strategy_defaults as _g
+        admin_only = set(getattr(_g, "ADMIN_ONLY", set()))
+    except Exception:
+        admin_only = {"LVB_V1"}
+    for name, s in lists.items():
+        if s & admin_only:
+            bad.append(f"{name}: lists admin-only [{_fmt(s & admin_only)}] — it would become licensable; "
+                       f"remove it, or take it out of ADMIN_ONLY in gen_strategy_defaults.py")
     fresh, why = fresh_defaults()
     if fresh is None:
         print(f"  app check SKIPPED (backend not importable: {why})")
