@@ -9,8 +9,8 @@
 # service being down never stops the data. (No paid domain: TD-110.)
 #
 # CADENCE. Every TICK_S: unsent events, in seq order, up to BATCH per POST.
-# The snapshot rides along every SNAP_OPEN_S while the market is open and
-# every SNAP_CLOSED_S outside it; it doubles as the heartbeat the portal's
+# The snapshot rides along every SNAP_OPEN_S while the market is open or the
+# clock is in 09:10–15:45 IST on a weekday, and every SNAP_CLOSED_S otherwise; it doubles as the heartbeat the portal's
 # online/offline badge reads. The server acks the highest seq it stored; only
 # those rows are marked sent, so a lost reply resends (the server de-dups).
 #
@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from app.event_bus.audit_logger import write_audit_log
@@ -35,6 +36,19 @@ TICK_S = 5
 BATCH = 200
 SNAP_OPEN_S = 60
 SNAP_CLOSED_S = 300
+# ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) every minute from 09:10 to 15:45 IST on weekdays, whatever
+# the last snapshot said: the 09:1x pre-open snapshot said "closed", so the next
+# one came 5 min later and the portal showed pre-market numbers until ~09:20.
+# Fixed +05:30 offset (no DST; no tz database needed on Windows).
+FAST_FROM_MIN = 9 * 60 + 10
+FAST_TO_MIN = 15 * 60 + 45
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def fast_window(now: float) -> bool:
+    d = datetime.fromtimestamp(now, _IST)
+    m = d.hour * 60 + d.minute
+    return d.weekday() < 5 and FAST_FROM_MIN <= m <= FAST_TO_MIN
 BACKOFF_MAX_S = 300
 REFUSED_WAIT_S = 1800
 PAUSED_WAIT_S = 600
@@ -139,7 +153,8 @@ class Shipper:
         if snap_due:
             s = body.get("snapshot") or {}
             self.market_open = bool(s.get("market_open"))
-            self.next_snap = now + (SNAP_OPEN_S if self.market_open else SNAP_CLOSED_S)
+            fast = self.market_open or fast_window(now)          # ── FLEET_OPEN_CADENCE_20261127 ──
+            self.next_snap = now + (SNAP_OPEN_S if fast else SNAP_CLOSED_S)
         if data.get("enabled") is False:
             self._log_state("paused", "monitor paused this install from the server")
             return float(PAUSED_WAIT_S)

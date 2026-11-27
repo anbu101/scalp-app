@@ -4,6 +4,7 @@
 #                                        ── MONITOR_DEPLOY_FILES_20261127 ── (DEF-110) TC-MONSRV-0041
 #                                        ── PORTAL_COPY_FIX_20261127 ── TC-MONSRV-0042
 #                                        ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-116, TD-117) TC-MONSRV-0006/0007 rewritten, 0043…0046
+#                                        ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) TC-MONSRV-0047…0048
 #
 # The Fleet Monitor service end to end: the real FastAPI app under uvicorn on
 # a free local port (no Starlette TestClient), a throw-away monitor.db and a
@@ -481,6 +482,22 @@ st = [pages.status(dict(dv, last_seen=t_pre - 240), {"market_open": 0}, t_pre)[1
 check("TC-MONSRV-0046 Online follows the machine's check-in cadence: market closed 4 min → Online (8 min → Late); "
       "market open 4 min → Late; 20 min in market hours → Offline (red) (TD-116)",
       st == ["Online", "Late", "Late", "bad"], st)
+
+# ── Charges on the card, carried legs dated (FLEET_OPEN_CADENCE_20261127) ──
+snap2 = dict(snap, totals={"net": -3404, "realised": -12542, "unrealised": 9581, "charges": 443,
+                           "open_legs": 6, "closed_trades": 5})
+y_entry = now - 86400 - 3600
+snap2["legs"] = [{"id": "LIVE:carry", "strategy_id": "VET_V1", "symbol": "NIFTY26D0126000PE", "short": True, "qty": 65,
+                  "entry": 198.75, "exit": 276.8, "entry_ts": y_entry, "exit_ts": now - 60, "open": False, "net": -5153,
+                  "reason": "FLIP"}]
+ingest("KEY-RAVI", "HW-RAVI", snapshot=snap2)
+cardp = ad.get("/").text
+check("TC-MONSRV-0047 the Fleet card shows Charges, so Realised + Unrealised − Charges visibly equals Net (TD-119)",
+      "<small>Charges</small>" in cardp and "−₹443" in cardp and "−₹3,404" in cardp)
+trp = ad.get(f"/trades?from={today}&to={today}&device=KEY-RAVI").text
+yday = pages.datetime.fromtimestamp(y_entry, store.IST).strftime("%d %b")
+check("TC-MONSRV-0048 a leg carried from yesterday shows its entry DATE in Trades (row dated by its exit)",
+      f"{yday} " in trp and "NIFTY26D0126000PE" in trp, yday)
 
 uv.should_exit = True
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({OK[0]}/{OK[0] + len(FAILS)})")

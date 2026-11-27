@@ -1,4 +1,5 @@
 # backend/app/monitor/test_monitor_ship.py — ── FLEET_MONITOR_20261127 ── (TD-110) TC-MON-0001…0027
+#                                           ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) TC-MON-0028
 #
 # The app half of the Fleet Monitor: the outbox, the LIVE-only taps in
 # api/telegram_api.py, the snapshot, the shipper's cadence / ack / back-off,
@@ -302,10 +303,33 @@ check("TC-MON-0026 default endpoint: https://139.59.8.202 with SNI 139-59-8-202.
       url == "https://139.59.8.202/api/v1/ingest" and host == "139-59-8-202.sslip.io" and verify is True,
       (url, host, verify))
 
+from datetime import datetime as _dtm, timedelta as _td, timezone as _tz  # noqa: E402
+_ist = _tz(_td(hours=5, minutes=30))
+
+
+def _at(y, mo, d, h, mi):
+    return _dtm(y, mo, d, h, mi, tzinfo=_ist).timestamp()
+
+
+def _next_after_snapshot(t):
+    fresh("cad")
+    sh2 = shipper.Shipper(clock=lambda: t, poster=lambda b: R(200, {"ok": True, "acked": None, "enabled": True}),
+                          snap=lambda: {"market_open": False, "totals": {}}, ident=lambda: dict(ident))
+    sh2.step()
+    return round(sh2.next_snap - t)
+
+
+got = [_next_after_snapshot(_at(2026, 11, 27, 9, 12)), _next_after_snapshot(_at(2026, 11, 27, 15, 40)),
+       _next_after_snapshot(_at(2026, 11, 27, 8, 0)), _next_after_snapshot(_at(2026, 11, 27, 15, 50)),
+       _next_after_snapshot(_at(2026, 11, 28, 10, 0))]
+check("TC-MON-0028 a snapshot that says 'market closed' is followed 60 s later inside 09:10–15:45 IST on a weekday "
+      "(the open is never 5 min late); 300 s before 09:10, after 15:45 and on a Saturday (TD-119)",
+      got == [60, 60, 300, 300, 300], got)
+
 src = (HERE.parents[1] / "api_server.py").read_text(encoding="utf-8")
 check("TC-MON-0027 api_server starts the ship loop under _supervise, next to the liveness ping",
       "monitor_ship_loop()" in src and '"fleet monitor"' in src)
 
 shutil.rmtree(TMP, ignore_errors=True)
-print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({27 - len(FAILS)}/27)")
+print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({28 - len(FAILS)}/28)")
 sys.exit(1 if FAILS else 0)

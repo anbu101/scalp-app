@@ -56,6 +56,16 @@ def dt(ts: Any) -> str:
         return "—"
 
 
+def entry_when(ts: Any, day: Any) -> str:
+    """── FLEET_OPEN_CADENCE_20261127 ── a leg carried from an earlier day shows that day ("26 Nov 14:49:00"),
+    so a row dated by its exit does not look like it was entered the same day."""
+    try:
+        d = datetime.fromtimestamp(float(ts), IST)
+    except Exception:
+        return "—"
+    return d.strftime("%H:%M:%S") if d.strftime("%Y-%m-%d") == str(day) else d.strftime("%d %b %H:%M:%S")
+
+
 def ago(ts: Any, now: float) -> str:
     try:
         s = int(now - float(ts))
@@ -218,6 +228,7 @@ def fleet_page(user, devs, snaps, unacked, now, today) -> str:
             f'<div class="nums"><div><small>Net today</small>{money(tot.get("net"))}</div>'
             f'<div><small>Realised</small>{money(tot.get("realised"))}</div>'
             f'<div><small>Unrealised</small>{money(tot.get("unrealised"))}</div>'
+            f'<div><small>Charges</small>{money(-float(tot["charges"])) if tot.get("charges") else "—"}</div>'   # ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) Net = Realised + Unrealised − Charges
             f'<div><small>Open legs</small>{e(tot.get("open_legs", "—"))}</div>'
             f'<div><small>Closed trades</small>{e(tot.get("closed_trades", "—"))}</div>'
             f'<div><small>Risk to stops</small>{money(tot.get("risk_to_stops")) if tot.get("stops_known") else "—"}</div></div>'
@@ -277,7 +288,7 @@ def trades_page(user, devs, legs, f) -> str:
         n_open += bool(x.get("open"))
         net += float(x.get("net") or 0) if not x.get("open") else 0
         trs.append(
-            f'<tr><td>{e(r.get("day"))}</td><td>{hms(x.get("entry_ts"))}</td><td>{hms(x.get("exit_ts")) if x.get("exit_ts") else "open"}</td>'
+            f'<tr><td>{e(r.get("day"))}</td><td>{entry_when(x.get("entry_ts"), r.get("day"))}</td><td>{hms(x.get("exit_ts")) if x.get("exit_ts") else "open"}</td>'
             f'<td>{e(labels.get(r["device_key"], r["device_key"][:8]))}</td><td>{e(r.get("strategy_id"))}</td>'
             f'<td>{e(x.get("symbol"))}</td><td>{"SELL" if x.get("short") else "BUY"}</td><td class="r">{e(x.get("qty"))}</td>'
             f'<td class="r">{num(x.get("entry"))}</td><td class="r">{num(x.get("exit")) if x.get("exit") is not None else "—"}</td>'
