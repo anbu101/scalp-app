@@ -7,6 +7,7 @@
 #                                     ── FLEET_MONITOR_FIX_20261127 ── (DEF-109) TC-GATE-0065…0067 (CL-19); 0038/0040 count 19 items
 #                                     ── MONITOR_DEPLOY_FILES_20261127 ── (DEF-110) TC-GATE-0068…0071 (CL-20); 0038/0040 count 20 items
 #                                     ── RELEASE_STAMP_GUARD_20261127 ── (DEF-112) TC-GATE-0072…0076 (CL-21, retired release script); 0038/0040 count 21 items
+#                                     ── TEST_HOME_GUARD_20261127 ── (DEF-113) TC-GATE-0077…0079 (CL-22); 0038/0040 count 22 items
 #
 # Checks of the diff-triggered checklist (scripts/checklist/items.py) and the commit gate
 # (scripts/hooks/reliability_checklist.py) in throw-away git repos — never this repo's index.
@@ -239,6 +240,16 @@ _old = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 _r = subprocess.run(["bash", _old], capture_output=True, text=True, timeout=30)
 chk("TC-GATE-0076", "the old desktop/deploy-scalp.command is retired: exits 1 and points to ./deploy-scalp.command (DEF-112)",
     _r.returncode == 1 and "./deploy-scalp.command" in _r.stdout and "retired" in _r.stdout, (_r.returncode, _r.stdout))
+APPLY_RUN = ("FENCE = 'X_20261127'\nimport os, subprocess, sys, tempfile\nTESTS = ['app/jobs/test_x.py']\n"
+             "# .bak- backups, --rollback\n%s\nfor t in TESTS:\n    subprocess.run([sys.executable, t], env=env)\n")
+rc, out, fin = one(d, "apply_home_a.py", APPLY_RUN % "env = dict(os.environ, PYTHONPATH='backend', SCALP_TEST_MODE='1')")
+chk("TC-GATE-0077", "CL-22: an apply script that runs its tests with the caller's HOME fails (DEF-113)",
+    status_of(fin, "CL-22") == "fail" and "apply_home_a.py" in out, (fin, out[-300:]))
+rc, out, fin = one(d, "apply_home_b.py", APPLY_RUN % ("env = dict(os.environ, PYTHONPATH='backend', SCALP_TEST_MODE='1')\n"
+                                                      "env['HOME'] = tempfile.mkdtemp(prefix='apply_home_')"))
+chk("TC-GATE-0078", "CL-22: an apply script whose tests get HOME = a temp folder passes", status_of(fin, "CL-22") == "pass", fin)
+rc, out, fin = one(d, "apply_home_c.py", "FENCE = 'Y_20261127'\n# .bak- backups, --rollback\nprint('no tests')\n")
+chk("TC-GATE-0079", "CL-22: an apply script that runs no tests does not trigger it", status_of(fin, "CL-22") is None, fin)
 rc, out, fin = one(d, "backend/app/engine/vet/vet_exit.py", "if now_ts > deadline_ts:\n    close_trade(x)\n")
 chk("TC-GATE-0018", "CL-08 and CL-12: a ts comparison and a close in engine code need acks",
     status_of(fin, "CL-08") == "needs-ack" and status_of(fin, "CL-12") == "needs-ack", fin)
@@ -356,8 +367,8 @@ git(d, "commit", "-qm", "c1", "--no-verify")
 rc, out = cli("--range", "HEAD~1..HEAD")
 chk("TC-GATE-0037", "--range A..B replays a past commit", rc == 1 and "CL-02 fail" in out, out)
 rc, out = cli("--list")
-chk("TC-GATE-0038", "--list shows 21 items, each with trigger, check and incidents",
-    "21 items" in out and out.count("incidents:") == 21 and out.count("trigger:") == 21, out[:300])
+chk("TC-GATE-0038", "--list shows 22 items, each with trigger, check and incidents",
+    "22 items" in out and out.count("incidents:") == 22 and out.count("trigger:") == 22, out[:300])
 commit(d, "x")
 rc, out = cli("--report")
 chk("TC-GATE-0039", "--report summarises the log", rc == 0 and "commits logged" in out, out)
@@ -367,8 +378,8 @@ shutil.rmtree(d, ignore_errors=True)
 ns = {}
 exec(compile(open(ITEMS).read(), ITEMS, "exec"), ns)
 ids = [i["id"] for i in ns["ITEMS"]]
-chk("TC-GATE-0040", "items: unique ids CL-01…CL-21, kind auto|ack, every item names its incidents",
-    ids == [f"CL-{n:02d}" for n in range(1, 22)] and all(i["kind"] in ("auto", "ack") and i["incidents"]
+chk("TC-GATE-0040", "items: unique ids CL-01…CL-22, kind auto|ack, every item names its incidents",
+    ids == [f"CL-{n:02d}" for n in range(1, 23)] and all(i["kind"] in ("auto", "ack") and i["incidents"]
                                                          and i["trigger"] and i["check"] for i in ns["ITEMS"]), ids)
 
 print("\n" + ("ALL RELIABILITY CHECKLIST CHECKS PASSED" if F == 0 else f"{F} FAILURES"))

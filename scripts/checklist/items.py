@@ -6,6 +6,7 @@
 #                              ── FLEET_MONITOR_FIX_20261127 ── CL-19 (DEF-109)
 #                              ── MONITOR_DEPLOY_FILES_20261127 ── CL-20 (DEF-110)
 #                              ── RELEASE_STAMP_GUARD_20261127 ── CL-21 (DEF-112)
+#                              ── TEST_HOME_GUARD_20261127 ── CL-22 (DEF-113)
 #
 # The reliability checklist. Each item has
 #   trigger  — something you can read from the staged diff (paths + added lines)
@@ -474,6 +475,19 @@ def cl21(ctx):
                   f"version and every install would show a false update banner (DEF-112). Release with the repo-root "
                   f"./deploy-scalp.command, which writes both."], ""
 
+# ── CL-22 apply scripts run their tests with a throw-away HOME (DEF-113) ──
+RUNS_TESTS = re.compile(r"""subprocess\.(?:run|call|check_call|check_output|Popen)\(""")
+
+
+def cl22(ctx):
+    fs = [f for f in ctx.files if f.status != "D" and "/" not in f.path and re.match(r"apply_\w+\.py$", f.path)]
+    fs = [f for f in fs if RUNS_TESTS.search(f.new_text()) and re.search(r"\btest_\w+\.py|\bTESTS\b", f.new_text())]
+    if not fs:
+        return False, [], ""
+    return True, [f"{f.path}: runs tests without pointing HOME at a throw-away folder — a suite then writes its "
+                  f"fake Zerodha key / Telegram config into the real ~/.scalp-app (DEF-113)"
+                  for f in fs if not HOME_SET.search(f.new_text())], ""
+
 ITEMS = [
     dict(id="CL-01", kind="auto", title="No hard-coded credentials", fn=cl01,
          trigger="an added line assigns a 16+ character literal to a key / secret / token / password name",
@@ -571,4 +585,9 @@ ITEMS = [
          check="backend/app/version_stamp.txt is in the same commit with the same version",
          incidents="DEF-112 (27 Nov: v12.0.22 cut with the old desktop/deploy-scalp.command; builds reported "
                    "v12.0.21 to the backend, every install showed a false update banner)"),
+    dict(id="CL-22", kind="auto", title="Apply scripts run their tests with a throw-away HOME", fn=cl22,
+         trigger="an apply_*.py at the repo root that runs test suites is added or changed",
+         check="the tests' env points HOME at a temp folder (env[\"HOME\"] = tempfile.mkdtemp(…)), never the caller's",
+         incidents="DEF-113 (27 Nov: apply_fleet_monitor.py ran test_tg_personal_alerts.py with the real HOME; "
+                   "~/.scalp-app/zerodha/credentials.json became api_key 'k1' and the next Kite login failed)"),
 ]

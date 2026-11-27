@@ -1,6 +1,8 @@
 # backend/app/config/zerodha_credentials_store.py
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -58,7 +60,21 @@ def save_credentials(api_key: str, api_secret: str):
         "updated_at": datetime.utcnow().isoformat(),
     }
 
-    CREDENTIALS_PATH.write_text(json.dumps(data, indent=2))
+    # ── TEST_HOME_GUARD_20261127 ── (DEF-113) all or nothing: a crash or power cut
+    # mid-save leaves the old file, never a half-written one.
+    fd, tmp = tempfile.mkstemp(dir=str(CREDENTIALS_PATH.parent), prefix=CREDENTIALS_PATH.name + ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, str(CREDENTIALS_PATH))
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 # ==================================================
