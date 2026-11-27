@@ -229,10 +229,11 @@ admin.post("/login", data={"username": "anbu", "password": "admin-pass-1234", "c
 fleet = viewer.get("/")
 check("TC-MONSRV-0019 Fleet page: the friend's install with its LIVE MTM; device text is escaped",
       fleet.status_code == 200 and "Ravi &lt;b&gt;" in fleet.text and "+₹1,500" in fleet.text
-      and "<b>" not in fleet.text.split("<main>")[1].replace("<b>Fleet Monitor</b>", ""), fleet.text[:400])
+      and "Ravi <b>" not in fleet.text, fleet.text[:400])
 al = viewer.get("/alerts?days=1")
 check("TC-MONSRV-0020 Alerts page lists criticals with the message escaped (no live <script>)",
-      al.status_code == 200 and "&lt;script&gt;" in al.text and "<script>" not in al.text)
+      al.status_code == 200 and "&lt;script&gt;" in al.text and "<script>x" not in al.text
+      and al.text.count("<script") == 1 and '<script src="/static/app.js" defer></script>' in al.text)
 with store.conn() as c:
     eid = c.execute("SELECT id FROM events WHERE kind='CRITICAL' AND device_key='KEY-RAVI' ORDER BY id LIMIT 1").fetchone()[0]
 csrf = auth.session(viewer.cookies.get(auth.COOKIE))["csrf"]
@@ -256,8 +257,10 @@ tr = viewer.get(f"/trades?from={today}&to={today}")
 check("TC-MONSRV-0023 Trades page + CSV show the legs; a cell starting with '=' is neutralised in the CSV",
       tr.status_code == 200 and "NIFTY26D0224000CE" in tr.text and "'=HYPERLINK(1)" in csv_txt, csv_txt[:300])
 hdr = viewer.get("/").headers
-check("TC-MONSRV-0024 security headers: strict CSP (no scripts), nosniff, no-store, DENY frames; no /docs",
-      "default-src 'none'" in hdr.get("content-security-policy", "") and hdr.get("x-content-type-options") == "nosniff"
+check("TC-MONSRV-0024 security headers: strict CSP (only the portal's own script, no inline), nosniff, no-store, DENY "
+      "frames; no /docs",
+      "default-src 'none'" in hdr.get("content-security-policy", "") and "script-src 'self'" in hdr.get("content-security-policy", "")
+      and "unsafe-inline" not in hdr.get("content-security-policy", "") and hdr.get("x-content-type-options") == "nosniff"
       and hdr.get("cache-control") == "no-store" and hdr.get("x-frame-options") == "DENY"
       and api.get("/docs").status_code == 404)
 for _ in range(server.INGEST_PER_MIN + 1):
@@ -460,12 +463,12 @@ acs = auth.session(ad.cookies.get(auth.COOKIE))["csrf"]
 r_v = vw.post("/devices/KEY-ANBU/relay", data={"csrf": vcs, "relay": "0"})
 r_n = ad.post("/devices/KEY-ANBU/relay", data={"relay": "0"})
 r_a = ad.post("/devices/KEY-ANBU/relay", data={"csrf": acs, "relay": "0"})
-card = ad.get("/").text
-vcard = vw.get("/").text
-check("TC-MONSRV-0044 the Fleet-card switch: viewer 403, no CSRF 403, admin turns it off; every viewer sees "
-      "'not sent to Telegram'; only admins get the button",
+card = ad.get("/machine/KEY-ANBU").text      # ── FLEET_PORTAL_REDESIGN_20261127 ── the switches live on the machine page
+vcard = vw.get("/machine/KEY-ANBU").text
+check("TC-MONSRV-0044 the machine's channel switch: viewer 403, no CSRF 403, admin turns it off; every viewer sees "
+      "'not sent to Telegram' (machine page and its Fleet row); only admins get the button",
       r_v.status_code == 403 and r_n.status_code == 403 and r_a.status_code == 303
-      and store.device("KEY-ANBU")["relay"] == 0 and "not sent to Telegram" in vcard
+      and store.device("KEY-ANBU")["relay"] == 0 and "not sent to Telegram" in vcard and "not sent to Telegram" in vw.get("/").text
       and ">Send to Telegram<" in card and "Send to Telegram<" not in vcard and "Stop sending to" not in vcard, (r_v.status_code, r_n.status_code, r_a.status_code))
 old_db = TMP / "old.db"
 with sqlite3.connect(old_db) as c:
@@ -493,7 +496,7 @@ check("TC-MONSRV-0046 Online follows the machine's check-in cadence: market clos
       st == ["Online", "Late", "Late", "bad"], st)
 
 (TMP / "secrets" / "monitor.json").write_text('{"telegram_targets": [{"chat_id": "-100", "name": "Market Makers channel"}]}')
-named = ad.get("/").text
+named = ad.get("/machine/KEY-ANBU").text + ad.get("/machine/KEY-RAVI").text
 (TMP / "secrets" / "monitor.json").unlink()
 check("TC-MONSRV-0057 the switch names where it sends: 'sent to / not sent to Market Makers channel', button "
       "'Send to / Stop sending to Market Makers channel' (a portal switch, not the app's Telegram setting)",
@@ -520,12 +523,13 @@ snap2["legs"] = [{"id": "LIVE:carry", "strategy_id": "VET_V1", "symbol": "NIFTY2
                   "entry": 198.75, "exit": 276.8, "entry_ts": y_entry, "exit_ts": now - 60, "open": False, "net": -5153,
                   "reason": "FLIP"}]
 ingest("KEY-RAVI", "HW-RAVI", snapshot=snap2)
-cardp = ad.get("/").text
-check("TC-MONSRV-0047 the Fleet card leads with MTM like the app (+₹6,240 = realised + open), then Charges and "
-      "'Booked after charges' (−₹12,986); no 'Net today'",
-      "<small>MTM today</small><span class=\"pos\">+₹6,240</span>" in cardp and "−₹444" in cardp
-      and "<small>Booked after charges</small><span class=\"neg\">−₹12,986</span>" in cardp and "Net today" not in cardp
-      and "Fleet MTM today (LIVE)" in cardp, cardp[cardp.find("MTM today") - 50: cardp.find("MTM today") + 400])
+cardp = ad.get("/machine/KEY-RAVI").text
+fl47 = ad.get("/").text
+check("TC-MONSRV-0047 the machine leads with MTM like the app (+₹6,240 = realised + open), then 'Booked after "
+      "charges' (−₹12,986) and Charges; no 'Net today'; the Fleet row shows the same MTM",
+      '<small>MTM today</small><div class="v"><span class="pos">+₹6,240</span>' in cardp and "−₹444" in cardp
+      and '<small>Booked after charges</small><div class="v"><span class="neg">−₹12,986</span>' in cardp and "Net today" not in cardp
+      and "Fleet MTM today · LIVE" in fl47 and "+₹6,240" in fl47, cardp[cardp.find("MTM today") - 50: cardp.find("MTM today") + 400])
 trp = ad.get(f"/trades?from={today}&to={today}&device=KEY-RAVI").text
 yday = pages.datetime.fromtimestamp(y_entry, store.IST).strftime("%d %b")
 check("TC-MONSRV-0048 a leg carried from yesterday shows its entry DATE in Trades (row dated by its exit)",
@@ -942,6 +946,105 @@ check("TC-MONSRV-0074 Day summary page: booked (realised) P&L first with charges
       "their P&L shown apart, not added to the day's result",
       "Fleet booked (LIVE)" in dayp and "<small>Booked (realised)</small>" in dayp and "<small>Net after charges</small>" in dayp
       and "Open P&amp;L (not booked)" in dayp and "Open legs are not counted in it" in dayp, dayp[:300])
+
+# ── live 5-s numbers + the redesigned portal (FLEET_LIVE_5S_20261127 / FLEET_PORTAL_REDESIGN_20261127, TD-127) ──
+with sqlite3.connect(TMP / "licenses.db") as c:
+    c.execute("INSERT OR REPLACE INTO licenses VALUES ('KEY-LIVE', 'Livia', 'STANDARD', 'HW-LIVE', 0)")
+    c.execute("INSERT OR REPLACE INTO licenses VALUES ('KEY-DOWN', 'Downey', 'STANDARD', 'HW-DOWN', 0)")
+t0 = time.time()
+lsnap = {"day": today, "market_open": True,
+         "totals": {"gross": 2500, "realised": 2000, "unrealised": 500, "charges": 100, "open_legs": 2, "closed_trades": 3},
+         "rows": [{"id": "IC_V2", "codename": "Icarus", "state": "OPEN", "open_legs": 2, "closed_trades": 2, "gross": 3100,
+                   "realised": 2600, "unrealised": 500},
+                  {"id": "VET_V1", "codename": "Velvet", "state": "FLAT", "open_legs": 0, "closed_trades": 1, "gross": -600,
+                   "realised": -600},
+                  {"id": "TMA_V2", "codename": "Timberwolf", "state": "IDLE"}],
+         "legs": [{"id": "L:1", "strategy_id": "IC_V2", "symbol": "NIFTY OPEN CE", "short": True, "qty": 75, "entry": 50,
+                   "entry_ts": t0 - 600, "open": True},
+                  {"id": "L:2", "strategy_id": "IC_V2", "symbol": "NIFTY STALE PE", "short": True, "qty": 75, "entry": 40,
+                   "entry_ts": t0 - 600, "open": True}],
+         "broker": {"logged_in": True, "trade_ready": True, "checked_at": t0}}
+ingest("KEY-LIVE", "HW-LIVE", [{"seq": 1, "ts": t0, "kind": "CRITICAL", "data": {"codename": "Icarus", "message": "live boom"}}],
+       snapshot=lsnap)
+lite = {k: v for k, v in lsnap.items() if k != "legs"}
+lite["legs_same"] = True
+lite["totals"] = dict(lsnap["totals"], gross=2600)
+ingest("KEY-LIVE", "HW-LIVE", snapshot=lite)
+legs_kept = [lg["leg_id"] for lg in store.open_legs("KEY-LIVE")]
+ser = store.mtm_series(today).get("KEY-LIVE") or []
+with store.conn() as c:
+    c.execute("INSERT INTO mtm_points VALUES ('KEY-LIVE', '2020-01-01', 600, 1.0)")
+    c.execute("UPDATE legs SET updated_at = updated_at - 1000 WHERE device_key='KEY-LIVE' AND leg_id='L:2'")
+store.housekeeping()
+with store.conn() as c:
+    old_pts = c.execute("SELECT COUNT(*) FROM mtm_points WHERE day='2020-01-01'").fetchone()[0]
+legs_fresh = [lg["leg_id"] for lg in store.open_legs("KEY-LIVE")]
+check("TC-MONSRV-0083 a 5-s snapshot without its leg list (legs_same) keeps the stored legs; MTM is kept once a "
+      "minute per machine (the day line), old days cleared; an open leg the app stopped sending is not shown as open",
+      sorted(legs_kept) == ["L:1", "L:2"] and ser and ser[-1][1] == 2600.0 and len(ser) <= 2 and old_pts == 0
+      and legs_fresh == ["L:1"], (legs_kept, ser, old_pts, legs_fresh))
+
+ingest("KEY-DOWN", "HW-DOWN", snapshot={"day": today, "market_open": True, "totals": {"gross": 100}, "rows": [],
+                                        "broker": {"logged_in": False, "trade_ready": False, "checked_at": t0}})
+with store.conn() as c:
+    c.execute("UPDATE devices SET last_seen=? WHERE key='KEY-DOWN'", (t0 - 1200,))
+    eid_live = c.execute("SELECT id FROM events WHERE device_key='KEY-LIVE' AND kind='CRITICAL'").fetchone()[0]
+fp = vw.get("/").text
+pr = vw.get("/", headers={"X-Partial": "1"})
+js = httpx.get(f"{BASE}/static/app.js")
+tr_full = vw.get(f"/trades?from={today}&to={today}").text
+tl_old = vw.get("/timeline?day=2020-01-01").text
+check("TC-MONSRV-0084 live pages refresh themselves: <main data-live> + the portal's script; the refresh gets <main> only "
+      "(no page shell) with the alert count for the menu; app.js re-fetches every 3 s with X-Partial and not while you type; "
+      "Trades and a past Timeline day stay still",
+      "<main data-live>" in fp and 'id="live"' in fp and pr.status_code == 200 and "<html" not in pr.text
+      and 'id="nbv"' in pr.text and 'class="nb"' in fp and js.headers.get("content-type", "").startswith("text/javascript")
+      and "X-Partial" in js.text and "3000" in js.text and "typing()" in js.text and "/login" in js.text
+      and "<main data-live>" not in tr_full and "<main data-live>" not in tl_old, pr.text[:200])
+
+vcs3 = auth.session(vw.cookies.get(auth.COOKIE))["csrf"]
+att_before = f'action="/alerts/{eid_live}/ack"' in fp
+ack_r = vw.post(f"/alerts/{eid_live}/ack", data={"csrf": vcs3, "note": ""}, headers={"referer": f"{BASE}/"})
+fp2 = vw.get("/").text
+empty = pages.fleet_page({"role": "viewer", "csrf": "x", "username": "u"}, [], {}, {}, t0, today)
+check("TC-MONSRV-0085 Needs attention: an unacknowledged critical with Acknowledge (CSRF form) — acking from the Fleet "
+      "page returns to the Fleet page and the item goes; an offline machine and a Kite not logged in are listed with "
+      "Open (its machine page); nothing to show → no strip",
+      "NEEDS ATTENTION" in fp and att_before and "live boom" in fp and ack_r.status_code == 303 and ack_r.headers["location"] == "/"
+      and f'action="/alerts/{eid_live}/ack"' not in fp2 and "Downey</b> — offline" in fp and 'href="/machine/KEY-DOWN"' in fp
+      and "Kite not logged in; it cannot take trades" in fp and "NEEDS ATTENTION" not in empty, (att_before, ack_r.headers))
+
+U = {"role": "viewer", "csrf": "x", "username": "u"}
+dv_ok = {"key": "A", "label": "Alpha", "enabled": 1, "relay": 1, "last_seen": t0}
+dv_bad = {"key": "B", "label": "Bravo", "enabled": 1, "relay": 1, "last_seen": t0 - 2000}
+mk = lambda g: {"day": today, "ts": t0, "market_open": 1, "data": {"totals": {"gross": g}, "rows": [  # noqa: E731
+    {"codename": "Icarus", "state": "FLAT", "gross": g, "closed_trades": 1}]}}
+order_page = pages.fleet_page(U, [dv_ok, dv_bad], {"A": mk(9000), "B": mk(100)}, {}, t0, today)
+mx = order_page[order_page.index('class="mx"'):]
+check("TC-MONSRV-0086 machines × strategies: a column per strategy traded today (IDLE left out), each cell its MTM in a "
+      "profit/loss shade with ● while in a trade and its trades; a Fleet row per strategy; machines with a problem "
+      "first; on a phone the same as machine rows with strategy chips",
+      "<th>Icarus</th>" in fp and "<th>Velvet</th>" in fp and "<th>Timberwolf</th>" not in fp
+      and '<td class="h-p3">+₹3,100 <span class="live-dot">●</span>' in fp and '<td class="h-n1">−₹600<small>1 tr</small>' in fp
+      and "mach.</small>" in fp and 'class="mlist"' in fp and 'class="mrow"' in fp
+      and mx.index("Bravo") < mx.index("Alpha"), fp[fp.find('class="mx"'):fp.find('class="mx"') + 300])
+
+mp = vw.get("/machine/KEY-LIVE").text
+mpa = ad.get("/machine/KEY-LIVE").text
+anon2 = httpx.Client(base_url=BASE, timeout=10, follow_redirects=False)
+check("TC-MONSRV-0087 machine page: its numbers and day line, strategies, open positions (not the stale leg), today's "
+      "events; admins get Pause / channel / Remove, viewers don't; an unknown machine is 404; it needs a login",
+      "Livia" in mp and "STRATEGIES TODAY" in mp and "Icarus" in mp and "NIFTY OPEN CE" in mp and "NIFTY STALE PE" not in mp
+      and "live boom" in mp and "<svg" in mp and "Pause sending" not in mp and "Remove from fleet" not in mp
+      and "Pause sending" in mpa and "Remove from fleet" in mpa and "Stop sending to" in mpa
+      and vw.get("/machine/NOPE").status_code == 404 and anon2.get("/machine/KEY-LIVE").status_code == 303, mp[:300])
+
+pages_all = [vw.get(u).text for u in ("/", "/machine/KEY-LIVE", "/alerts?days=7", f"/trades?from={today}&to={today}",
+                                      f"/timeline?day={today}", "/day")] + [anon2.get("/login").text]
+check("TC-MONSRV-0088 no inline style attribute and no inline script on any page (the CSP would drop them): colours "
+      "are classes, the only script is /static/app.js",
+      all(' style="' not in t and "<script>" not in t for t in pages_all),
+      [i for i, t in enumerate(pages_all) if ' style="' in t or "<script>" in t])
 
 uv.should_exit = True
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({OK[0]}/{OK[0] + len(FAILS)})")

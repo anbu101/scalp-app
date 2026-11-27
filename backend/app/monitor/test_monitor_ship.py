@@ -224,11 +224,12 @@ w = sh.step()
 check("TC-MON-0020 first step sends the queued events + a snapshot; the acked rows are marked sent",
       len(sent) == 1 and len(sent[0]["events"]) == 2 and "snapshot" in sent[0] and sent[0]["epoch"]
       and outbox.unsent_count() == 0 and w == shipper.TICK_S, (sent, w))
-clock[0] += 5
+clock[0] += 2
 check("TC-MON-0021 nothing queued and no snapshot due: no POST at all", sh.step() == shipper.TICK_S and len(sent) == 1)
-clock[0] += 56
+clock[0] += 3
 sh.step()
-check("TC-MON-0022 market open: the snapshot (heartbeat) goes every 60 s", len(sent) == 2 and "snapshot" in sent[1])
+check("TC-MON-0022 market open: the snapshot (heartbeat) goes every 5 s, even with no events (FLEET_LIVE_5S_20261127)",
+      len(sent) == 2 and "snapshot" in sent[1] and sent[1]["events"] == [])
 outbox.enqueue("CRITICAL", {"a": 3})
 replies[:] = [("raise",), ("raise",), ("code", 500), ("code", 401)]
 w1 = sh.step()
@@ -323,9 +324,58 @@ def _next_after_snapshot(t):
 got = [_next_after_snapshot(_at(2026, 11, 27, 9, 12)), _next_after_snapshot(_at(2026, 11, 27, 15, 40)),
        _next_after_snapshot(_at(2026, 11, 27, 8, 0)), _next_after_snapshot(_at(2026, 11, 27, 15, 50)),
        _next_after_snapshot(_at(2026, 11, 28, 10, 0))]
-check("TC-MON-0028 a snapshot that says 'market closed' is followed 60 s later inside 09:10–15:45 IST on a weekday "
-      "(the open is never 5 min late); 300 s before 09:10, after 15:45 and on a Saturday (TD-119)",
-      got == [60, 60, 300, 300, 300], got)
+check("TC-MON-0028 a snapshot that says 'market closed' is followed 5 s later inside 09:10–15:45 IST on a weekday "
+      "(FLEET_LIVE_5S_20261127; the open is never late); 300 s before 09:10, after 15:45 and on a Saturday (TD-119)",
+      got == [5, 5, 300, 300, 300], got)
+
+# ── FLEET_LIVE_5S_20261127 ── the leg list goes only when it changed, or 60 s after the last one
+LEG = {"id": "LIVE:1", "strategy_id": "IC_V2", "symbol": "NIFTY", "short": True, "qty": 75, "entry": 20.0,
+       "entry_ts": 1, "open": True, "gross": 100.0}
+_legs = {"v": [dict(LEG)]}
+_sent = []
+_code = {"v": 200}
+_clock = {"t": _at(2026, 11, 27, 11, 0)}
+
+
+def _post(b):
+    _sent.append(b.get("snapshot"))
+    return R(_code["v"], {"ok": True, "acked": None, "enabled": True})
+
+
+fresh("legs")
+sh3 = shipper.Shipper(clock=lambda: _clock["t"], poster=_post,
+                      snap=lambda: {"market_open": True, "totals": {"gross": 1}, "legs": [dict(x) for x in _legs["v"]]},
+                      ident=lambda: dict(ident))
+
+
+def _tick(dt=5):
+    _clock["t"] += dt
+    sh3.step()
+    return _sent[-1] if _sent else None
+
+
+first = _tick(0)
+same = _tick()
+_legs["v"][0]["gross"] = 250.0                 # an open leg's P&L moves every tick: not a change
+moved = _tick()
+_legs["v"][0].update(open=False, exit=10.0, exit_ts=99, net=700.0)   # the leg closed: a change
+closed = _tick()
+again = _tick()
+check("TC-MON-0031 snapshots every 5 s carry the leg list only when a leg opened, closed or changed (an open leg's "
+      "moving P&L is not a change); otherwise legs_same and no list",
+      "legs" in first and "legs" not in same and same.get("legs_same") is True and "legs" not in moved
+      and "legs" in closed and closed["legs"][0]["open"] is False and "legs" not in again,
+      [sorted(x) for x in (first, same, moved, closed, again)])
+late = _tick(61)
+_code["v"] = 500
+_legs["v"].append(dict(LEG, id="LIVE:2"))
+failed = _tick(sh3.backoff)
+_code["v"] = 200
+retry = _tick(sh3.backoff)
+check("TC-MON-0032 the full leg list is re-sent 60 s after the last one (a server that lost it heals within a "
+      "minute); a list the server did not take (HTTP 500) is sent again on the next try",
+      "legs" in late and "legs" in failed and "legs" in retry and len(retry["legs"]) == 2,
+      [("legs" in x) for x in (late, failed, retry)])
 
 import app.jobs.broker_session_watch as BSW   # noqa: E402
 BSW.LAST.clear()
@@ -369,5 +419,5 @@ check("TC-MON-0027 api_server starts the ship loop under _supervise, next to the
       "monitor_ship_loop()" in src and '"fleet monitor"' in src)
 
 shutil.rmtree(TMP, ignore_errors=True)
-print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({30 - len(FAILS)}/30)")
+print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({32 - len(FAILS)}/32)")
 sys.exit(1 if FAILS else 0)

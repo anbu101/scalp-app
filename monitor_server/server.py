@@ -61,8 +61,9 @@ app = FastAPI(title="Scalp Fleet Monitor", docs_url=None, redoc_url=None, openap
 _ingest_hits: dict = {}
 
 SEC_HEADERS = {
-    "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self';"
-                               " frame-ancestors 'none'; base-uri 'none'",
+    # ── FLEET_PORTAL_REDESIGN_20261127 ── script-src/connect-src 'self': the live refresh (/static/app.js, no inline script)
+    "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self';"
+                               " form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
@@ -153,6 +154,36 @@ def css():
     return Response(pages.CSS, media_type="text/css", headers={"Cache-Control": "max-age=3600"})
 
 
+@app.get("/favicon.ico")   # ── FLEET_PORTAL_REDESIGN_20261127 ── browsers ask; answer quietly
+def favicon():
+    return Response(status_code=204)
+
+
+@app.get("/static/app.js")   # ── FLEET_PORTAL_REDESIGN_20261127 ── the live refresh
+def js():
+    return Response(pages.APP_JS, media_type="text/javascript", headers={"Cache-Control": "max-age=3600"})
+
+
+def _partial(request: Request) -> bool:
+    """── FLEET_PORTAL_REDESIGN_20261127 ── the page's own live refresh asks for <main> only."""
+    return request.headers.get("x-partial") == "1"
+
+
+def _badge(now: Optional[float] = None) -> int:
+    """Unacknowledged criticals / rejections of the last 7 days (the count on Alerts in the menu)."""
+    now = time.time() if now is None else now
+    return sum(store.unacked_counts(now - 7 * 86400).values())
+
+
+def _back(request: Request, default: str = "/") -> str:
+    """Where a form goes back to: the page it was sent from, when that is a portal page."""
+    from urllib.parse import urlsplit
+    ref = urlsplit(request.headers.get("referer") or "")
+    if ref.path == "/" or ref.path == "/alerts" or ref.path.startswith("/machine/"):
+        return ref.path + (f"?{ref.query}" if ref.query else "")
+    return default
+
+
 # ── portal ───────────────────────────────────────────────────────────
 def _user(request: Request) -> Optional[dict]:
     return auth.session(request.cookies.get(auth.COOKIE))
@@ -211,9 +242,30 @@ def fleet(request: Request):
     if not u:
         return _to_login()
     now = time.time()
+    today = pages.now_ist_day(now)
     others = [d for d in store.devices(include_all=True) if d.get("membership") != "in"] if u["role"] == "admin" else []
+    attention = store.alerts(None, True, now - 7 * 86400, limit=50)   # ── FLEET_PORTAL_REDESIGN_20261127 ── unacked, newest first
     return pages.fleet_page(u, store.devices(), store.snapshots(), store.unacked_counts(now - 7 * 86400),
-                            now, pages.now_ist_day(now), relay.target_label(), others)   # ── FLEET_MEMBERSHIP_20261127 ── others
+                            now, today, relay.target_label(), others,   # ── FLEET_MEMBERSHIP_20261127 ── others
+                            attention=attention, series=store.mtm_series(today),
+                            feed=store.events(today, None, store.KNOWN_KINDS, limit=12), partial=_partial(request))
+
+
+@app.get("/machine/{key}", response_class=HTMLResponse)   # ── FLEET_PORTAL_REDESIGN_20261127 ── one machine
+def machine(request: Request, key: str):
+    u = _user(request)
+    if not u:
+        return _to_login()
+    d = store.device(key[:64])
+    if not d or d.get("membership", "in") != "in" or not d.get("last_seen"):
+        return HTMLResponse(pages.layout("Not found", '<div class="box"><p class="empty">No such machine in the fleet. '
+                                         '<a href="/">Back to the fleet</a></p></div>', u, "/"), status_code=404)
+    now = time.time()
+    today = pages.now_ist_day(now)
+    return pages.machine_page(u, d, store.snapshots().get(d["key"]), now, today, relay.target_label(),
+                              store.alerts(d["key"], False, now - 86400, limit=100), store.open_legs(d["key"]),
+                              store.events(today, d["key"], store.KNOWN_KINDS, limit=40),
+                              store.mtm_series(today).get(d["key"], []), badge=_badge(now), partial=_partial(request))
 
 
 @app.get("/alerts", response_class=HTMLResponse)
@@ -225,7 +277,8 @@ def alerts(request: Request, device: str = "", unacked: str = "", days: int = 1,
     since = time.time() - days * 86400
     rows = store.alerts(device or None, unacked == "1", since, strategy=strategy[:40] or None)   # ── ALERT_STRATEGY_INFER_20261127 ──
     names = sorted({r["codename"] for r in store.alerts(device or None, False, since, limit=2000) if r.get("codename")})
-    return pages.alerts_page(u, store.devices(), rows, device, unacked == "1", days, strategy[:40], names)
+    return pages.alerts_page(u, store.devices(), rows, device, unacked == "1", days, strategy[:40], names,
+                             badge=_badge(), partial=_partial(request))
 
 
 @app.post("/alerts/{event_id}/ack")
@@ -238,10 +291,7 @@ async def ack(request: Request, event_id: int):
         return HTMLResponse("Form expired — go back and reload.", status_code=403)
     if store.ack(event_id, u["username"], f.get("note", "")):
         store.audit(u["username"], "ack", str(event_id), client_ip(request))
-    from urllib.parse import urlsplit
-    ref = urlsplit(request.headers.get("referer") or "")
-    back = ref.path + (f"?{ref.query}" if ref.query else "") if ref.path == "/alerts" else "/alerts"
-    return RedirectResponse(back, status_code=303)
+    return RedirectResponse(_back(request, "/alerts"), status_code=303)   # ── FLEET_PORTAL_REDESIGN_20261127 ── Fleet / machine too
 
 
 def _day(s: str, default: str) -> str:
@@ -401,7 +451,7 @@ def trades(request: Request):
         return _to_login()
     f = _trade_filters(request)
     legs = store.legs(f["from"], f["to"], f["device"] or None, f["strategy"] or None)
-    return pages.trades_page(u, store.devices(), legs, f)
+    return pages.trades_page(u, store.devices(), legs, f, badge=_badge())
 
 
 @app.get("/trades.csv")
@@ -432,9 +482,11 @@ def timeline(request: Request, day: str = "", device: str = ""):
     u = _user(request)
     if not u:
         return _to_login()
-    day = _day(day, pages.now_ist_day())
+    today = pages.now_ist_day()
+    day = _day(day, today)
     rows = store.events(day, device[:64] or None, store.KNOWN_KINDS)
-    return pages.timeline_page(u, store.devices(), rows, day, device)
+    return pages.timeline_page(u, store.devices(), rows, day, device, badge=_badge(), partial=_partial(request),
+                               live=day == today)
 
 
 @app.get("/day", response_class=HTMLResponse)
@@ -444,7 +496,8 @@ def day_summary(request: Request, day: str = ""):
         return _to_login()
     today = pages.now_ist_day()
     day = _day(day, today)
-    return pages.day_page(u, store.devices(), store.day_summaries(day), store.event_counts(day), day)
+    return pages.day_page(u, store.devices(), store.day_summaries(day), store.event_counts(day), day,
+                          badge=_badge(), partial=_partial(request), live=day == today)
 
 
 @app.post("/devices/{key}/membership")   # ── FLEET_MEMBERSHIP_20261127 ──
@@ -473,7 +526,7 @@ async def device_relay(request: Request, key: str):
         on = f.get("relay") == "1"
         store.set_relay(key, on)
         store.audit(u["username"], "relay_on" if on else "relay_off", key, client_ip(request))
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse(_back(request), status_code=303)
 
 
 @app.post("/devices/{key}/enabled")
@@ -488,7 +541,7 @@ async def device_enabled(request: Request, key: str):
         on = f.get("enabled") == "1"
         store.set_enabled(key, on)
         store.audit(u["username"], "resume" if on else "pause", key, client_ip(request))
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse(_back(request), status_code=303)
 
 
 if __name__ == "__main__":

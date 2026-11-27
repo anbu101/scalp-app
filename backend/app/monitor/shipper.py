@@ -11,7 +11,9 @@
 # CADENCE. Every TICK_S: unsent events, in seq order, up to BATCH per POST.
 # The snapshot rides along every SNAP_OPEN_S while the market is open or the
 # clock is in 09:10–15:45 IST on a weekday, and every SNAP_CLOSED_S otherwise; it doubles as the heartbeat the portal's
-# online/offline badge reads. The server acks the highest seq it stored; only
+# online/offline badge reads. ── FLEET_LIVE_5S_20261127 ── SNAP_OPEN_S is 5 s (every tick: the portal is as fresh
+# as the app's own Dashboard, which polls the same numbers every 5 s). The leg list goes only when a leg opened,
+# closed or changed, or LEGS_FULL_S after the last one; otherwise "legs_same": true (the server keeps its legs). The server acks the highest seq it stored; only
 # those rows are marked sent, so a lost reply resends (the server de-dups).
 #
 # FAILURE. Never raises into the app. Transport errors back off 5 s → 5 min;
@@ -34,7 +36,8 @@ MONITOR_HOST = "139-59-8-202.sslip.io"
 INGEST_PATH = "/api/v1/ingest"
 TICK_S = 5
 BATCH = 200
-SNAP_OPEN_S = 60
+SNAP_OPEN_S = 5            # ── FLEET_LIVE_5S_20261127 ── was 60
+LEGS_FULL_S = 60
 SNAP_CLOSED_S = 300
 # ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) every minute from 09:10 to 15:45 IST on weekdays, whatever
 # the last snapshot said: the 09:1x pre-open snapshot said "closed", so the next
@@ -91,6 +94,20 @@ def post(body: Dict[str, Any]):
         return c.post(url, json=body, headers={"Host": host}, extensions={"sni_hostname": host})
 
 
+def _legs_hash(legs: Any) -> Optional[str]:
+    """── FLEET_LIVE_5S_20261127 ── what identifies the leg list for the server: each leg's id, open/closed, qty,
+    prices, times, reason and (closed) net. An open leg's live P&L is left out (it moves every tick; the portal
+    shows open P&L from the totals and rows, not from legs). None = no list to compare."""
+    if not isinstance(legs, list):
+        return None
+    import hashlib
+    import json
+    key = [(lg.get("id"), bool(lg.get("open")), lg.get("qty"), lg.get("entry"), lg.get("exit"), lg.get("entry_ts"),
+            lg.get("exit_ts"), lg.get("reason"), None if lg.get("open") else lg.get("net"))
+           for lg in legs if isinstance(lg, dict)]
+    return hashlib.sha1(json.dumps(key, default=str).encode()).hexdigest()
+
+
 class Shipper:
     """One instance per process. step() does one cycle synchronously and
     returns the seconds to wait before the next; tests drive it directly."""
@@ -102,6 +119,8 @@ class Shipper:
         self.ident = ident or _identity
         self.next_snap = 0.0
         self.market_open = False
+        self.legs_hash: Optional[str] = None      # ── FLEET_LIVE_5S_20261127 ── last leg list the server stored
+        self.legs_sent_at = 0.0
         self.backoff = TICK_S
         self.next_prune = 0.0
         self.state: Optional[str] = None
@@ -129,8 +148,16 @@ class Shipper:
             return TICK_S
         body: Dict[str, Any] = {**ident, "epoch": outbox.epoch(), "events": events,
                                 "dropped": outbox.dropped_total(), "client_ts": now}
+        legs_hash = None
         if snap_due:
-            body["snapshot"] = self.snap()
+            snap = self.snap()
+            legs_hash = _legs_hash(snap.get("legs")) if isinstance(snap, dict) else None
+            if (legs_hash is not None and legs_hash == self.legs_hash
+                    and now - self.legs_sent_at < LEGS_FULL_S):   # ── FLEET_LIVE_5S_20261127 ──
+                snap = {k: v for k, v in snap.items() if k != "legs"}
+                snap["legs_same"] = True
+                legs_hash = None
+            body["snapshot"] = snap
         try:
             r = self.poster(body)
             code = int(getattr(r, "status_code", 0))
@@ -150,6 +177,8 @@ class Shipper:
         acked = data.get("acked")
         if acked is not None:
             outbox.mark_sent(int(acked))
+        if legs_hash is not None:          # ── FLEET_LIVE_5S_20261127 ── the server has this leg list now
+            self.legs_hash, self.legs_sent_at = legs_hash, now
         if snap_due:
             s = body.get("snapshot") or {}
             self.market_open = bool(s.get("market_open"))

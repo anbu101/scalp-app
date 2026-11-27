@@ -1,27 +1,58 @@
 """
 monitor_server/pages.py — ── FLEET_MONITOR_20261127 ── (TD-110)
 
-Server-rendered HTML for the portal. No JavaScript, no external assets
-(the CSP forbids both). Every value from a device goes through e().
+Server-rendered HTML for the portal. Every value from a device goes through e().
+
+── FLEET_PORTAL_REDESIGN_20261127 ── (TD-127) the "Midnight" design Anbu chose (direction C + "Needs attention"):
+a dark command view — fleet boxes, a Needs-attention strip, a live machines × strategies grid and a live feed —
+the same look on every page, and a phone layout (machine rows with strategy chips, tabs at the bottom).
+
+LIVE. A page made with live=True carries data-live on <main>; /static/app.js (same origin, no inline script:
+CSP script-src 'self') re-fetches the page every 3 s with "X-Partial: 1" and swaps <main> when it changed —
+not while you are typing in it — and keeps "Live · updated N s ago" current. Without JavaScript every page still
+works (forms post, links navigate). No inline style attributes: the CSP (style-src 'self') would drop them, so the
+heat colours are fixed classes (h-p1…h-p4 / h-n1…h-n4).
 """
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime
 from html import escape
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlencode
 
 from store import IST
 
-ONLINE_S = 150          # market open: the app checks in every 60 s
+ONLINE_S = 150          # market open: the app checks in every 5 s (v12.0.30+) / 60 s (older); 150 s of slack
 ONLINE_CLOSED_S = 420   # ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-116) market closed: every 300 s (+ slack)
 LATE_S = 900
+LIVE_POLL_MS = 3000
 
 
 def e(v: Any) -> str:
     return escape("" if v is None else str(v), quote=True)
+
+
+def inr(v: Any, sign: bool = True) -> str:
+    """Indian grouping, as the app prints it: +₹1,28,667."""
+    try:
+        x = round(float(v))
+    except Exception:
+        return "—"
+    s = str(abs(x))
+    if len(s) > 3:
+        h, t = s[:-3], s[-3:]
+        g: List[str] = []
+        while len(h) > 2:
+            g.insert(0, h[-2:])
+            h = h[:-2]
+        if h:
+            g.insert(0, h)
+        s = ",".join(g) + "," + t
+    pre = ("+" if x > 0 else "−" if x < 0 else "") if sign else ("−" if x < 0 else "")
+    return f"{pre}₹{s}"
 
 
 def money(v: Any, sign: bool = True) -> str:
@@ -29,10 +60,8 @@ def money(v: Any, sign: bool = True) -> str:
         x = float(v)
     except Exception:
         return '<span class="muted">—</span>'
-    cls = "pos" if x > 0 else "neg" if x < 0 else ""
-    r = round(x)
-    pre = ("+" if r > 0 else "−" if r < 0 else "") if sign else ("−" if r < 0 else "")
-    return f'<span class="{cls}">{pre}₹{abs(r):,.0f}</span>'
+    cls = "pos" if round(x) > 0 else "neg" if round(x) < 0 else ""
+    return f'<span class="{cls}">{inr(x, sign)}</span>'
 
 
 def num(v: Any, nd: int = 2) -> str:
@@ -45,6 +74,13 @@ def num(v: Any, nd: int = 2) -> str:
 def hms(ts: Any) -> str:
     try:
         return datetime.fromtimestamp(float(ts), IST).strftime("%H:%M:%S")
+    except Exception:
+        return "—"
+
+
+def hm(ts: Any) -> str:
+    try:
+        return datetime.fromtimestamp(float(ts), IST).strftime("%H:%M")
     except Exception:
         return "—"
 
@@ -100,75 +136,186 @@ def _market_hours(now: float) -> bool:
     return d.weekday() < 5 and 9 * 60 + 15 <= m <= 15 * 60 + 30
 
 
+# ── look ─────────────────────────────────────────────────────────────
 CSS = """
-:root{--bg:#f6f7f9;--card:#fff;--fg:#14181f;--muted:#69727f;--line:#e3e6ea;--pos:#0a7a3d;--neg:#c0262d;
---ok:#0a7a3d;--warn:#a86200;--bad:#c0262d;--idle:#69727f;--accent:#2457c5;--chip:#eef1f5}
-@media (prefers-color-scheme:dark){:root{--bg:#0f1216;--card:#171b21;--fg:#e8ebef;--muted:#8d96a3;
---line:#2a3039;--pos:#3ccf7d;--neg:#ff6b6b;--ok:#3ccf7d;--warn:#f0a43a;--bad:#ff6b6b;--idle:#8d96a3;
---accent:#7aa2ff;--chip:#222831}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
-font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-header{display:flex;gap:16px;align-items:center;padding:10px 16px;background:var(--card);
-border-bottom:1px solid var(--line);flex-wrap:wrap}
-header b{font-size:15px}nav{display:flex;gap:14px;flex-wrap:wrap}nav a.on{font-weight:600;color:var(--fg)}
-header form{margin-left:auto}main{padding:16px;max-width:1400px;margin:0 auto}
-.kpis{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
-.kpi{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;min-width:150px}
-.kpi small{display:block;color:var(--muted)}.kpi span.v{font-size:20px;font-weight:600}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(360px,100%),1fr));gap:14px}
-.tw{overflow-x:auto}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;min-width:0}
-.card h3{margin:0;font-size:15px;display:flex;gap:8px;align-items:center}
-.meta{color:var(--muted);font-size:12px;margin:2px 0 10px}
-.nums{display:grid;grid-template-columns:repeat(3,1fr);gap:6px 10px;margin-bottom:10px}
-.nums small{display:block;color:var(--muted);font-size:11px}
-.badge{font-size:11px;font-weight:600;padding:1px 7px;border-radius:10px;color:#fff}
-.b-ok{background:var(--ok)}.b-warn{background:var(--warn)}.b-bad{background:var(--bad)}
-.b-idle,.b-paused{background:var(--idle)}
-.chip{font-size:11px;padding:1px 6px;border-radius:4px;background:var(--chip);color:var(--fg)}
-.k-CRITICAL,.k-ORDER_REJECTED{background:var(--bad);color:#fff}.k-SYSTEM_ALERT{background:var(--warn);color:#fff}
-table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);
-vertical-align:top}th{color:var(--muted);font-weight:500;font-size:12px;white-space:nowrap}
-td.r,th.r{text-align:right;font-variant-numeric:tabular-nums}
-.wrap{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow-x:auto}
-.pos{color:var(--pos)}.neg{color:var(--neg)}.muted{color:var(--muted)}
-.filters{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-bottom:12px}
-.filters label{font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:2px}
-input,select,button{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;
-background:var(--card);color:var(--fg)}button{cursor:pointer}button.p{background:var(--accent);color:#fff;border:0}
-.warnbox{border-left:3px solid var(--warn);padding:6px 10px;background:var(--chip);margin:8px 0;font-size:12px}
-.login{max-width:340px;margin:12vh auto;background:var(--card);border:1px solid var(--line);
-border-radius:10px;padding:22px}.login label{display:block;margin:10px 0 4px;color:var(--muted)}
-.login input{width:100%}.login button{width:100%;margin-top:16px}.err{color:var(--neg)}
-form.inline{display:flex;gap:6px}form.inline input{width:140px}
-.qr{background:#fff;padding:10px;border-radius:8px;width:210px;margin:8px 0}.qr svg{width:100%;height:auto;display:block}
-.setupkey{font-family:ui-monospace,Menlo,monospace;font-size:13px;word-break:break-all;background:var(--chip);
-padding:6px 8px;border-radius:6px}.login ol{padding-left:18px;color:var(--muted);font-size:13px;margin:6px 0}
-@media (max-width:600px){.grid{grid-template-columns:minmax(0,1fr)}.nums{grid-template-columns:repeat(2,1fr)}
-main{padding:12px}.kpi{min-width:0;flex:1 1 140px}th,td{padding:5px 6px}}
+:root{--bg:#0d0b1c;--top:#100d22;--panel:#16132b;--panel2:#1d1938;--line:#2b2552;--fg:#ecebff;--mut:#a9a4d6;
+--dim:#7f7ab3;--up:#5eead4;--dn:#fb7185;--amb:#fbbf24;--vio:#a78bfa;--acc:#8b5cf6}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Inter,sans-serif}
+a{color:var(--vio);text-decoration:none}a:hover{text-decoration:underline}
+b,strong{font-weight:650}
+.pos{color:var(--up)}.neg{color:var(--dn)}.muted{color:var(--dim)}.err{color:var(--dn)}
+.top{display:flex;align-items:center;gap:18px;padding:10px 22px;background:var(--top);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+.logo{display:flex;gap:9px;align-items:center;font-weight:700;color:var(--fg);white-space:nowrap}.logo:hover{text-decoration:none}
+.logo i{width:22px;height:22px;border-radius:7px;background:linear-gradient(135deg,#5eead4,#a78bfa);display:inline-block}
+.nav{display:flex;gap:2px}.nav a{color:var(--mut);padding:6px 11px;border-radius:8px;font-weight:500;white-space:nowrap}
+.nav a:hover{text-decoration:none;color:#fff}.nav a.on{background:var(--panel2);color:#fff}
+.nb{background:var(--dn);color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700;margin-left:5px}
+.live{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12px;white-space:nowrap}
+.live b{width:8px;height:8px;border-radius:50%;background:var(--up);box-shadow:0 0 0 4px rgba(94,234,212,.18)}
+.live.bad b{background:var(--amb);box-shadow:0 0 0 4px rgba(251,191,36,.2)}
+.who{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:13px}.top .who{margin-left:12px}
+.top:not(:has(.live)) .who{margin-left:auto}
+main{padding:18px 22px 30px;max-width:1460px;margin:0 auto}
+h1{font-size:20px;margin:0 0 14px;letter-spacing:-.3px}h2{font-size:16px;margin:0}
+button,.btn{font:inherit;font-size:12.5px;cursor:pointer;background:var(--panel2);color:#fff;border:1px solid var(--line);
+border-radius:8px;padding:6px 12px;white-space:nowrap;display:inline-block}
+.btn:hover{text-decoration:none;border-color:var(--acc)}button.p{background:var(--acc);border-color:var(--acc)}
+button.danger{background:#e11d48;border-color:#e11d48}
+input,select{font:inherit;color:var(--fg);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px}
+input:focus,select:focus{outline:2px solid rgba(139,92,246,.5);outline-offset:0}
+.k{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 15px;min-width:0}
+.k small{display:block;color:var(--dim);font-size:12px}.k .v{font-size:24px;font-weight:750;letter-spacing:-.5px;margin-top:2px;white-space:nowrap}
+.k .s{color:var(--dim);font-size:11.5px;margin-top:1px}
+.hero{display:grid;grid-template-columns:1.45fr 1fr 1fr 1fr 1fr;gap:12px}
+.k.big{display:flex;justify-content:space-between;align-items:flex-end;gap:10px}.k.big .v{font-size:31px}
+.k.big svg{flex:0 1 180px;max-width:46%}
+.kgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.att{margin:14px 0;background:rgba(251,113,133,.07);border:1px solid rgba(251,113,133,.35);border-radius:14px;padding:9px 14px}
+.att h4{font-size:11.5px;letter-spacing:1.2px;color:var(--dn);margin:2px 0 4px;display:flex;gap:8px;align-items:center}
+.att h4 span{background:var(--dn);color:#fff;border-radius:9px;padding:0 7px;letter-spacing:0}
+.att .row{display:flex;gap:10px;align-items:center;padding:7px 0;border-top:1px solid rgba(251,113,133,.15)}
+.att .row:first-of-type{border-top:0}.att .row .t{flex:1;min-width:0}.att .row time{color:var(--dim);font-size:12px}
+.att form{margin:0}.att .more{font-size:12.5px;padding:6px 0 2px}
+.side{display:grid;grid-template-columns:minmax(0,2.3fr) minmax(0,1fr);gap:14px;margin-top:14px}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:16px;min-width:0}
+.box>h4{font-size:11.5px;letter-spacing:1.2px;color:var(--dim);padding:12px 14px 6px;margin:0;display:flex;justify-content:space-between;gap:10px}
+.box>h4 a{letter-spacing:0;font-weight:500}
+.pad{padding:12px 14px}
+.mx{padding:0 8px 6px;overflow-x:auto}
+.mx table{border-collapse:separate;border-spacing:4px;width:100%}
+.mx th{color:var(--dim);font-weight:500;font-size:12px;text-align:right;padding:4px 9px;white-space:nowrap}.mx th:first-child{text-align:left}
+.mx td{padding:7px 9px;border-radius:9px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;vertical-align:middle}
+.mx td small{display:block;color:rgba(236,235,255,.62);font-size:11px;font-weight:400}
+.mx td.nm{text-align:left}.mx td.nm a{color:var(--fg);font-size:15px;font-weight:650}
+.mx td.nm small{color:var(--dim)}.mx td.tot{font-weight:750;font-size:15px}.mx td.dash{color:#3d3772}
+.mx tr.fleet td{color:var(--mut);border-top:1px solid var(--line)}.mx tr.fleet td b{font-weight:700}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px;background:var(--up)}
+.d-warn,.d-paused{background:var(--amb)}.d-bad{background:var(--dn)}.d-idle{background:var(--dim)}
+.live-dot{color:var(--up)}
+.h-p1{background:rgba(94,234,212,.12)}.h-p2{background:rgba(94,234,212,.24)}.h-p3{background:rgba(94,234,212,.38)}.h-p4{background:rgba(94,234,212,.55)}
+.h-n1{background:rgba(251,113,133,.12)}.h-n2{background:rgba(251,113,133,.24)}.h-n3{background:rgba(251,113,133,.38)}.h-n4{background:rgba(251,113,133,.55)}
+.h-0{background:var(--panel2)}
+.tag,.badge{font-size:10.5px;font-weight:650;border-radius:20px;padding:1px 8px;margin-left:6px;vertical-align:2px;white-space:nowrap;display:inline-block}
+.t-bad,.b-bad{background:rgba(251,113,133,.16);color:var(--dn)}.t-warn,.b-warn{background:rgba(251,191,36,.16);color:var(--amb)}
+.b-ok{background:rgba(94,234,212,.14);color:var(--up)}.b-idle,.b-paused{background:rgba(169,164,214,.14);color:var(--mut)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;color:var(--dim);font-size:11.5px;padding:2px 16px 12px}
+.legend span{display:inline-flex;gap:6px;align-items:center}.sw{width:14px;height:10px;border-radius:3px;display:inline-block}
+.feed{padding:0 14px 10px}.ev{display:flex;gap:9px;padding:8px 0;border-top:1px solid var(--line);font-size:13px;align-items:flex-start}
+.ev:first-child{border-top:0}.ev time{color:var(--dim);font-variant-numeric:tabular-nums;min-width:38px}.ev .i{width:18px;text-align:center}
+.ev .t{min-width:0;overflow-wrap:anywhere}
+.mlist{display:none}
+.mrow{padding:10px 12px;border-top:1px solid var(--line)}.mrow:first-child{border-top:0}
+.mrow .h{display:flex;align-items:center;gap:4px}.mrow .h a{color:var(--fg);font-weight:650;font-size:15px}
+.mrow .h .mt{margin-left:auto;font-weight:750;font-size:16px}
+.mrow .sub{display:flex;justify-content:space-between;align-items:center;gap:8px;color:var(--dim);font-size:11.5px;margin:2px 0 7px}
+.cells{display:flex;flex-wrap:wrap;gap:5px}.cells span{border-radius:8px;padding:4px 8px;font-size:12px;font-variant-numeric:tabular-nums}
+.cells small{color:rgba(236,235,255,.6);margin-left:4px}.cells .none{color:var(--dim);border:1px dashed var(--line)}
+.fleetrow{padding:10px 12px;border-top:1px solid var(--line);font-size:12px;color:var(--mut)}
+.tbl{overflow-x:auto}.tbl table{border-collapse:collapse;width:100%}
+.tbl th{color:var(--dim);font-weight:500;font-size:12px;text-align:left;padding:9px 12px;white-space:nowrap;border-bottom:1px solid var(--line)}
+.tbl td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}.tbl tr:last-child td{border-bottom:0}
+.tbl td.r,.tbl th.r{text-align:right;font-variant-numeric:tabular-nums}
+.chip{font-size:10.5px;font-weight:700;border-radius:6px;padding:2px 7px;background:var(--panel2);color:var(--mut);letter-spacing:.3px;white-space:nowrap}
+.k-CRITICAL,.k-ORDER_REJECTED{background:rgba(251,113,133,.18);color:var(--dn)}.k-SYSTEM_ALERT{background:rgba(251,191,36,.16);color:var(--amb)}
+.k-TRADE_ENTRY,.k-GROUP_ENTRY{background:rgba(139,92,246,.18);color:var(--vio)}.k-TRADE_EXIT,.k-GROUP_EXIT{background:rgba(94,234,212,.14);color:var(--up)}
+.filters{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px}
+.filters label{font-size:12px;color:var(--dim);display:flex;flex-direction:column;gap:3px}
+.filters .chk{flex-direction:row;align-items:center;gap:6px;padding-bottom:7px;color:var(--mut);font-size:13px}
+.filters a{padding-bottom:7px}
+form.inline{display:flex;gap:6px;margin:0}form.inline input{width:150px}
+.acked{color:var(--mut);font-size:12.5px}.acked b{color:var(--up);font-weight:600}
+.warnbox{border-left:3px solid var(--amb);padding:7px 11px;background:rgba(251,191,36,.07);border-radius:0 8px 8px 0;margin:8px 0;font-size:12.5px;color:var(--mut)}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px 16px;min-width:0}
+.card h3{margin:0;font-size:16px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.meta{color:var(--dim);font-size:12px;margin:3px 0 10px}
+.nums{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 10px;margin-bottom:10px}
+.nums small{display:block;color:var(--dim);font-size:11.5px}.nums div{font-weight:600}
+.mhead{display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:14px}.mhead h1{margin:0}
+.mhead .back{color:var(--dim);font-size:13px}
+.admin{display:flex;gap:8px;flex-wrap:wrap}.admin form{margin:0}
+.grid2{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:14px;margin-top:14px}
+.login{max-width:380px;margin:9vh auto;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:26px}
+.login h2{font-size:21px;margin:0 0 4px}.login label{display:block;margin:12px 0 5px;color:var(--mut);font-size:13px}
+.login input{width:100%;padding:9px 11px}.login button{width:100%;margin-top:18px;padding:10px;font-size:14px}
+.login .brand{display:flex;gap:9px;align-items:center;font-weight:700;margin-bottom:16px;color:var(--mut);font-size:13px;letter-spacing:.5px}
+.login .brand i{width:22px;height:22px;border-radius:7px;background:linear-gradient(135deg,#5eead4,#a78bfa)}
+.login ol{padding-left:18px;color:var(--mut);font-size:13px;margin:6px 0}
+.qr{background:#fff;padding:10px;border-radius:10px;width:210px;margin:10px 0}.qr svg{width:100%;height:auto;display:block}
+.setupkey{font-family:ui-monospace,Menlo,monospace;font-size:13px;word-break:break-all;background:var(--panel2);padding:7px 9px;border-radius:8px}
+.small{font-size:12px}.foot{color:var(--dim);font-size:12px;margin-top:14px}
+.mt{margin-top:14px}.att-wait{margin-bottom:14px}.grid2>div{min-width:0}.tbl td.r{white-space:nowrap}.box>h4 a{white-space:nowrap}
+.tabs{display:none}
+.empty{color:var(--dim);padding:14px}
+@media (max-width:1100px){.hero{grid-template-columns:1fr 1fr 1fr}.hero .k.big{grid-column:1/-1}.side,.grid2{grid-template-columns:1fr}
+.kgrid{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:700px){.top{padding:9px 14px;gap:10px}.top .nav,.top .who{display:none}main{padding:12px 12px 90px}
+.hero{grid-template-columns:1fr 1fr;gap:8px}.k{padding:10px 12px}.k .v{font-size:20px}.k.big .v{font-size:27px}
+.att .row{flex-wrap:wrap}.att .row .t{flex:1 1 70%}
+.mx{display:none}.mx+.legend{display:none}.mlist{display:block}
+.tabs{display:flex;position:fixed;bottom:0;left:0;right:0;background:var(--top);border-top:1px solid var(--line);justify-content:space-around;
+padding:7px 0 calc(10px + env(safe-area-inset-bottom));z-index:5}
+.tabs a{font-size:10.5px;color:var(--dim);text-align:center;position:relative;min-width:56px}.tabs a.on{color:#fff}.tabs a:hover{text-decoration:none}
+.tabs a i{display:block;font-style:normal;font-size:17px;line-height:1.3}.tabs .nb{position:absolute;top:-3px;right:6px;margin:0}
+.cards{grid-template-columns:minmax(0,1fr)}.nums{grid-template-columns:repeat(2,1fr)}
+.tbl.stack table,.tbl.stack tbody,.tbl.stack tr,.tbl.stack td{display:block}.tbl.stack tr:first-child{display:none}
+.tbl.stack tr{border-bottom:1px solid var(--line);padding:8px 0}.tbl.stack td{border:0;padding:2px 12px}
+.filters label{flex:1 1 40%}.filters .chk{flex:0 1 auto}.filters select,.filters input{width:100%}form.inline input{width:100%}}
 """
 
-NAV = [("/", "Fleet"), ("/alerts", "Alerts"), ("/trades", "Trades"), ("/timeline", "Timeline"), ("/day", "Day summary")]
+APP_JS = """(function(){
+var m=document.querySelector('main[data-live]');var lv=document.getElementById('live');
+var last=Date.now(),fails=0,busy=false;
+function tick(){if(!lv)return;var s=Math.max(0,Math.round((Date.now()-last)/1000));
+lv.classList.toggle('bad',fails>1);lv.lastChild.textContent=fails>1?'Reconnecting\\u2026':'Live \\u00b7 updated '+s+' s ago';}
+function typing(){var a=document.activeElement;if(a&&m.contains(a)&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))return true;
+var n=m.querySelectorAll('input[name=note]');for(var i=0;i<n.length;i++){if(n[i].value)return true;}return false;}
+function badge(){var b=m.querySelector('#nbv');if(!b)return;var n=b.getAttribute('data-n');
+var all=document.querySelectorAll('.nb');for(var i=0;i<all.length;i++){all[i].textContent=n;all[i].hidden=(n==='0');}}
+function poll(){if(!m||busy||document.hidden||typing())return;busy=true;
+fetch(location.href,{headers:{'X-Partial':'1'},credentials:'same-origin',cache:'no-store'}).then(function(r){
+if(r.redirected||r.url.indexOf('/login')>=0){location.href='/login';return null;}if(!r.ok)throw new Error(r.status);return r.text();
+}).then(function(t){if(t===null)return;if(t!==m.getAttribute('data-h')){m.innerHTML=t;m.setAttribute('data-h',t);badge();}
+last=Date.now();fails=0;}).catch(function(){fails++;}).then(function(){busy=false;tick();});}
+if(m){setInterval(poll,%d);setInterval(tick,1000);document.addEventListener('visibilitychange',function(){if(!document.hidden)poll();});}
+})();""" % LIVE_POLL_MS
+
+NAV = [("/", "Fleet", "▦"), ("/alerts", "Alerts", "⚠"), ("/trades", "Trades", "☰"), ("/timeline", "Timeline", "◷"),
+       ("/day", "Day summary", "▤")]
 
 
-def layout(title: str, body: str, user: Optional[Dict[str, Any]], active: str = "", refresh: int = 0) -> str:
-    nav = "".join(f'<a href="{h}"{" class=on" if h == active else ""}>{t}</a>' for h, t in NAV)
-    head_user = ""
+def layout(title: str, body: str, user: Optional[Dict[str, Any]], active: str = "", live: bool = False,
+           badge: int = 0, partial: bool = False) -> str:
+    """A whole page, or (partial=True, the live refresh) just what goes inside <main>."""
+    marker = f'<i id="nbv" hidden data-n="{int(badge)}"></i>'
+    if partial:
+        return body + marker
+    nb = f'<span class="nb"{"" if badge else " hidden"}>{int(badge)}</span>'
+    nav = tabs = who = live_html = script = ""
     if user:
-        head_user = (f'<form method="post" action="/logout"><input type="hidden" name="csrf" value="{e(user["csrf"])}">'
-                     f'<span class="muted">{e(user["username"])}</span> <button>Log out</button></form>')
-    meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+        nav = '<nav class="nav">' + "".join(
+            f'<a href="{h}"{" class=on" if h == active else ""}>{t}{nb if h == "/alerts" else ""}</a>' for h, t, _ in NAV) + "</nav>"
+        tabs = '<nav class="tabs">' + "".join(
+            f'<a href="{h}"{" class=on" if h == active else ""}><i>{ic}</i>{t.split()[0]}{nb if h == "/alerts" else ""}</a>'
+            for h, t, ic in NAV) + "</nav>"
+        who = (f'<form class="who" method="post" action="/logout"><input type="hidden" name="csrf" value="{e(user["csrf"])}">'
+               f'<span>{e(user["username"])}</span><button>Log out</button></form>')
+        script = '<script src="/static/app.js" defer></script>'
+    if live:
+        live_html = '<div class="live" id="live"><b></b><span>Live</span></div>'
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
-            f'<meta name="viewport" content="width=device-width,initial-scale=1">{meta}'
-            f'<title>{e(title)} · Fleet Monitor</title><link rel="stylesheet" href="/static/app.css"></head><body>'
-            f'<header><b>Fleet Monitor</b><nav>{nav if user else ""}</nav>{head_user}</header>'
-            f'<main>{body}</main></body></html>')
+            f'<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
+            f'<meta name="theme-color" content="#100d22"><title>{e(title)} · Fleet Monitor</title>'
+            f'<link rel="stylesheet" href="/static/app.css">{script}</head><body>'
+            f'<header class="top"><a class="logo" href="/"><i></i>Fleet Monitor</a>{nav}{live_html}{who}</header>'
+            f'<main{" data-live" if live else ""}>{body}{marker}</main>{tabs}</body></html>')
 
 
 def login_page(error: str = "") -> str:
     err = f'<p class="err">{e(error)}</p>' if error else ""
-    body = ('<form class="login" method="post" action="/login"><h2 style="margin:0">Sign in</h2>'
+    body = ('<form class="login" method="post" action="/login"><div class="brand"><i></i>SCALP FLEET MONITOR</div>'
+            '<h2>Sign in</h2><p class="muted small">Username, password, and the 6-digit code from your authenticator app.</p>'
             f'{err}<label>Username</label><input name="username" autocomplete="username" required autofocus>'
             '<label>Password</label><input name="password" type="password" autocomplete="current-password" required>'
             '<label>Authenticator code</label><input name="code" inputmode="numeric" autocomplete="one-time-code"'
@@ -176,8 +323,9 @@ def login_page(error: str = "") -> str:
     return layout("Sign in", body, None)
 
 
-def _kpi(label: str, value: str) -> str:
-    return f'<div class="kpi"><small>{e(label)}</small><span class="v">{value}</span></div>'
+def _kpi(label: str, value: str, sub: str = "", cls: str = "") -> str:
+    return (f'<div class="k {cls}"><small>{e(label)}</small><div class="v">{value}</div>'
+            + (f'<div class="s">{sub}</div>' if sub else "") + "</div>")
 
 
 def booked_net(t: Dict[str, Any]) -> Optional[float]:
@@ -201,6 +349,48 @@ def kite_chip(b: Optional[Dict[str, Any]], now: float) -> str:
     return f'<span class="badge b-bad"{when}>Kite: NOT logged in</span>'
 
 
+def spark(points: List[float], w: int = 120, h: int = 32, cls: str = "pos", fill: bool = True) -> str:
+    """Inline SVG line (presentation attributes only: allowed by the CSP)."""
+    color = {"pos": "#5eead4", "neg": "#fb7185"}.get(cls, "#a9a4d6")
+    pts = [float(p) for p in points][-400:]
+    if len(pts) < 2:
+        pts = (pts or [0.0]) * 2
+    lo, hi = min(pts + [0.0]), max(pts + [0.0])
+    rng = (hi - lo) or 1.0
+    xy = [(i / (len(pts) - 1) * w, h - (p - lo) / rng * (h - 4) - 2) for i, p in enumerate(pts)]
+    d = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in xy)
+    z = h - (0 - lo) / rng * (h - 4) - 2
+    area = f'<path d="{d} L{w},{h} L0,{h} Z" fill="{color}" fill-opacity="0.12"/>' if fill else ""
+    return (f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" preserveAspectRatio="none" aria-hidden="true">{area}'
+            f'<line x1="0" x2="{w}" y1="{z:.1f}" y2="{z:.1f}" stroke="{color}" stroke-opacity="0.25" stroke-dasharray="2 3"/>'
+            f'<path d="{d}" fill="none" stroke="{color}" stroke-width="2" stroke-linejoin="round"/></svg>')
+
+
+def _heat(v: float) -> str:
+    a = abs(v)
+    lvl = 0 if round(v) == 0 else 1 if a < 1000 else 2 if a < 3000 else 3 if a < 7000 else 4
+    return "h-0" if lvl == 0 else f'h-{"p" if v > 0 else "n"}{lvl}'
+
+
+def _series(points: Iterable[tuple]) -> List[float]:
+    return [float(g) for _, g in points]
+
+
+def _fleet_series(series: Dict[str, List[tuple]], keys: Iterable[str]) -> List[float]:
+    """Sum of the machines' per-minute MTM, each carried forward from its last point."""
+    keys = [k for k in keys if series.get(k)]
+    minutes = sorted({m for k in keys for m, _ in series[k]})
+    last = {k: 0.0 for k in keys}
+    by = {k: dict(series[k]) for k in keys}
+    out = []
+    for m in minutes:
+        for k in keys:
+            if m in by[k]:
+                last[k] = by[k][m]
+        out.append(sum(last.values()))
+    return out
+
+
 def fleet_lists(user, others, now) -> tuple:
     """── FLEET_MEMBERSHIP_20261127 ── admin-only lists: machines waiting for approval (top) and machines
     not in the fleet (bottom), each with its button. Viewers never see them."""
@@ -217,94 +407,269 @@ def fleet_lists(user, others, now) -> tuple:
     out = [d for d in others if d.get("membership") == "out"]
     top = ""
     if pending:
-        top = ('<div class="card" style="margin-bottom:14px;border-color:var(--warn)"><h3>Waiting for approval '
-               f'<span class="badge b-warn">{len(pending)}</span></h3><div class="meta">New installs. Nothing they send is '
-               'kept until you add them; after that they start within 10 min.</div><div class="tw"><table>'
+        top = ('<div class="box att-wait"><h4>WAITING FOR APPROVAL <span class="badge b-warn">'
+               f'{len(pending)}</span></h4><p class="muted small pad">Waiting for approval: new installs. Nothing they send is '
+               'kept until you add them; after that they start within 10 min.</p><div class="tbl"><table>'
                + "".join(_pending_row(d, user, now) for d in pending) + '</table></div></div>')
     bottom = ""
     if out:
-        bottom = ('<div class="card" style="margin-top:14px"><h3>Not in the fleet '
-                  f'<span class="badge b-idle">{len(out)}</span></h3><div class="meta">Hidden from every page and the '
-                  'channel; their earlier data comes back with Add back.</div><div class="tw"><table>'
+        bottom = ('<div class="box mt"><h4>NOT IN THE FLEET <span class="badge b-idle">'
+                  f'{len(out)}</span></h4><p class="muted small pad">Not in the fleet: hidden from every page and the '
+                  'channel; their earlier data comes back with Add back.</p><div class="tbl"><table>'
                   + "".join(row(d, "Add back", "in") for d in out) + '</table></div></div>')
     return top, bottom
 
 
 def _pending_row(d, user, now) -> str:
     def btn(label, value):
-        return (f'<form class="inline" method="post" action="/devices/{e(d["key"])}/membership" style="display:inline-flex">'
+        return (f'<form class="inline" method="post" action="/devices/{e(d["key"])}/membership">'
                 f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
                 f'<input type="hidden" name="membership" value="{value}"><button>{label}</button></form>')
     return (f'<tr><td>{e(d.get("label"))}</td><td class="muted">{e(d.get("tier") or "")} · '
             f'v{e(d.get("app_version") or "?")}</td><td class="muted">seen {ago(d.get("last_seen"), now)}</td>'
-            f'<td>{btn("Add to fleet", "in")} {btn("Don&#x27;t add", "out")}</td></tr>')
+            f'<td><div class="admin">{btn("Add to fleet", "in")}{btn("Don&#x27;t add", "out")}</div></td></tr>')
 
 
-def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram", others=()) -> str:   # ── FLEET_SWITCH_LABEL_20261127 ── channel
-    total_net = total_open = online = 0
-    cards = []
+KIND_ICON = {"CRITICAL": "🚨", "ORDER_REJECTED": "🚫", "SYSTEM_ALERT": "⚠️", "TRADE_ENTRY": "➕", "GROUP_ENTRY": "➕",
+             "TRADE_EXIT": "✅", "GROUP_EXIT": "✅"}
+
+
+def _ev_icon(r: Dict[str, Any]) -> str:
+    if r.get("kind") in ("TRADE_EXIT", "GROUP_EXIT"):
+        try:
+            pnl = json.loads(r.get("data") or "{}").get("pnl")
+            if isinstance(pnl, (int, float)) and pnl < 0:
+                return "❌"
+        except Exception:
+            pass
+    return KIND_ICON.get(r.get("kind"), "•")
+
+
+def _feed(rows, labels, title_link: str = '<a href="/timeline">Timeline →</a>', head: str = "LIVE FEED") -> str:
+    items = "".join(f'<div class="ev"><time>{hm(r["ts"])}</time><span class="i">{_ev_icon(r)}</span>'
+                    f'<span class="t"><b>{e(labels.get(r["device_key"], r["device_key"][:8]))}</b> {e(r.get("summary"))}</span></div>'
+                    for r in rows)
+    return (f'<div class="box"><h4>{head} {title_link}</h4><div class="feed">'
+            + (items or '<p class="muted small">Nothing yet today.</p>') + '</div></div>')
+
+
+def _machine_facts(d, s, today, now):
+    data = (s or {}).get("data") or {}
+    is_today = (s or {}).get("day") == today
+    tot = (data.get("totals") or {}) if is_today else {}
+    rows = [r for r in (data.get("rows") or []) if is_today and r.get("state") != "IDLE"]
+    broker = data.get("broker") if is_today else None
+    return data, is_today, tot, rows, broker
+
+
+def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram", others=(),   # ── FLEET_SWITCH_LABEL_20261127 ── channel
+               attention=(), series=None, feed=(), partial: bool = False) -> str:
+    """── FLEET_PORTAL_REDESIGN_20261127 ── fleet boxes, Needs attention, machines × strategies, live feed."""
+    series = series or {}
+    labels = {d["key"]: d["label"] for d in devs}
+    total_mtm = total_booked = total_risk = 0.0
+    total_open = online = 0
+    risk_known = False
+    offline_names, items, mach = [], [], []
+    strat_machines: Dict[str, int] = {}
+    strat_tot: Dict[str, float] = {}
     for d in devs:
         s = snaps.get(d["key"]) or {}
-        data = s.get("data") or {}
+        data, is_today, tot, rows, broker = _machine_facts(d, s, today, now)
         st_cls, st_txt = status(d, s, now)
         online += st_cls == "ok"
-        is_today = s.get("day") == today
-        tot = (data.get("totals") or {}) if is_today else {}
-        total_net += float(tot.get("gross") or 0)   # ── FLEET_MTM_AND_SUMMARY_20261127 ── MTM, as the app's headline
+        if st_cls in ("bad", "warn", "idle"):
+            offline_names.append(d["label"])
+        total_mtm += float(tot.get("gross") or 0)   # ── FLEET_MTM_AND_SUMMARY_20261127 ── MTM, as the app's headline
+        total_booked += booked_net(tot) or 0.0 if tot else 0.0
         total_open += int(tot.get("open_legs") or 0)
-        n_un = unacked.get(d["key"], 0)
-        rows = "".join(
-            f'<tr><td>{e(r.get("codename") or r.get("id"))}</td><td>{e(r.get("state"))}</td>'
-            f'<td class="r">{e(r.get("open_legs"))}</td><td class="r">{e(r.get("closed_trades"))}</td>'
-            f'<td class="r">{money(r.get("gross"))}</td></tr>'
-            for r in (data.get("rows") or []) if is_today and r.get("state") != "IDLE")
-        table = (f'<div class="tw"><table><tr><th>Strategy</th><th>State</th><th class="r">Open</th><th class="r">Closed</th>'
-                 f'<th class="r">MTM</th></tr>{rows}</table></div>' if rows else '<p class="muted">No live trades today.</p>')
-        notes = []
-        if data.get("error"):
-            notes.append(f"Snapshot failed on the machine: {e(data['error'])}")
-        if tot.get("approx") or tot.get("marks_stale"):
-            notes.append("Some marks are approximate or stale.")
-        if d.get("dropped"):
-            notes.append(f"{e(d['dropped'])} events were dropped on the machine (outbox full).")
-        note_html = "".join(f'<div class="warnbox">{n}</div>' for n in notes)
-        kite = kite_chip(data.get("broker") if is_today else None, now)   # ── KITE_STATUS_PORTAL_20261127 ──
-        alert_link = (f'<a href="/alerts?{urlencode({"device": d["key"], "unacked": "1"})}">'
-                      f'<span class="badge b-bad">{n_un} unacknowledged</span></a>' if n_un else "")
-        admin = ""
-        if user["role"] == "admin":
-            admin = (f'<form method="post" action="/devices/{e(d["key"])}/enabled" style="margin-top:8px">'
-                     f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
-                     f'<input type="hidden" name="enabled" value="{0 if d.get("enabled", 1) else 1}">'
-                     f'<button>{"Pause sending" if d.get("enabled", 1) else "Resume sending"}</button></form>')
-            # ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-117) per-machine Telegram switch
-            admin += (f'<form method="post" action="/devices/{e(d["key"])}/membership" style="margin-top:6px">'   # ── FLEET_MEMBERSHIP_20261127 ──
-                      f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
-                      f'<input type="hidden" name="membership" value="out"><button>Remove from fleet</button></form>')
-            admin += (f'<form method="post" action="/devices/{e(d["key"])}/relay" style="margin-top:6px">'
-                      f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
-                      f'<input type="hidden" name="relay" value="{0 if d.get("relay", 1) else 1}">'
-                      f'<button>{("Stop sending to " if d.get("relay", 1) else "Send to ") + e(channel)}</button></form>')   # ── FLEET_SWITCH_LABEL_20261127 ──
-        cards.append(
-            f'<div class="card"><h3>{e(d["label"])} <span class="badge b-{st_cls}">{st_txt}</span> {kite} {alert_link}</h3>'
-            f'<div class="meta">seen {ago(d.get("last_seen"), now)} · v{e(d.get("app_version") or "?")}'
-            f' · {e(d.get("tier") or "")} · {("sent to " if d.get("relay", 1) else "not sent to ") + e(channel)}</div>'   # ── FLEET_SWITCH_LABEL_20261127 ──
-            f'<div class="nums"><div><small>MTM today</small>{money(tot.get("gross"))}</div>'   # ── FLEET_MTM_AND_SUMMARY_20261127 ── = the app's MTM
-            f'<div><small>Realised</small>{money(tot.get("realised"))}</div>'
-            f'<div><small>Unrealised</small>{money(tot.get("unrealised"))}</div>'
-            f'<div><small>Charges</small>{money(-float(tot["charges"])) if tot.get("charges") else "—"}</div>'
-            f'<div><small>Booked after charges</small>{money(booked_net(tot)) if tot else "—"}</div>'   # ── FLEET_MTM_AND_SUMMARY_20261127 ──   # ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) Net = Realised + Unrealised − Charges
-            f'<div><small>Open legs</small>{e(tot.get("open_legs", "—"))}</div>'
-            f'<div><small>Closed trades</small>{e(tot.get("closed_trades", "—"))}</div>'
-            f'<div><small>Risk to stops</small>{money(tot.get("risk_to_stops")) if tot.get("stops_known") else "—"}</div></div>'
-            f'{note_html}{table}{admin}</div>')
-    kpis = (_kpi("Fleet MTM today (LIVE)", money(total_net)) + _kpi("Open legs", str(total_open))
-            + _kpi("Machines online", f"{online} / {len(devs)}")
-            + _kpi("Unacknowledged alerts", str(sum(unacked.values()))))
+        if tot.get("stops_known"):
+            risk_known = True
+            total_risk += float(tot.get("risk_to_stops") or 0)
+        cells = {}
+        for r in rows:
+            name = str(r.get("codename") or r.get("id") or "?")
+            cells[name] = r
+            strat_machines[name] = strat_machines.get(name, 0) + 1
+            strat_tot[name] = strat_tot.get(name, 0.0) + float(r.get("gross") or 0)
+        n_un = int(unacked.get(d["key"], 0))
+        kite_bad = isinstance(broker, dict) and not broker.get("trade_ready")
+        problem = st_cls in ("bad", "warn", "paused") or n_un > 0 or kite_bad or bool(data.get("error"))
+        mach.append(dict(d=d, s=s, tot=tot, cells=cells, st=(st_cls, st_txt), n_un=n_un, broker=broker, problem=problem,
+                         data=data, is_today=is_today))
+        # Needs attention: machines
+        if st_cls in ("bad", "warn"):
+            legs_txt = f' · {int(tot.get("open_legs") or 0)} open legs not being reported' if tot.get("open_legs") else ""
+            items.append(("🔴", f'<b>{e(d["label"])}</b> — {"offline" if st_cls == "bad" else "late"}: no check-in for '
+                                f'{ago(d.get("last_seen"), now).replace(" ago", "")}{legs_txt}', d.get("last_seen"), d["key"], None))
+        if kite_bad:
+            what = "Kite trading is off" if broker.get("logged_in") else "Kite not logged in; it cannot take trades"
+            items.append(("🔑", f'<b>{e(d["label"])}</b> — {what}', broker.get("checked_at"), d["key"], None))
+        if data.get("error") and is_today:
+            items.append(("⚠️", f'<b>{e(d["label"])}</b> — the app could not build its numbers', s.get("ts"), d["key"], None))
+    mach.sort(key=lambda m: (not m["problem"], -float(m["tot"].get("gross") or 0), str(m["d"]["label"]).lower()))
+    cols = sorted(strat_machines, key=lambda k: (-strat_machines[k], k.lower()))
+
+    # ── boxes
+    fleet_line = _fleet_series(series, [d["key"] for d in devs])
+    un_total = sum(unacked.values())
+    oldest = min((a["ts"] for a in attention), default=None)
+    hero = ('<div class="hero">'
+            f'<div class="k big"><div><small>Fleet MTM today · LIVE</small><div class="v">{money(total_mtm)}</div>'
+            f'<div class="s">realised + open, before charges</div></div>{spark(fleet_line, 180, 46, "pos" if total_mtm >= 0 else "neg")}</div>'
+            + _kpi("Booked after charges", money(total_booked), "closed trades")
+            + _kpi("Open legs", str(total_open), f"risk to stops {inr(total_risk)}" if risk_known and total_open else "across the fleet")
+            + _kpi("Machines online", f'{online} <span class="muted">/ {len(devs)}</span>',
+                   e(", ".join(offline_names[:3]) + (" not reporting" if offline_names else "")) or "all reporting")
+            + _kpi("Alerts to acknowledge", f'<span class="{"neg" if un_total else ""}">{un_total}</span>',
+                   f"oldest {hm(oldest)}" if oldest else "none")
+            + '</div>')
+
+    # ── needs attention
+    rows_att = []
+    for a in list(attention)[:5]:
+        rows_att.append(
+            f'<div class="row"><span>{KIND_ICON.get(a["kind"], "🚨")}</span><span class="t"><b>{e(labels.get(a["device_key"], "?"))}'
+            f'{(" · " + e(a["codename"])) if a.get("codename") else ""}</b> — {e(a.get("summary"))}</span><time>{hm(a["ts"])}</time>'
+            f'<form method="post" action="/alerts/{int(a["id"])}/ack"><input type="hidden" name="csrf" value="{e(user["csrf"])}">'
+            f'<input type="hidden" name="note" value=""><button class="danger">Acknowledge</button></form></div>')
+    for icon, text, ts, key, _ in items:
+        rows_att.append(f'<div class="row"><span>{icon}</span><span class="t">{text}</span><time>{hm(ts) if ts else ""}</time>'
+                        f'<a class="btn" href="/machine/{e(key)}">Open</a></div>')
+    more = un_total - min(len(attention), 5)
+    att = ""
+    if rows_att:
+        att = (f'<div class="att"><h4>NEEDS ATTENTION <span>{min(len(attention), 5) + len(items) + max(more, 0)}</span></h4>{"".join(rows_att)}'
+               + (f'<div class="more"><a href="/alerts?unacked=1&amp;days=7">+{more} more unacknowledged → Alerts</a></div>' if more > 0 else "")
+               + '</div>')
+
+    # ── machines × strategies (desktop) and machine rows (phone)
+    trs, mrows = [], []
+    for m in mach:
+        d, tot, (st_cls, st_txt) = m["d"], m["tot"], m["st"]
+        key = d["key"]
+        tags = ""
+        if st_cls != "ok":
+            tags += f'<span class="tag {"t-bad" if st_cls == "bad" else "t-warn"}">{st_txt}</span>'
+        kite = kite_chip(m["broker"], now) if (isinstance(m["broker"], dict) and not m["broker"].get("trade_ready")) else ""
+        if m["n_un"]:
+            tags += (f'<a href="/alerts?{urlencode({"device": key, "unacked": "1", "days": "7"})}">'
+                     f'<span class="tag t-bad">{m["n_un"]} alert{"" if m["n_un"] == 1 else "s"}</span></a>')
+        k_ok = isinstance(m["broker"], dict) and m["broker"].get("trade_ready")
+        sub = (f'{"updated " + ago(m["s"].get("ts"), now) if m["s"] else "no report yet"}'
+               + (" · Kite ✓" if k_ok else "")
+               + ("" if d.get("relay", 1) else f" · not sent to {e(channel)}"))   # ── FLEET_SWITCH_LABEL_20261127 ──
+        mtm = tot.get("gross")
+        line = _series(series.get(key, []))
+        trend = spark(line, 96, 28, "neg" if (mtm or 0) < 0 else "pos", fill=False) if len(line) > 1 else ""
+        tds = []
+        for c in cols:
+            r = m["cells"].get(c)
+            if not r:
+                tds.append('<td class="dash">·</td>')
+                continue
+            v = float(r.get("gross") or 0)
+            ol = int(r.get("open_legs") or 0)
+            live = ' <span class="live-dot">●</span>' if ol or r.get("state") == "OPEN" else ""
+            tds.append(f'<td class="{_heat(v)}">{inr(v)}{live}<small>{e(r.get("closed_trades") or 0)} tr'
+                       f'{f" · {ol} legs open" if ol else ""}</small></td>')
+        trs.append(f'<tr><td class="nm"><span class="dot d-{st_cls}"></span><a href="/machine/{e(key)}">{e(d["label"])}</a>{tags}{kite}'
+                   f'<small>{sub}</small></td>{"".join(tds)}'
+                   f'<td class="tot">{money(mtm) if m["tot"] else "—"}<small>booked {inr(booked_net(tot)) if tot else "—"}</small></td>'
+                   f'<td>{trend}</td></tr>')
+        chips = "".join(
+            f'<span class="{_heat(float(r.get("gross") or 0))}">{e(c)} <b>{inr(r.get("gross") or 0)}</b>'
+            f'{" <span class=live-dot>●</span>" if int(r.get("open_legs") or 0) or r.get("state") == "OPEN" else ""}'
+            f'<small>{e(r.get("closed_trades") or 0)} tr</small></span>'
+            for c, r in m["cells"].items()) or '<span class="none">No live trades today</span>'
+        mrows.append(f'<div class="mrow"><div class="h"><span class="dot d-{st_cls}"></span><a href="/machine/{e(key)}">{e(d["label"])}</a>'
+                     f'{tags}{kite}<span class="mt">{money(mtm) if m["tot"] else "—"}</span></div>'
+                     f'<div class="sub"><span>{sub} · booked {inr(booked_net(tot)) if tot else "—"}</span>'
+                     f'{spark(line, 70, 18, "neg" if (mtm or 0) < 0 else "pos", fill=False) if len(line) > 1 else ""}</div>'
+                     f'<div class="cells">{chips}</div></div>')
+    if devs:
+        fleet_tds = "".join(f'<td class="{"pos" if strat_tot[c] > 0 else "neg" if strat_tot[c] < 0 else ""}"><b>{inr(strat_tot[c])}</b>'
+                            f'<small>{strat_machines[c]} mach.</small></td>' for c in cols)
+        trs.append(f'<tr class="fleet"><td class="nm">Fleet</td>{fleet_tds}<td class="tot">{money(total_mtm)}</td><td></td></tr>')
+        head = "".join(f"<th>{e(c)}</th>" for c in cols)
+        grid = (f'<div class="box"><h4>MACHINES × STRATEGIES · MTM TODAY <a href="/day">Day summary →</a></h4>'
+                f'<div class="mx"><table><tr><th>Machine</th>{head}<th>MTM today</th><th>Today</th></tr>{"".join(trs)}</table></div>'
+                '<div class="legend"><span><i class="sw h-p3"></i>profit</span><span><i class="sw h-n3"></i>loss</span>'
+                '<span><b class="live-dot">●</b> in a trade now</span><span>· = not traded today</span>'
+                '<span>Click a machine for its positions</span></div>'
+                f'<div class="mlist">{"".join(mrows)}'
+                + (f'<div class="fleetrow">Fleet by strategy: ' + " · ".join(f'{e(c)} {money(strat_tot[c])}' for c in cols) + '</div>' if cols else "")
+                + '</div></div>')
+    else:
+        grid = '<div class="box"><p class="empty">No machine is in the fleet yet.</p></div>'
     pend, out = fleet_lists(user, others, now)   # ── FLEET_MEMBERSHIP_20261127 ──
-    body = (pend + f'<div class="kpis">{kpis}</div><div class="grid">{"".join(cards) or "<p>No machine is in the fleet yet.</p>"}</div>' + out
-            + f'<p class="muted" style="margin-top:14px">Refreshes every 30 s · {dt(now)} IST</p>')
-    return layout("Fleet", body, user, "/", refresh=30)
+    body = (pend + hero + att + f'<div class="side">{grid}{_feed(feed, labels)}</div>' + out)
+    return layout("Fleet", body, user, "/", live=True, badge=un_total, partial=partial)
+
+
+def machine_page(user, d, s, now, today, channel, alerts, open_legs, events, series, badge: int = 0,
+                 partial: bool = False) -> str:
+    """── FLEET_PORTAL_REDESIGN_20261127 ── one machine: its numbers, strategies, open positions, today's events,
+    and (admins) its switches."""
+    data, is_today, tot, rows, broker = _machine_facts(d, s, today, now)
+    st_cls, st_txt = status(d, s, now)
+    key = d["key"]
+    n_un = sum(1 for a in alerts if not a.get("ack_user") and a["kind"] in ("CRITICAL", "ORDER_REJECTED"))
+    mtm = tot.get("gross")
+    line = _series(series)
+    head = (f'<div class="mhead"><div><a class="back" href="/">← Fleet</a><h1><span class="dot d-{st_cls}"></span>{e(d["label"])}'
+            f'<span class="badge b-{st_cls}">{st_txt}</span>{kite_chip(broker, now)}'
+            + (f'<a href="/alerts?{urlencode({"device": key, "unacked": "1", "days": "7"})}"><span class="tag t-bad">{n_un} unacknowledged</span></a>' if n_un else "")
+            + f'</h1><div class="meta">seen {ago(d.get("last_seen"), now)} · v{e(d.get("app_version") or "?")} · {e(d.get("tier") or "")}'
+            f' · {("sent to " if d.get("relay", 1) else "not sent to ") + e(channel)}'   # ── FLEET_SWITCH_LABEL_20261127 ──
+            + (f' · numbers from {hms(s.get("ts"))} IST' if s else "") + '</div></div></div>')
+    kp = ('<div class="hero">'
+          f'<div class="k big"><div><small>MTM today</small><div class="v">{money(mtm) if tot else "—"}</div>'
+          f'<div class="s">realised + open, before charges</div></div>{spark(line, 200, 50, "neg" if (mtm or 0) < 0 else "pos")}</div>'
+          + _kpi("Booked after charges", money(booked_net(tot)) if tot else "—", "realised − charges")   # ── FLEET_MTM_AND_SUMMARY_20261127 ──
+          + _kpi("Realised", money(tot.get("realised")) if tot else "—", "closed today")
+          + _kpi("Open P&L", money(tot.get("unrealised")) if tot else "—", f'{e(tot.get("open_legs", 0))} open legs')
+          + _kpi("Charges", money(-float(tot["charges"])) if tot.get("charges") else "—",
+                 f'{e(tot.get("closed_trades", 0))} closed trades · risk to stops '
+                 + (inr(tot.get("risk_to_stops")) if tot.get("stops_known") else "—"))
+          + '</div>')
+    notes = []
+    if data.get("error"):
+        notes.append(f"The app could not build its numbers: {e(data['error'])}")
+    if tot.get("approx") or tot.get("marks_stale"):
+        notes.append("Some marks are approximate or stale.")
+    if d.get("dropped"):
+        notes.append(f"{e(d['dropped'])} events were dropped on the machine (outbox full).")
+    note_html = "".join(f'<div class="warnbox">{n}</div>' for n in notes)
+    srows = "".join(
+        f'<tr><td><b>{e(r.get("codename") or r.get("id"))}</b></td><td><span class="chip {"k-TRADE_ENTRY" if r.get("state") == "OPEN" else ""}">{e(r.get("state"))}</span></td>'
+        f'<td class="r">{e(r.get("open_legs") or 0)}</td><td class="r">{e(r.get("closed_trades") or 0)}</td>'
+        f'<td class="r">{money(r.get("realised"))}</td><td class="r">{money(r.get("unrealised")) if r.get("open_legs") else "—"}</td>'
+        f'<td class="r">{money(r.get("gross"))}</td></tr>' for r in rows)
+    strat = ('<div class="box"><h4>STRATEGIES TODAY</h4><div class="tbl"><table><tr><th>Strategy</th><th>State</th><th class="r">Open legs</th>'
+             f'<th class="r">Closed</th><th class="r">Realised</th><th class="r">Open P&amp;L</th><th class="r">MTM</th></tr>{srows}</table></div></div>'
+             if srows else '<div class="box"><h4>STRATEGIES TODAY</h4><p class="empty">No live trades today.</p></div>')
+    lrows = "".join(
+        f'<tr><td>{e(lg["data"].get("symbol"))}</td><td>{"SELL" if lg["data"].get("short") else "BUY"}</td>'
+        f'<td class="r">{e(lg["data"].get("qty"))}</td><td class="r">{num(lg["data"].get("entry"))}</td>'
+        f'<td>{e(lg.get("strategy_id"))}</td><td class="muted">{entry_when(lg["data"].get("entry_ts"), today)}</td></tr>' for lg in open_legs)
+    legs_box = ('<div class="box"><h4>OPEN POSITIONS</h4><div class="tbl"><table><tr><th>Symbol</th><th>Side</th><th class="r">Qty</th>'
+                f'<th class="r">Entry</th><th>Strategy</th><th>Since</th></tr>{lrows}</table></div></div>'
+                if lrows else '<div class="box"><h4>OPEN POSITIONS</h4><p class="empty">No open positions.</p></div>')
+    admin = ""
+    if user["role"] == "admin":
+        def frm(action, field, value, label):
+            return (f'<form method="post" action="/devices/{e(key)}/{action}"><input type="hidden" name="csrf" value="{e(user["csrf"])}">'
+                    f'<input type="hidden" name="{field}" value="{value}"><button>{label}</button></form>')
+        admin = ('<div class="box mt"><h4>ADMIN</h4><div class="pad admin">'
+                 + frm("enabled", "enabled", 0 if d.get("enabled", 1) else 1, "Pause sending" if d.get("enabled", 1) else "Resume sending")
+                 + frm("relay", "relay", 0 if d.get("relay", 1) else 1,                                   # ── FLEET_RELAY_PER_MACHINE_20261127 ──
+                       ("Stop sending to " if d.get("relay", 1) else "Send to ") + e(channel))            # ── FLEET_SWITCH_LABEL_20261127 ──
+                 + frm("membership", "membership", "out", "Remove from fleet")                            # ── FLEET_MEMBERSHIP_20261127 ──
+                 + '</div></div>')
+    feed = _feed(events, {key: d["label"]}, "", "TODAY ON THIS MACHINE")
+    body = (head + kp + note_html + f'<div class="grid2"><div>{strat}<div class="mt"></div>{legs_box}</div>{feed}</div>' + admin)
+    return layout(d["label"], body, user, "/", live=True, badge=badge, partial=partial)
 
 
 def _device_select(devs, current: str) -> str:
@@ -313,7 +678,8 @@ def _device_select(devs, current: str) -> str:
     return f'<label>Machine<select name="device">{opts}</select></label>'
 
 
-def alerts_page(user, devs, rows, device, unacked_only, days, strategy: str = "", names=()) -> str:   # ── ALERT_STRATEGY_INFER_20261127 ──
+def alerts_page(user, devs, rows, device, unacked_only, days, strategy: str = "", names=(),   # ── ALERT_STRATEGY_INFER_20261127 ──
+                badge: int = 0, partial: bool = False) -> str:
     labels = {d["key"]: d["label"] for d in devs}
     day_opts = "".join(f'<option value="{n}"{" selected" if n == days else ""}>{n} day{"s" if n > 1 else ""}</option>'
                        for n in (1, 7, 30, 90))
@@ -322,85 +688,85 @@ def alerts_page(user, devs, rows, device, unacked_only, days, strategy: str = ""
             + '<label>Strategy<select name="strategy"><option value="">All strategies</option>'
             + "".join(f'<option value="{e(n)}"{" selected" if n == strategy else ""}>{e(n)}</option>' for n in names)
             + '</select></label>'
-            f'<label><span>&nbsp;</span><span><input type="checkbox" name="unacked" value="1"'
-            f'{" checked" if unacked_only else ""}> unacknowledged only</span></label><button>Show</button></form>')
+            f'<label class="chk"><input type="checkbox" name="unacked" value="1"{" checked" if unacked_only else ""}> unacknowledged only</label>'
+            '<button class="p">Show</button></form>')
     trs = []
     for r in rows:
         if r.get("ack_user"):
-            ack = (f'<span class="muted">✓ {e(r["ack_user"])} {dt(r["ack_ts"])}</span>'
+            ack = (f'<span class="acked"><b>✓ {e(r["ack_user"])}</b> {dt(r["ack_ts"])}</span>'
                    + (f'<br><span class="muted">{e(r["ack_note"])}</span>' if r.get("ack_note") else ""))
         elif r["kind"] == "SYSTEM_ALERT":
             ack = '<span class="muted">—</span>'
         else:
             ack = (f'<form class="inline" method="post" action="/alerts/{int(r["id"])}/ack">'
                    f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
-                   f'<input name="note" placeholder="note (optional)" maxlength="300"><button>Ack</button></form>')
-        trs.append(f'<tr><td>{dt(r["ts"])}</td><td>{e(labels.get(r["device_key"], r["device_key"][:8]))}</td>'
+                   f'<input name="note" placeholder="note (optional)" maxlength="300"><button class="danger">Ack</button></form>')
+        trs.append(f'<tr><td class="muted">{dt(r["ts"])}</td><td><b>{e(labels.get(r["device_key"], r["device_key"][:8]))}</b></td>'
                    f'<td><span class="chip k-{e(r["kind"])}">{e(r["kind"].replace("_", " "))}</span></td>'
                    f'<td>{e(r.get("codename") or "")}</td><td>{e(r.get("summary"))}</td><td>{ack}</td></tr>')
-    table = (f'<div class="wrap"><table><tr><th>Time (IST)</th><th>Machine</th><th>Kind</th><th>Strategy</th>'
-             f'<th>Message</th><th>Acknowledged</th></tr>{"".join(trs)}</table></div>' if trs
-             else '<p class="muted">No alerts in this period.</p>')
-    return layout("Alerts", filt + table, user, "/alerts")
+    table = (f'<div class="box"><div class="tbl stack"><table><tr><th>Time (IST)</th><th>Machine</th><th>Kind</th><th>Strategy</th>'
+             f'<th>Message</th><th>Acknowledged</th></tr>{"".join(trs)}</table></div></div>' if trs
+             else '<div class="box"><p class="empty">No alerts in this period.</p></div>')
+    return layout("Alerts", '<h1>Alerts</h1>' + filt + table, user, "/alerts", live=True, badge=badge, partial=partial)
 
 
-def trades_page(user, devs, legs, f) -> str:
+def trades_page(user, devs, legs, f, badge: int = 0) -> str:
     labels = {d["key"]: d["label"] for d in devs}
     filt = (f'<form class="filters" method="get">{_device_select(devs, f["device"])}'
             f'<label>Strategy<input name="strategy" value="{e(f["strategy"])}" placeholder="e.g. IC_V2"></label>'
             f'<label>From<input type="date" name="from" value="{e(f["from"])}"></label>'
-            f'<label>To<input type="date" name="to" value="{e(f["to"])}"></label><button>Show</button>'
-            f'<a href="/trades.csv?{urlencode(f)}">Download CSV</a></form>')
+            f'<label>To<input type="date" name="to" value="{e(f["to"])}"></label><button class="p">Show</button>'
+            f'<a href="/trades.csv?{urlencode(f)}">⬇ Download CSV</a></form>')
     trs, net, n_open = [], 0.0, 0
     for r in legs:
         x = r["data"]
         n_open += bool(x.get("open"))
         net += float(x.get("net") or 0) if not x.get("open") else 0
         trs.append(
-            f'<tr><td>{e(r.get("day"))}</td><td>{entry_when(x.get("entry_ts"), r.get("day"))}</td><td>{hms(x.get("exit_ts")) if x.get("exit_ts") else "open"}</td>'
-            f'<td>{e(labels.get(r["device_key"], r["device_key"][:8]))}</td><td>{e(r.get("strategy_id"))}</td>'
+            f'<tr><td class="muted">{e(r.get("day"))}</td><td>{entry_when(x.get("entry_ts"), r.get("day"))}</td><td>{hms(x.get("exit_ts")) if x.get("exit_ts") else "open"}</td>'
+            f'<td><b>{e(labels.get(r["device_key"], r["device_key"][:8]))}</b></td><td>{e(r.get("strategy_id"))}</td>'
             f'<td>{e(x.get("symbol"))}</td><td>{"SELL" if x.get("short") else "BUY"}</td><td class="r">{e(x.get("qty"))}</td>'
             f'<td class="r">{num(x.get("entry"))}</td><td class="r">{num(x.get("exit")) if x.get("exit") is not None else "—"}</td>'
             f'<td class="r">{money(x.get("net")) if not x.get("open") else "<span class=muted>open</span>"}</td>'
-            f'<td>{e(x.get("reason") or "")}</td></tr>')
-    head = (f'<div class="kpis">{_kpi("Legs", str(len(legs)))}{_kpi("Open", str(n_open))}'
-            f'{_kpi("Net of closed legs", money(net))}</div>')
-    table = (f'<div class="wrap"><table><tr><th>Day</th><th>In</th><th>Out</th><th>Machine</th><th>Strategy</th>'
+            f'<td class="muted">{e(x.get("reason") or "")}</td></tr>')
+    head = (f'<div class="kgrid">{_kpi("Legs", str(len(legs)))}{_kpi("Open", str(n_open))}'
+            f'{_kpi("Net of closed legs", money(net))}</div><div class="mt"></div>')
+    table = (f'<div class="box"><div class="tbl"><table><tr><th>Day</th><th>In</th><th>Out</th><th>Machine</th><th>Strategy</th>'
              f'<th>Symbol</th><th>Side</th><th class="r">Qty</th><th class="r">Entry</th><th class="r">Exit</th>'
-             f'<th class="r">Net</th><th>Reason</th></tr>{"".join(trs)}</table></div>' if trs
-             else '<p class="muted">No live trades for these filters.</p>')
-    note = ('<p class="muted">Read from each machine\'s trade tables (the same numbers as its Dashboard); '
+             f'<th class="r">Net</th><th>Reason</th></tr>{"".join(trs)}</table></div></div>' if trs
+             else '<div class="box"><p class="empty">No live trades for these filters.</p></div>')
+    note = ('<p class="foot">Read from each machine\'s trade tables (the same numbers as its Dashboard); '
             'net is after charges where the machine has them.</p>')
-    return layout("Trades", filt + head + table + note, user, "/trades")
+    return layout("Trades", '<h1>Trades</h1>' + filt + head + table + note, user, "/trades", badge=badge)
 
 
-def timeline_page(user, devs, rows, day, device) -> str:
+def timeline_page(user, devs, rows, day, device, badge: int = 0, partial: bool = False, live: bool = False) -> str:
     labels = {d["key"]: d["label"] for d in devs}
     filt = (f'<form class="filters" method="get">{_device_select(devs, device)}'
-            f'<label>Day<input type="date" name="day" value="{e(day)}"></label><button>Show</button></form>')
+            f'<label>Day<input type="date" name="day" value="{e(day)}"></label><button class="p">Show</button></form>')
     trs = "".join(
         f'<tr><td>{hms(r["ts"])}</td><td class="muted">{hms(r["received_at"])}</td>'
-        f'<td>{e(labels.get(r["device_key"], r["device_key"][:8]))}</td>'
+        f'<td><b>{e(labels.get(r["device_key"], r["device_key"][:8]))}</b></td>'
         f'<td><span class="chip k-{e(r["kind"])}">{e(r["kind"].replace("_", " "))}</span></td>'
         f'<td>{e(r.get("summary"))}</td></tr>' for r in rows)
-    table = (f'<div class="wrap"><table><tr><th>On machine</th><th>Received</th><th>Machine</th><th>Event</th>'
-             f'<th>Detail</th></tr>{trs}</table></div>' if trs else '<p class="muted">No events on this day.</p>')
-    return layout("Timeline", filt + table, user, "/timeline")
+    table = (f'<div class="box"><div class="tbl stack"><table><tr><th>On machine</th><th>Received</th><th>Machine</th><th>Event</th>'
+             f'<th>Detail</th></tr>{trs}</table></div></div>' if trs else '<div class="box"><p class="empty">No events on this day.</p></div>')
+    return layout("Timeline", '<h1>Timeline</h1>' + filt + table, user, "/timeline", live=live, badge=badge, partial=partial)
 
 
-def day_page(user, devs, sums, counts, day) -> str:
+def day_page(user, devs, sums, counts, day, badge: int = 0, partial: bool = False, live: bool = False) -> str:
     """── FLEET_MTM_AND_SUMMARY_20261127 ── the app's Daily Summary: BOOKED (realised) P&L first, then charges and
     net after charges; open legs and their unrealised P&L shown apart, never as the day's result."""
     labels = {d["key"]: d["label"] for d in devs}
     filt = (f'<form class="filters" method="get"><label>Day<input type="date" name="day" value="{e(day)}"></label>'
-            f'<button>Show</button></form>')
+            f'<button class="p">Show</button></form>')
     cards, fleet_r, fleet_n = [], 0.0, 0.0
     for s in sorted(sums, key=lambda x: labels.get(x["device_key"], "")):
         t = s["totals"] or {}
         fleet_r += float(t.get("realised") or 0)
         fleet_n += booked_net(t) or 0.0
         c = counts.get(s["device_key"], {})
-        rows = "".join(f'<tr><td>{e(r.get("codename") or r.get("id"))}</td><td class="r">{e(r.get("closed_trades"))}</td>'
+        rows = "".join(f'<tr><td><b>{e(r.get("codename") or r.get("id"))}</b></td><td class="r">{e(r.get("closed_trades"))}</td>'
                        f'<td class="r">{money(r.get("realised"))}</td><td class="r">{e(r.get("open_legs") or 0)}</td>'
                        f'<td class="r">{money(r.get("unrealised")) if r.get("open_legs") else "—"}</td></tr>'
                        for r in s["rows"] if r.get("state") != "IDLE")
@@ -415,15 +781,16 @@ def day_page(user, devs, sums, counts, day) -> str:
             f'<div><small>Closed trades</small>{e(t.get("closed_trades", "—"))}</div>'
             f'<div><small>Open legs</small>{e(t.get("open_legs", 0))}</div>'
             f'<div><small>Open P&amp;L (not booked)</small>{money(t.get("unrealised")) if t.get("open_legs") else "—"}</div></div>'
-            + (f'<div class="tw"><table><tr><th>Strategy</th><th class="r">Closed</th><th class="r">Booked</th>'
+            + (f'<div class="tbl"><table><tr><th>Strategy</th><th class="r">Closed</th><th class="r">Booked</th>'
                f'<th class="r">Open legs</th><th class="r">Open P&amp;L</th></tr>{rows}</table></div>' if rows else
                '<p class="muted">No live trades.</p>') + '</div>')
-    body = (filt + f'<div class="kpis">{_kpi("Fleet booked (LIVE)", money(fleet_r))}{_kpi("After charges", money(fleet_n))}'
-            f'{_kpi("Machines reporting", str(len(sums)))}</div>'
-            + (f'<div class="grid">{"".join(cards)}</div>' if cards else '<p class="muted">No snapshot for this day.</p>')
-            + '<p class="muted" style="margin-top:12px">Booked = realised P&amp;L of trades closed that day, before '
+    body = ('<h1>Day summary</h1>' + filt
+            + f'<div class="kgrid">{_kpi("Fleet booked (LIVE)", money(fleet_r), "before charges")}{_kpi("After charges", money(fleet_n))}'
+            f'{_kpi("Machines reporting", str(len(sums)))}</div><div class="mt"></div>'
+            + (f'<div class="cards">{"".join(cards)}</div>' if cards else '<div class="box"><p class="empty">No snapshot for this day.</p></div>')
+            + '<p class="foot">Booked = realised P&amp;L of trades closed that day, before '
               'charges (the app\'s Daily Summary). Open legs are not counted in it.</p>')
-    return layout("Day summary", body, user, "/day")
+    return layout("Day summary", body, user, "/day", live=live, badge=badge, partial=partial)
 
 
 def now_ist_day(now: Optional[float] = None) -> str:
@@ -435,8 +802,8 @@ def setup_page(inv: Dict[str, Any], qr: Optional[str], uri: str, error: str = ""
     err = f'<p class="err">{e(error)}</p>' if error else ""
     what = "Set up your sign-in" if inv["mode"] == "new" else "Reset your sign-in"
     qr_html = (f'<div class="qr">{qr}</div>' if qr else "")
-    body = (f'<form class="login" method="post" style="max-width:420px"><h2 style="margin:0">{what}</h2>'
-            f'<p class="muted" style="margin:4px 0 0">Fleet Monitor account <b>{e(inv["username"])}</b>'
+    body = (f'<form class="login" method="post"><div class="brand"><i></i>SCALP FLEET MONITOR</div><h2>{what}</h2>'
+            f'<p class="muted small">Fleet Monitor account <b>{e(inv["username"])}</b>'
             f' ({e(inv["role"])})</p>{err}'
             '<label>1. Choose a password (10+ characters)</label>'
             '<input name="password" type="password" autocomplete="new-password" minlength="10" required>'
@@ -445,20 +812,21 @@ def setup_page(inv: Dict[str, Any], qr: Optional[str], uri: str, error: str = ""
             '<label>2. Add this account to an authenticator app</label>'
             '<ol><li>Open Google Authenticator, Microsoft Authenticator or 1Password.</li>'
             '<li>Add an account and scan this code, or type the setup key.</li></ol>'
-            f'<p style="margin:6px 0"><a href="{e(uri)}">On this phone? Tap to add it to your authenticator app</a></p>'
-            '<p class="muted" style="font-size:12px;margin:0 0 6px">On iPhone this opens <b>Passwords</b>: tap '
+            f'<p class="small"><a href="{e(uri)}">On this phone? Tap to add it to your authenticator app</a></p>'
+            '<p class="muted small">On iPhone this opens <b>Passwords</b>: tap '
             '<b>+</b> to save a new entry (website 139-59-8-202.sslip.io, your username and this password), '
             'then come back here and type the 6-digit code it shows.</p>'   # ── PORTAL_COPY_FIX_20261127 ──
             f'{qr_html}<div class="setupkey">{e(inv["totp_secret"])}</div>'
             '<label>3. Enter the 6-digit code the app shows now</label>'
             '<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" required>'
             f'<button class="p">Finish and sign in</button>'
-            f'<p class="muted" style="font-size:12px">This link works once. Keep your phone: the app '
+            f'<p class="muted small">This link works once. Keep your phone: the app '
             f'asks for a code at every sign-in.</p></form>')
     return layout(what, body, None)
 
 
 def setup_gone_page() -> str:
-    return layout("Link expired", '<div class="login"><h2 style="margin:0">This link no longer works</h2>'
+    return layout("Link expired", '<div class="login"><div class="brand"><i></i>SCALP FLEET MONITOR</div>'
+                  '<h2>This link no longer works</h2>'
                   '<p>It has expired, was already used, or was replaced by a newer one. '
                   'Ask Anbu for a new link.</p><p><a href="/login">Go to sign-in</a></p></div>', None)

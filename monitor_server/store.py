@@ -45,6 +45,7 @@ ALERT_KINDS = ("CRITICAL", "ORDER_REJECTED", "SYSTEM_ALERT")
 TRADE_KINDS = ("TRADE_ENTRY", "TRADE_EXIT", "GROUP_ENTRY", "GROUP_EXIT")
 KNOWN_KINDS = ALERT_KINDS + TRADE_KINDS
 KEEP_EVENTS_DAYS = 400
+KEEP_MTM_DAYS = 14          # ── FLEET_LIVE_5S_20261127 ── the per-minute MTM line behind the sparklines
 
 
 def set_paths(db: str, license_db: str) -> None:
@@ -97,6 +98,9 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY, username TEXT NOT NULL, csrf TEXT NOT NULL,
   created REAL NOT NULL, last_seen REAL NOT NULL, ip TEXT);
+CREATE TABLE IF NOT EXISTS mtm_points (
+  device_key TEXT NOT NULL, day TEXT NOT NULL, minute INTEGER NOT NULL, gross REAL NOT NULL,
+  PRIMARY KEY (device_key, day, minute));
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, username TEXT, action TEXT NOT NULL,
   detail TEXT, ip TEXT);
@@ -269,6 +273,12 @@ def store_snapshot(device_key: str, snap: Dict[str, Any], now: float) -> None:
                   " VALUES (?,?,?,?,?)",
                   (device_key, day, now, json.dumps(snap.get("totals") or {}),
                    json.dumps(snap.get("rows") or [])))
+        # ── FLEET_LIVE_5S_20261127 ── one MTM point per machine per minute (the last snapshot of that minute)
+        gross = (snap.get("totals") or {}).get("gross")
+        if isinstance(gross, (int, float)) and day == ist_day(now):
+            d = datetime.fromtimestamp(now, IST)
+            c.execute("INSERT OR REPLACE INTO mtm_points (device_key, day, minute, gross) VALUES (?,?,?,?)",
+                      (device_key, day, d.hour * 60 + d.minute, float(gross)))
         for lg in (snap.get("legs") or [])[:1000]:
             if not isinstance(lg, dict) or not lg.get("id"):
                 continue
@@ -435,6 +445,28 @@ def legs(day_from: str, day_to: str, device_key: Optional[str], strategy_id: Opt
     return out
 
 
+def open_legs(device_key: str) -> List[Dict[str, Any]]:
+    """── FLEET_LIVE_5S_20261127 ── the machine's open legs as of its latest leg list: a row the app stopped
+    sending (not refreshed within 3 min of the newest) is left out rather than shown as open forever."""
+    rows = _rows("SELECT * FROM legs WHERE device_key=? AND is_open=1 AND updated_at >="
+                 " (SELECT MAX(updated_at) FROM legs WHERE device_key=?) - 180 ORDER BY entry_ts",
+                 (device_key, device_key))
+    for r in rows:
+        try:
+            r["data"] = json.loads(r["data"])
+        except Exception:
+            r["data"] = {}
+    return rows
+
+
+def mtm_series(day: str) -> Dict[str, List[tuple]]:
+    """── FLEET_LIVE_5S_20261127 ── {device_key: [(minute, gross), …]} for the day, in-fleet machines only."""
+    out: Dict[str, List[tuple]] = {}
+    for r in _rows(f"SELECT device_key, minute, gross FROM mtm_points WHERE day=? AND {IN_FLEET} ORDER BY minute", (day,)):
+        out.setdefault(r["device_key"], []).append((int(r["minute"]), float(r["gross"])))
+    return out
+
+
 def day_summaries(day: str) -> List[Dict[str, Any]]:
     out = []
     for r in _rows(f"SELECT * FROM day_summary WHERE day=? AND {IN_FLEET}", (day,)):   # ── FLEET_MEMBERSHIP_20261127 ──
@@ -460,3 +492,4 @@ def housekeeping(now: Optional[float] = None) -> None:
         c.execute("DELETE FROM events WHERE ts < ? AND id NOT IN (SELECT event_id FROM acks)",
                   (now - KEEP_EVENTS_DAYS * 86400,))
         c.execute("DELETE FROM audit WHERE ts < ?", (now - KEEP_EVENTS_DAYS * 86400,))
+        c.execute("DELETE FROM mtm_points WHERE day < ?", (ist_day(now - KEEP_MTM_DAYS * 86400),))   # ── FLEET_LIVE_5S_20261127 ──
