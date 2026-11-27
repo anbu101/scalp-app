@@ -65,7 +65,7 @@ MODULES = {
         "suites": [E + "test_order_once.py", E + "test_executor_pricing.py", E + "test_gtt_verify_strict.py",
                    E + "test_oco_stop_buffer.py", E + "test_wing_fast_fill.py", E + "test_exit_latency.py",
                    E + "test_order_latency.py", E + "test_exit_repeg_fast.py", E + "test_instance_guard.py",
-                   "app/slippage/test_slip.py",
+                   "app/slippage/test_slip.py", E + "test_zerodha_relay_contract.py",   # ZERODHA_RELAY_CONTRACT_20261126 (TD-075)
                    N + "test_fleet_live.py"],
     },
     # what strategies call instead of the executor
