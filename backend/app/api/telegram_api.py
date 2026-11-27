@@ -1093,6 +1093,7 @@ def notify_trade_entry(trade_data: dict):
         mode=trade_data.get("mode", "live"),
         entry_price=trade_data.get("entry_price"),
     )
+    _monitor_tap("trade", "TRADE_ENTRY", trade_data)   # ── FLEET_MONITOR_20261127 ──
 
     mode = trade_data.get("mode", "live").lower()
     mode_badge = "🟢 LIVE" if mode == "live" else "📄 PAPER"
@@ -1230,6 +1231,7 @@ def notify_group_entry(group_data: dict):
     legs = [l for l in (group_data.get("legs") or []) if l]
     if not legs:
         return
+    _monitor_tap("group", "GROUP_ENTRY", group_data)   # ── FLEET_MONITOR_20261127 ──
 
     strategy_id = group_data.get("strategy_id") or ""
     # ── UI_MASK ── label is ALWAYS the codename; callers no longer pass one.
@@ -1456,6 +1458,8 @@ def notify_group_exit(group_data: dict):
         mode=mode,
         pnl=round(batch_pnl, 2) if have_pnl else None,
     )
+    _monitor_tap("group", "GROUP_EXIT", group_data,   # ── FLEET_MONITOR_20261127 ──
+                 pnl=round(batch_pnl, 2) if have_pnl else None)
 
     _fanout(NOTIF_TRADE_ACTIVITY, message, mode=mode, strategy_id=strategy_id)
 # ── GROUP_EXIT END ─────────────────────────────────────────────────────────
@@ -1472,6 +1476,7 @@ def notify_tp_exit(trade_data: dict):
         exit_price=trade_data.get("exit_price"),
         pnl=trade_data.get("pnl"),
     )
+    _monitor_tap("trade", "TRADE_EXIT", {**trade_data, "exit_reason": trade_data.get("exit_reason") or "TP"})   # ── FLEET_MONITOR_20261127 ──
 
     pnl = trade_data.get("pnl") or 0
     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
@@ -1505,6 +1510,7 @@ def notify_sl_exit(trade_data: dict):
         exit_price=trade_data.get("exit_price"),
         pnl=trade_data.get("pnl"),
     )
+    _monitor_tap("trade", "TRADE_EXIT", {**trade_data, "exit_reason": trade_data.get("exit_reason") or "SL"})   # ── FLEET_MONITOR_20261127 ──
 
     pnl = trade_data.get("pnl") or 0
     mode = trade_data.get("mode", "live").lower()
@@ -1552,6 +1558,7 @@ def notify_manual_exit(trade_data: dict):
     if not reason:
         reason, note = (note, "") if note else ("Manual", "")
     note_line = f"\nNote: {note}" if note and note not in reason else ""
+    _monitor_tap("trade", "TRADE_EXIT", {**trade_data, "exit_reason": reason})   # ── FLEET_MONITOR_20261127 ──
 
     message = f"""
 {pnl_emoji} <b>POSITION CLOSED</b> {mode_badge}
@@ -1665,6 +1672,16 @@ def notify_position_update(update_data: dict = None):
         send_telegram_message(token, chat_id, message)
 
 
+# ── FLEET_MONITOR_20261127 ── (TD-110) LIVE trade events + criticals → local outbox → Fleet Monitor.
+# One call per notify_*; never raises, never blocks (one SQLite insert).
+def _monitor_tap(name, *args, **kw):
+    try:
+        from app.monitor import tap as _mt
+        getattr(_mt, name)(*args, **kw)
+    except Exception:
+        pass
+
+
 # ── TG_PERSONAL_ALERTS_20261027 ── alert_data["personal"] → only your own chat(s)
 def _route_key(alert_data) -> str:
     return (NOTIF_PERSONAL_ALERTS if (alert_data or {}).get("personal")
@@ -1719,6 +1736,7 @@ def notify_critical(alert_data: dict):
                 _mode = "LIVE"
         else:
             _mode = "LIVE"
+    _monitor_tap("alert", "CRITICAL", alert_data, mode=_mode)   # ── FLEET_MONITOR_20261127 ── PAPER stays home
     # (2) in-app mirror — every critical alert reaches the bell, paper or
     #     live, Telegram configured or not. Skipped only when the caller
     #     just recorded its own in-app alert (paired sites: IC/TMA/TSG…).
@@ -1761,6 +1779,7 @@ def notify_order_rejection(alert_data: dict):
     strategy_id = alert_data.get("strategy_id")
     symbol = alert_data.get("symbol", "—")
     reason = alert_data.get("status_message", "") or "Order rejected by broker"
+    _monitor_tap("alert", "ORDER_REJECTED", alert_data, mode="LIVE")   # ── FLEET_MONITOR_20261127 ──
     order_id = alert_data.get("order_id", "")
 
     strat_line = f"\nStrategy: {codename(strategy_id)}" if strategy_id else ""
@@ -1786,6 +1805,7 @@ def notify_system_alert(alert_data: dict):
     """
     severity = alert_data.get("severity", "info")
     emoji = {"error": "🚨", "warning": "⚠️", "info": "ℹ️"}.get(severity, "ℹ️")
+    _monitor_tap("alert", "SYSTEM_ALERT", alert_data)   # ── FLEET_MONITOR_20261127 ──
 
     # ── KITE_LOGIN_NUDGE_20261027 ── optional title / emoji / URL buttons
     emoji = alert_data.get("emoji") or emoji

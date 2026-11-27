@@ -1435,6 +1435,13 @@ async def on_startup():
     # key; cannot raise; Telegram optional.
     _supervise(asyncio.create_task(liveness_ping_loop()),
                "liveness ping")   # perpetual
+    # ── FLEET_MONITOR_20261127 ── (TD-110) LIVE trades + criticals → Fleet Monitor
+    # on the droplet (outbox + 60 s snapshot). Inert without a license key; cannot raise.
+    try:
+        from app.monitor.shipper import monitor_ship_loop
+        _supervise(asyncio.create_task(monitor_ship_loop()), "fleet monitor")   # perpetual
+    except Exception as _me:
+        write_audit_log(f"[MONITOR] not started: {_me!r}")
     write_audit_log("[LICENSE] Heartbeat loop launched")
 
     # Advisory app-version check (non-blocking, fail-open). Never gates

@@ -3,6 +3,8 @@
 #                              ── VET_MODE_FOLLOW_20261125 ── CL-16 (DEF-102)
 #                              ── HOOK_NO_ADD_20261126 ── CL-17 (DEF-060)
 #                              ── PYTEST_FALLBACK_20261126 ── CL-18 (DEF-098; ported from e7ea184f, where it was CL-16)
+#                              ── FLEET_MONITOR_FIX_20261127 ── CL-19 (DEF-109)
+#                              ── MONITOR_DEPLOY_FILES_20261127 ── CL-20 (DEF-110)
 #
 # The reliability checklist. Each item has
 #   trigger  — something you can read from the staged diff (paths + added lines)
@@ -398,6 +400,56 @@ def cl18(ctx):
                   for f in fs if QUOTED_GAP in f.new_text() and BARE_GAP not in f.new_text()], ""
 
 
+
+# ── CL-19 crontab edits that survive set -e ── FLEET_MONITOR_FIX_20261127 ── (DEF-109)
+CRON_READ = re.compile(r"crontab\s+-l\b")
+
+
+def cl19(ctx):
+    hits = added(ctx, lambda p: not is_test(p), CRON_READ)
+    if not hits:
+        return False, [], ""
+    bad = [(p, n, t) for p, n, t in hits if "grep" in t and "|| true" not in t]
+    return True, [f"{p}:{n}: `crontab -l | grep …` with no `|| true` — under set -e an empty crontab "
+                  f"(crontab -l exits 1, grep -v finds nothing and exits 1) stops the subshell before the new "
+                  f"line is echoed, and `| crontab -` installs an EMPTY crontab (DEF-109). Write "
+                  f"`{{ {{ crontab -l 2>/dev/null || true; }} | {{ grep -v X || true; }}; echo …; }} | crontab -`."
+                  for p, n, t in bad], f"{len(hits)} crontab read(s) checked"
+
+
+# ── CL-20 a new server module ships with its deploy ── MONITOR_DEPLOY_FILES_20261127 ── (DEF-110)
+DEPLOYS = {"license_server/": "license_server/deploy-license-server.command",
+           "monitor_server/": "monitor_server/deploy-monitor.command"}
+
+
+def _deploy_text(ctx, path):
+    for f in ctx.files:
+        if f.path == path and f.status != "D":
+            return f.new_text()
+    try:
+        return open(path, encoding="utf-8").read()
+    except OSError:
+        return ""
+
+
+def cl20(ctx):
+    new = [f.path for f in ctx.files if f.status == "A" and f.path.endswith(".py") and not is_test(f.path)
+           and f.path.count("/") == 1 and f.path.split("/")[0] + "/" in DEPLOYS]
+    if not new:
+        return False, [], ""
+    out = []
+    for p in new:
+        dep = DEPLOYS[p.split("/")[0] + "/"]
+        txt = _deploy_text(ctx, dep)
+        name = p.split("/")[1]
+        if re.search(r"(^|[\s\"'])" + re.escape(name) + r"([\s\"';]|$)", txt, re.M):
+            continue
+        if "ls *.py" in txt:
+            continue
+        out.append(f"{p}: not in {dep}'s file list — the deploy will not copy it and the service dies on "
+                   f"import (DEF-110). Add it to the list (or `Ack: CL-20 <why>` for a local-only tool).")
+    return True, out, f"{len(new)} new server module(s) checked"
+
 ITEMS = [
     dict(id="CL-01", kind="auto", title="No hard-coded credentials", fn=cl01,
          trigger="an added line assigns a 16+ character literal to a key / secret / token / password name",
@@ -478,4 +530,16 @@ ITEMS = [
          check="it recognises the bare '<python>: No module named pytest' line of python -m too, not only "
                "\"No module named 'x'\"",
          incidents="DEF-098 (run_suites.py counted every pytest suite as FAILED on Anbu's Mac: the venv has no pytest)"),
+    dict(id="CL-19", kind="auto", title="A crontab edit keeps working when the crontab is empty", fn=cl19,
+         trigger="an added line reads `crontab -l` (deploy / setup scripts)",
+         check="a `crontab -l | grep …` read is guarded with `|| true`, so an empty crontab under set -e still "
+               "gets the new line (and a check after it that the line is there)",
+         incidents="DEF-109 (27 Nov: the license and monitor deploys installed an EMPTY root crontab: no nightly "
+                   "licenses.db backup had ever run)"),
+    dict(id="CL-20", kind="auto", title="A new server module is in its deploy script", fn=cl20,
+         trigger="a new non-test .py directly under license_server/ or monitor_server/",
+         check="its deploy-*.command copies it (named in the list, or the list is built from *.py); "
+               "a local-only tool takes an ack",
+         incidents="DEF-110 (27 Nov: accounts.py was not in deploy-monitor.command's list; scalp-monitor "
+                   "crash-looped ~1 min on its first import)"),
 ]

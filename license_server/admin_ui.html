@@ -116,6 +116,32 @@
     <tbody id="rows"></tbody>
   </table>
 
+  <!-- ── PORTAL_USERS_ADMIN_20261127 ── Fleet Monitor portal accounts (TD-113) -->
+  <section id="portalSec" style="margin-top:22px; border:1px solid var(--border); border-radius:10px; padding:14px 16px; max-width:900px">
+    <div style="display:flex; align-items:baseline; gap:10px; flex-wrap:wrap">
+      <h3 style="margin:0; font-size:15px">Fleet Monitor — portal users</h3>
+      <a class="dim" href="https://139-59-8-202.sslip.io" target="_blank" rel="noopener" style="font-size:11.5px;color:var(--blueT)">open portal ↗</a>
+      <span class="spacer" style="flex:1"></span>
+      <button class="small" type="button" onclick="loadPortalUsers()">↻</button>
+    </div>
+    <div style="display:flex; gap:8px; align-items:flex-end; margin:12px 0 4px; flex-wrap:wrap">
+      <div><label style="margin-top:0">Username</label>
+        <input id="puName" placeholder="e.g. ravi" maxlength="32" style="width:170px" autocomplete="off"
+               onkeydown="if(event.key==='Enter')portalInvite()"></div>
+      <div><label style="margin-top:0">Role</label>
+        <select id="puRole"><option value="viewer">Viewer (read + acknowledge)</option>
+        <option value="admin">Admin (also pause an install)</option></select></div>
+      <button class="primary" type="button" onclick="portalInvite()">Create invite link</button>
+    </div>
+    <p class="sub" style="margin:4px 0 0">No password is typed here: the link lets the person choose their own password
+      and set up an authenticator app on the HTTPS portal. It works once, for 48 hours.</p>
+    <div id="puErr" class="err"></div>
+    <table style="margin-top:10px">
+      <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last sign-in</th><th>Actions</th></tr></thead>
+      <tbody id="puRows"><tr><td colspan="5" class="dim">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
   <!-- ── CFG_OVERRIDE (role-level) ── ONE config set for ALL non-admin users -->
   <section style="margin-top:22px; border:1px solid var(--border); border-radius:10px; padding:14px 16px; max-width:900px">
     <div style="display:flex; align-items:baseline; gap:10px; flex-wrap:wrap">
@@ -149,6 +175,21 @@
       padding:8px; margin-top:6px; white-space:pre-wrap"></pre>
   </section>
 </main>
+
+<!-- ── PORTAL_USERS_ADMIN_20261127 ── one-time link reveal -->
+<div id="puLink" class="overlay" style="display:none">
+  <div class="modal">
+    <h2 id="puLinkTitle">Invite link</h2>
+    <p class="sub" id="puLinkSub"></p>
+    <div class="keyReveal mono" id="puLinkUrl" style="font-size:12px;word-break:break-all" onclick="copyText(this.textContent)"></div>
+    <p class="sub">Send it privately (WhatsApp / Signal / SMS). It works once and expires <b id="puLinkExp"></b>.
+      Opening it, they choose a password and scan a QR code with an authenticator app.</p>
+    <footer>
+      <button type="button" onclick="copyText(puMsg)">Copy message</button>
+      <button class="primary" type="button" onclick="document.getElementById('puLink').style.display='none'">Done</button>
+    </footer>
+  </div>
+</div>
 
 <!-- LOGIN -->
 <div id="login" class="overlay" style="display:none">
@@ -247,7 +288,7 @@ async function doLogin() {
   if (ok) {
     document.getElementById("login").style.display="none";
     document.getElementById("loginErr").textContent="";
-    loadMinVersion(); loadGlobalOverrides(); ovPopulateSelect();
+    loadMinVersion(); loadGlobalOverrides(); ovPopulateSelect(); loadPortalUsers();   // ── PORTAL_USERS_ADMIN_20261127 ──
   } else {
     sessionStorage.removeItem("licsrv_secret");
     document.getElementById("loginErr").textContent="Invalid secret (or server unreachable)";
@@ -696,10 +737,118 @@ async function setMinVersion() {
   } catch (e) { toast("Failed: " + e.message); }
 }
 
+/* ── PORTAL_USERS_ADMIN_20261127 BEGIN ── Fleet Monitor portal users ── */
+let puMsg = "";
+function puWhen(ts) {
+  if (!ts) return '<span class="dim">never</span>';
+  const d = new Date(ts * 1000);
+  return esc(d.toLocaleString("en-IN", {day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit"}));
+}
+function puBadge(cls, text) { return `<span class="badge ${cls}">${esc(text)}</span>`; }
+function puBtn(label, user, action, cls) {
+  return `<button class="small ${cls||""}" type="button" data-u="${esc(user)}" data-a="${esc(action)}"
+            onclick="portalAction(this.dataset.u, this.dataset.a)">${esc(label)}</button>`;
+}
+async function loadPortalUsers() {
+  const err = document.getElementById("puErr");
+  try {
+    const d = await call("/admin/portal/users");
+    err.textContent = "";
+    const rows = [];
+    const invited = new Set((d.users || []).map(u => u.username));
+    for (const i of (d.invites || []).filter(i => !invited.has(i.username))) {
+      rows.push(`<tr><td class="mono">${esc(i.username)}</td><td>${esc(i.role)}</td>
+        <td>${puBadge("b-unact", "INVITED")} <span class="dim">link expires ${puWhen(i.expires)}</span></td>
+        <td><span class="dim">—</span></td>
+        <td class="actions">${puBtn("New link", i.username, "reinvite:" + i.role)}${puBtn("Cancel", i.username, "cancel_invite", "danger")}</td></tr>`);
+    }
+    for (const u of (d.users || [])) {
+      const st = u.status === "active" ? puBadge("b-active", "ACTIVE")
+               : u.status === "locked" ? puBadge("b-expired", "LOCKED") : puBadge("b-revoked", "DISABLED");
+      const extra = u.pending_reset ? ' <span class="dim">reset link sent</span>' : "";
+      const acts = [puBtn("Reset", u.username, "reset")];
+      if (u.status === "locked") acts.push(puBtn("Unlock", u.username, "unlock"));
+      acts.push(u.disabled ? puBtn("Enable", u.username, "enable") : puBtn("Disable", u.username, "disable"));
+      acts.push(puBtn("Remove", u.username, "remove", "danger"));
+      rows.push(`<tr><td class="mono">${esc(u.username)}</td>
+        <td>${u.role === "admin" ? puBadge("b-admin", "ADMIN") : "viewer"}</td>
+        <td>${st}${extra}</td><td>${puWhen(u.last_login)}</td>
+        <td class="actions">${acts.join("")}</td></tr>`);
+    }
+    document.getElementById("puRows").innerHTML = rows.join("") ||
+      '<tr><td colspan="5" class="dim">No portal users yet — create an invite link for yourself (Admin) first.</td></tr>';
+  } catch (e) {
+    err.textContent = e.message;
+    document.getElementById("puRows").innerHTML = '<tr><td colspan="5" class="dim">—</td></tr>';
+  }
+}
+function puShowLink(d, title) {
+  document.getElementById("puLinkTitle").textContent = title;
+  document.getElementById("puLinkSub").textContent = `${d.username} · ${d.role}`;
+  document.getElementById("puLinkUrl").textContent = d.url;
+  document.getElementById("puLinkExp").textContent = new Date(d.expires * 1000)
+    .toLocaleString("en-IN", {day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit"});
+  puMsg = `Scalp Fleet Monitor — set up your sign-in here (works once, within 48 hours):\n${d.url}`;
+  document.getElementById("puLink").style.display = "flex";
+}
+async function portalInvite() {
+  const name = document.getElementById("puName").value.trim().toLowerCase();
+  const role = document.getElementById("puRole").value;
+  const err = document.getElementById("puErr");
+  if (!name) { err.textContent = "Enter a username first."; return; }
+  try {
+    const d = await call("/admin/portal/invite", { username: name, role });
+    document.getElementById("puName").value = "";
+    err.textContent = "";
+    puShowLink(d, "Invite link");
+    loadPortalUsers();
+  } catch (e) { err.textContent = e.message; }
+}
+async function portalAction(user, action) {
+  const err = document.getElementById("puErr");
+  if (action.startsWith("reinvite:")) {           // a pending invite: a fresh link replaces the old one
+    try { const d = await call("/admin/portal/invite", { username: user, role: action.split(":")[1] });
+          puShowLink(d, "New invite link"); loadPortalUsers(); } catch (e) { err.textContent = e.message; }
+    return;
+  }
+  const ask = { remove: `Remove ${user}'s portal account? They are signed out at once.`,
+                disable: `Disable ${user}? They are signed out at once and cannot sign in until enabled.`,
+                reset: `Make a reset link for ${user}? Their current password and authenticator keep working until they use it.`,
+                cancel_invite: `Cancel the invite for ${user}? The link stops working.` }[action];
+  if (ask && !confirm(ask)) return;
+  try {
+    const d = await call("/admin/portal/action", { username: user, action });
+    err.textContent = "";
+    if (action === "reset") puShowLink(d, "Reset link");
+    else toast(`${action.replace("_", " ")} ✓ ${user}`);
+    loadPortalUsers();
+  } catch (e) { err.textContent = e.message; }
+}
+/* ── PORTAL_USERS_ADMIN_20261127 END ── */
+
 /* ---------- misc ---------- */
+/* ── PORTAL_COPY_FIX_20261127 ── (DEF-111) navigator.clipboard exists only on HTTPS / localhost. This page is plain
+   HTTP, so it was undefined and every Copy (licence keys, the portal invite message) silently did
+   nothing. Fall back to a hidden textarea + execCommand("copy"), which works from a click on HTTP. */
 function copyText(t) {
-  navigator.clipboard?.writeText(t).then(()=>toast("Copied: " + t))
-    .catch(()=>toast("Copy failed — select manually"));
+  t = String(t ?? "");
+  const label = t.length > 60 ? "message" : t;
+  const fallback = () => {
+    const ta = document.createElement("textarea");
+    ta.value = t; ta.setAttribute("readonly", "");
+    ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus(); ta.select(); ta.setSelectionRange(0, t.length);
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    toast(ok ? "Copied: " + label : "Copy failed — select it and copy by hand");
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(t).then(() => toast("Copied: " + label)).catch(fallback);
+  } else {
+    fallback();
+  }
 }
 let toastT;
 function toast(msg) {
@@ -710,7 +859,7 @@ function toast(msg) {
 
 /* ---------- boot ---------- */
 (async () => {
-  if (secret() && await loadLicenses(true)) { loadMinVersion(); loadGlobalOverrides(); ovPopulateSelect(); return; }   // already signed in
+  if (secret() && await loadLicenses(true)) { loadMinVersion(); loadGlobalOverrides(); ovPopulateSelect(); loadPortalUsers(); return; }   // already signed in  ── PORTAL_USERS_ADMIN_20261127 ──
   showLogin();
 })();
 setInterval(() => { if (secret()) loadLicenses(true); }, 60000);

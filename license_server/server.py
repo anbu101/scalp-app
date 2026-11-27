@@ -15,6 +15,9 @@ Endpoints:
   POST /heartbeat             key + machine_id -> validate -> fresh 4-day token
   POST /admin/*               create / revoke / unrevoke / extend / update / rebind
   POST /admin/set_min_version set the lowest app version considered current
+GET  /admin/portal/users     Fleet Monitor portal accounts + pending links   ── PORTAL_USERS_ADMIN_20261127 ──
+POST /admin/portal/invite    {username, role} → one-time setup link (no password here)
+POST /admin/portal/action    {username, action: reset|disable|enable|unlock|remove|cancel_invite}
   GET  /admin/list            all licenses (admin)
   GET  /admin/ui              admin web dashboard
   GET  /min_version           PUBLIC - app self-update nudge (advisory only)
@@ -36,6 +39,7 @@ set, Telegram ping); /liveness accepts either. Requests without the field
 import hmac
 import json   # ── CFG_OVERRIDE ── size validation
 import os
+import re   # ── PORTAL_USERS_ADMIN_20261127 ──
 import time
 from pathlib import Path
 
@@ -47,6 +51,7 @@ from pydantic import BaseModel, Field
 import db
 import liveness_watch   # ── LIVENESS 2026-09-01 ──
 import notify
+import portal_users   # ── PORTAL_USERS_ADMIN_20261127 ──
 import server_meta
 import signing
 
@@ -516,6 +521,54 @@ def admin_set_min_version(req: SetMinVersionRequest, x_admin_secret: str | None 
 # Single static page; the page itself is public, but every data call it
 # makes hits /admin/* and therefore requires the X-Admin-Secret header,
 # entered on the page's login screen (held in sessionStorage only).
+
+# ── PORTAL_USERS_ADMIN_20261127 ── (TD-113) Fleet Monitor portal accounts.
+# Forwarded to the monitor's internal API on 127.0.0.1 (portal_users.py); the
+# monitor owns the accounts. Invites / resets return a one-time HTTPS link.
+_PORTAL_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{1,31}$")
+
+
+class PortalInviteRequest(BaseModel):
+    username: str = Field(max_length=40)
+    role: str = Field(default="viewer", max_length=10)
+
+
+class PortalActionRequest(BaseModel):
+    username: str = Field(max_length=40)
+    action: str = Field(max_length=20)
+
+
+def _portal(status_and_body):
+    status, body = status_and_body
+    if status >= 400 or not body.get("ok"):
+        raise HTTPException(status_code=status if status >= 400 else 502,
+                            detail=str(body.get("error") or "Fleet Monitor error"))
+    return body
+
+
+@app.get("/admin/portal/users")
+def admin_portal_users(x_admin_secret: str | None = Header(default=None)):
+    _require_admin(x_admin_secret)
+    return _portal(portal_users.forward("GET", "/internal/users"))
+
+
+@app.post("/admin/portal/invite")
+def admin_portal_invite(req: PortalInviteRequest, x_admin_secret: str | None = Header(default=None)):
+    _require_admin(x_admin_secret)
+    return _portal(portal_users.forward("POST", "/internal/users/invite",
+                                        {"username": req.username.strip().lower(), "role": req.role}))
+
+
+@app.post("/admin/portal/action")
+def admin_portal_action(req: PortalActionRequest, x_admin_secret: str | None = Header(default=None)):
+    _require_admin(x_admin_secret)
+    name = req.username.strip().lower()
+    if not _PORTAL_NAME.match(name):
+        raise HTTPException(400, "bad username")
+    if req.action not in portal_users.ACTIONS:
+        raise HTTPException(400, "unknown action")
+    return _portal(portal_users.forward("POST", f"/internal/users/{name}/{req.action}"))
+
 
 ADMIN_UI_FILE = Path(__file__).resolve().parent / "admin_ui.html"
 

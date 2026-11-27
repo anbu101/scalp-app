@@ -1,0 +1,21 @@
+[Unit]
+Description=Scalp Fleet Monitor (FLEET_MONITOR_20261127)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/scalp-monitor
+Environment=MONSRV_PORT=9200
+Environment=MONSRV_DB=/opt/scalp-monitor/monitor.db
+Environment=MONSRV_SECRETS_DIR=/opt/scalp-monitor/secrets
+Environment=MONSRV_LICENSE_DB=/opt/scalp-license/licenses.db
+Environment=MONSRV_LICENSE_TELEGRAM=/opt/scalp-license/secrets/telegram.json
+ExecStart=/opt/scalp-monitor/venv/bin/python /opt/scalp-monitor/server.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -4,6 +4,8 @@
 #                                     ── VET_MODE_FOLLOW_20261125 ── (DEF-102) TC-GATE-0059…0061
 #                                     ── HOOK_NO_ADD_20261126 ── (DEF-060) TC-GATE-0062…0064; 0038/0040 count 17 items
 #                                     ── PYTEST_FALLBACK_20261126 ── (DEF-098) TC-GATE-0057…0058 (CL-18); 0038/0040 count 18 items
+#                                     ── FLEET_MONITOR_FIX_20261127 ── (DEF-109) TC-GATE-0065…0067 (CL-19); 0038/0040 count 19 items
+#                                     ── MONITOR_DEPLOY_FILES_20261127 ── (DEF-110) TC-GATE-0068…0071 (CL-20); 0038/0040 count 20 items
 #
 # Checks of the diff-triggered checklist (scripts/checklist/items.py) and the commit gate
 # (scripts/hooks/reliability_checklist.py) in throw-away git repos — never this repo's index.
@@ -190,6 +192,31 @@ chk("TC-GATE-0063", "CL-17: a hook that rewrites, exits 1 and only tells you to 
     status_of(fin, "CL-17") == "pass", fin)
 rc, out, fin = one(d, "scripts/regen_tool.py", "import subprocess\nsubprocess.run(['git', 'add', 'x'])\n")
 chk("TC-GATE-0064", "CL-17: a git add outside scripts/hooks/ does not trigger it", status_of(fin, "CL-17") is None, fin)
+rc, out, fin = one(d, "ops/deploy-x.command",
+                   "set -e\n( crontab -l 2>/dev/null | grep -v 'x-backup' ; \\\n  echo '1 1 * * * b # x-backup' \\\n) | crontab -\n")
+chk("TC-GATE-0065", "CL-19: an unguarded `crontab -l | grep -v` in a deploy script fails (DEF-109)",
+    status_of(fin, "CL-19") == "fail", fin)
+rc, out, fin = one(d, "ops/deploy-x.command",
+                   "set -e\n{ { crontab -l 2>/dev/null || true; } | { grep -v 'x-backup' || true; }; \\\n"
+                   "  echo '1 1 * * * b # x-backup'; \\\n} | crontab -\n")
+chk("TC-GATE-0066", "CL-19: the guarded form passes", status_of(fin, "CL-19") == "pass", fin)
+rc, out, fin = one(d, "ops/notes.sh", "echo 'nothing about cron here'\n")
+chk("TC-GATE-0067", "CL-19: a script without crontab -l does not trigger it", status_of(fin, "CL-19") is None, fin)
+put(d, "monitor_server/deploy-monitor.command", 'FILES="server.py store.py requirements.txt"\n')
+git(d, "add", "-A")
+git(d, "commit", "-qm", "deploy base", "--no-verify")
+rc, out, fin = one(d, "monitor_server/accounts.py", "x = 1\n")
+chk("TC-GATE-0068", "CL-20: a new monitor_server module missing from the deploy list fails (DEF-110)",
+    status_of(fin, "CL-20") == "fail", fin)
+put(d, "monitor_server/deploy-monitor.command", 'FILES="server.py store.py accounts.py requirements.txt"\n')
+rc, out, fin = one(d, "monitor_server/relay2.py", "x = 2\n")
+chk("TC-GATE-0069", "CL-20: still failing for a module the list does not name (relay2.py), even with the list in the commit",
+    status_of(fin, "CL-20") == "fail" and "relay2.py" in out, (fin, out[-300:]))
+put(d, "monitor_server/deploy-monitor.command", "FILES=\"$(ls *.py | grep -v '^test_' | tr '\\n' ' ')requirements.txt\"\n")
+rc, out, fin = one(d, "monitor_server/relay3.py", "x = 3\n")
+chk("TC-GATE-0070", "CL-20: a list built from *.py passes", status_of(fin, "CL-20") == "pass", fin)
+rc, out, fin = one(d, "monitor_server/test_relay3.py", "x = 4\n")
+chk("TC-GATE-0071", "CL-20: a new test file does not trigger it", status_of(fin, "CL-20") is None, fin)
 rc, out, fin = one(d, "backend/app/engine/vet/vet_exit.py", "if now_ts > deadline_ts:\n    close_trade(x)\n")
 chk("TC-GATE-0018", "CL-08 and CL-12: a ts comparison and a close in engine code need acks",
     status_of(fin, "CL-08") == "needs-ack" and status_of(fin, "CL-12") == "needs-ack", fin)
@@ -307,8 +334,8 @@ git(d, "commit", "-qm", "c1", "--no-verify")
 rc, out = cli("--range", "HEAD~1..HEAD")
 chk("TC-GATE-0037", "--range A..B replays a past commit", rc == 1 and "CL-02 fail" in out, out)
 rc, out = cli("--list")
-chk("TC-GATE-0038", "--list shows 18 items, each with trigger, check and incidents",
-    "18 items" in out and out.count("incidents:") == 18 and out.count("trigger:") == 18, out[:300])
+chk("TC-GATE-0038", "--list shows 20 items, each with trigger, check and incidents",
+    "20 items" in out and out.count("incidents:") == 20 and out.count("trigger:") == 20, out[:300])
 commit(d, "x")
 rc, out = cli("--report")
 chk("TC-GATE-0039", "--report summarises the log", rc == 0 and "commits logged" in out, out)
@@ -318,8 +345,8 @@ shutil.rmtree(d, ignore_errors=True)
 ns = {}
 exec(compile(open(ITEMS).read(), ITEMS, "exec"), ns)
 ids = [i["id"] for i in ns["ITEMS"]]
-chk("TC-GATE-0040", "items: unique ids CL-01…CL-18, kind auto|ack, every item names its incidents",
-    ids == [f"CL-{n:02d}" for n in range(1, 19)] and all(i["kind"] in ("auto", "ack") and i["incidents"]
+chk("TC-GATE-0040", "items: unique ids CL-01…CL-20, kind auto|ack, every item names its incidents",
+    ids == [f"CL-{n:02d}" for n in range(1, 21)] and all(i["kind"] in ("auto", "ack") and i["incidents"]
                                                          and i["trigger"] and i["check"] for i in ns["ITEMS"]), ids)
 
 print("\n" + ("ALL RELIABILITY CHECKLIST CHECKS PASSED" if F == 0 else f"{F} FAILURES"))

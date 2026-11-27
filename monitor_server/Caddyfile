@@ -1,0 +1,23 @@
+# ── FLEET_MONITOR_20261127 ── (TD-110) HTTPS for the Fleet Monitor.
+# Free name (no domain bought): sslip.io resolves 139-59-8-202.sslip.io to
+# 139.59.8.202. Caddy gets and renews the certificate itself.
+# The apps connect to the bare IP with this name as SNI, so they need no DNS.
+139-59-8-202.sslip.io {
+	encode gzip
+	request_body {
+		max_size 2MB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	# ── PORTAL_USERS_ADMIN_20261127 ── the internal user API is for the license server on the box only
+	respond /internal/* 404
+	reverse_proxy 127.0.0.1:9200
+	log {
+		output file /var/log/caddy/monitor.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}

@@ -29,9 +29,9 @@ Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core
 ## Dual tree
 - `backend/` ↔ `desktop/src-tauri/backend/`, `frontend/` ↔ `desktop/src-tauri/frontend/`: the copies are git-ignored, re-synced by `./desktop/build-scalp.sh frontend|backend|both`. Edit the source; apply scripts also write the copy when it exists (`BUILD_COPIES`).
 
-## Tests — 179 backend scripts (exit code) + 20 pytest files
+## Tests — 180 backend scripts (exit code) + 20 pytest files
 - Failures + summary only: `python3 scripts/run_suites.py PATH...` — runs each suite its own way: scripts from backend/; pytest files (E/ic, backend/app/config, backend/app/db, backend/app/execution) via `-m pytest` from their folder; 2 BRK suites from the root. A pytest file run as a plain script exits 0 untested.
-- 221 suites (under backend/app/ unless shown): api/ 16 · backtest/ 56 · db/ 3 · engine/ 66 · execution/ 17 · jobs/ 4 · marketdata/ 4 · parity/ 8 · tests/ 4 · utils/ 4 · frontend/uitest/ 15 · scripts/ 5 · 19 more in 13 small folders
+- 224 suites (under backend/app/ unless shown): api/ 16 · backtest/ 56 · db/ 3 · engine/ 66 · execution/ 17 · jobs/ 4 · marketdata/ 4 · parity/ 8 · tests/ 4 · utils/ 4 · frontend/uitest/ 15 · scripts/ 5 · 22 more in 15 small folders
 - Fleet, one fake Kite account: `python3 scripts/run_suites.py E/test_fleet_adversarial.py E/test_fleet_live.py E/test_safety_layers.py`
 - Before a release: `python3 scripts/run_suites.py backend/app/execution/test_execution_router_contract.py` (E/ B/ A/ J/ prefixes work).
 - UI (Playwright, app closed): `cd frontend && CI=false npm run build && PYTHONPATH=../backend python3 uitest/test_ui_<name>.py` (frontend/uitest/README.md).
@@ -44,7 +44,7 @@ Each live one also has `A/<key>_state_routes.py` and `J/<key>_live_eod.py`. core
 - `execution/exit_order_driver.py` drive_exit_order:70 — live exit re-peg/cancel/confirm until flat, never a model price
 - `execution/broker_truth.py` LEDGER:487 — strict reads (BrokerUnreadable, never [] = flat); LEDGER = who holds what on a shared contract
 - `execution/kill_switch.py` — per-strategy kill: close, cancel GTTs, verify flat
-- `api/telegram_api.py` notify_critical:1690 — critical alerts: bell always, Telegram never for PAPER
+- `api/telegram_api.py` notify_critical:1707 — critical alerts: bell always, Telegram never for PAPER
 - `api_server.py` BackgroundScheduler:869 — routes, launches (_boot_guard), APScheduler (misfire 3600, coalesce); jobs/scheduler_observability.py
 - `risk/execution_modes.py` — OFF/PAPER/LIVE/PAPER_LIVE; paper twin trading/shadow_book.py
 - `parity/parity_core.py` — parity ledger (recorded day via real runner vs app); recon/ = broker reconciliation

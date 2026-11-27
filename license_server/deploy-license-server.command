@@ -24,7 +24,7 @@
 #  10. Verifies the server is reachable from your Mac
 #
 # This script must live in the same folder as server.py / db.py /
-# signing.py / keygen.py / notify.py / server_meta.py / requirements.txt /
+# signing.py / keygen.py / notify.py / server_meta.py / portal_users.py / requirements.txt /
 # scalp-license.service / admin_ui.html.
 # It NEVER touches the relay or any other service on the droplet.
 # =====================================================================
@@ -65,7 +65,7 @@ echo "=================================================================="
 # ------------------------------------------------------------------
 # SANITY: required files present locally
 # ------------------------------------------------------------------
-for f in server.py db.py signing.py keygen.py notify.py liveness_watch.py server_meta.py requirements.txt scalp-license.service admin_ui.html strategy_defaults.json; do
+for f in server.py db.py signing.py keygen.py notify.py liveness_watch.py server_meta.py portal_users.py requirements.txt scalp-license.service admin_ui.html strategy_defaults.json; do   # ── MONITOR_DEPLOY_FILES_20261127 ── portal_users.py
   if [ ! -f "$f" ]; then
     echo "MISSING file next to this script: $f — aborting."; exit 1
   fi
@@ -96,7 +96,7 @@ fi
 echo ""
 echo "[1/4] Copying files to droplet..."
 ssh $SSH_OPTS "$SSH_USER@$DROPLET_IP" "mkdir -p $REMOTE_DIR"
-scp $SSH_OPTS -q server.py db.py signing.py keygen.py notify.py liveness_watch.py server_meta.py requirements.txt scalp-license.service admin_ui.html strategy_defaults.json \
+scp $SSH_OPTS -q server.py db.py signing.py keygen.py notify.py liveness_watch.py server_meta.py portal_users.py requirements.txt scalp-license.service admin_ui.html strategy_defaults.json \
     "$SSH_USER@$DROPLET_IP:$REMOTE_DIR/"
 echo "      done."
 
@@ -181,9 +181,12 @@ esac
 
 echo "  - nightly backup cron"
 mkdir -p backups
-( crontab -l 2>/dev/null | grep -v 'scalp-license-backup' ; \
-  echo "17 1 * * * sqlite3 $DIR/licenses.db \".backup $DIR/backups/licenses-\$(date +\%F).db\" && find $DIR/backups -name 'licenses-*.db' -mtime +14 -delete # scalp-license-backup" \
-) | crontab -
+# ── FLEET_MONITOR_FIX_20261127 ── (DEF-109) under set -e a bare `crontab -l | grep -v` stopped the subshell when the
+# crontab was empty (grep exits 1), so `crontab -` installed an EMPTY crontab and no backup ran.
+{ { crontab -l 2>/dev/null || true; } | { grep -v 'scalp-license-backup' || true; }; \
+  echo "17 1 * * * sqlite3 $DIR/licenses.db \".backup $DIR/backups/licenses-\$(date +\%F).db\" && find $DIR/backups -name 'licenses-*.db' -mtime +14 -delete # scalp-license-backup"; \
+} | crontab -
+crontab -l | grep -q 'scalp-license-backup' || { echo "  !! backup cron was not installed"; exit 1; }
 
 echo "  - first ADMIN license (only if DB is empty)"
 SECRET=$(cat secrets/admin_secret.txt)
