@@ -6,6 +6,7 @@
 #                                        ── FLEET_RELAY_PER_MACHINE_20261127 ── (TD-116, TD-117) TC-MONSRV-0006/0007 rewritten, 0043…0046
 #                                        ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) TC-MONSRV-0047…0048
 #                                        ── FLEET_WATCH_20261127 ── (TD-112) TC-MONSRV-0049…0056
+#                                        ── FLEET_SWITCH_LABEL_20261127 ── TC-MONSRV-0044 reworded, 0057
 #
 # The Fleet Monitor service end to end: the real FastAPI app under uvicorn on
 # a free local port (no Starlette TestClient), a throw-away monitor.db and a
@@ -455,10 +456,10 @@ r_a = ad.post("/devices/KEY-ANBU/relay", data={"csrf": acs, "relay": "0"})
 card = ad.get("/").text
 vcard = vw.get("/").text
 check("TC-MONSRV-0044 the Fleet-card switch: viewer 403, no CSRF 403, admin turns it off; every viewer sees "
-      "'Telegram alerts off'; only admins get the button",
+      "'not sent to Telegram'; only admins get the button",
       r_v.status_code == 403 and r_n.status_code == 403 and r_a.status_code == 303
-      and store.device("KEY-ANBU")["relay"] == 0 and "Telegram alerts off" in vcard
-      and "Telegram alerts: turn on" in card and "Telegram alerts: turn" not in vcard, (r_v.status_code, r_n.status_code, r_a.status_code))
+      and store.device("KEY-ANBU")["relay"] == 0 and "not sent to Telegram" in vcard
+      and ">Send to Telegram<" in card and "Send to Telegram<" not in vcard and "Stop sending to" not in vcard, (r_v.status_code, r_n.status_code, r_a.status_code))
 old_db = TMP / "old.db"
 with sqlite3.connect(old_db) as c:
     c.execute("CREATE TABLE devices (key TEXT PRIMARY KEY, machine_id TEXT, label TEXT, tier TEXT, app_version TEXT,"
@@ -483,6 +484,15 @@ st = [pages.status(dict(dv, last_seen=t_pre - 240), {"market_open": 0}, t_pre)[1
 check("TC-MONSRV-0046 Online follows the machine's check-in cadence: market closed 4 min → Online (8 min → Late); "
       "market open 4 min → Late; 20 min in market hours → Offline (red) (TD-116)",
       st == ["Online", "Late", "Late", "bad"], st)
+
+(TMP / "secrets" / "monitor.json").write_text('{"telegram_targets": [{"chat_id": "-100", "name": "Market Makers channel"}]}')
+named = ad.get("/").text
+(TMP / "secrets" / "monitor.json").unlink()
+check("TC-MONSRV-0057 the switch names where it sends: 'sent to / not sent to Market Makers channel', button "
+      "'Send to / Stop sending to Market Makers channel' (a portal switch, not the app's Telegram setting)",
+      "not sent to Market Makers channel" in named and "sent to Market Makers channel" in named
+      and "Send to Market Makers channel<" in named and "Stop sending to Market Makers channel<" in named
+      and "Telegram alerts" not in named, named[:200])
 
 # ── Charges on the card, carried legs dated (FLEET_OPEN_CADENCE_20261127) ──
 snap2 = dict(snap, totals={"net": -3404, "realised": -12542, "unrealised": 9581, "charges": 443,

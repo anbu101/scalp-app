@@ -203,7 +203,7 @@ def fleet(request: Request):
         return _to_login()
     now = time.time()
     return pages.fleet_page(u, store.devices(), store.snapshots(), store.unacked_counts(now - 7 * 86400),
-                            now, pages.now_ist_day(now))
+                            now, pages.now_ist_day(now), relay.target_label())   # ── FLEET_SWITCH_LABEL_20261127 ──
 
 
 @app.get("/alerts", response_class=HTMLResponse)

@@ -12,8 +12,8 @@ phone. Config (all optional; relay is off when no target resolves):
     → used for the bot token, and as the one default target when
       monitor.json lists none.
 
-Which machines: ── FLEET_RELAY_PER_MACHINE_20261127 ── each machine has its own "Telegram alerts"
-switch on its Fleet card (admins change it; new machines start ON). Anbu
+Which machines: ── FLEET_RELAY_PER_MACHINE_20261127 ── each machine has its own switch on its
+Fleet card ("Send to <channel>", FLEET_SWITCH_LABEL_20261127: a PORTAL switch, not the app's Telegram setting) (admins change it; new machines start ON). Anbu
 turns it off for his own Macs, which already page him. An old
 "admin_devices" key in monitor.json is ignored.
 
@@ -137,6 +137,17 @@ def submit(dev: Dict[str, Any], new_events: List[Dict[str, Any]]) -> int:
     except Exception as e:
         print(f"[RELAY] submit failed: {e!r}")
         return 0
+
+
+def target_label() -> str:
+    """── FLEET_SWITCH_LABEL_20261127 ── what the per-machine switch sends to, in words for the Fleet card:
+    the targets' "name"s from monitor.json ("Market Makers channel"), else "Telegram"."""
+    try:
+        names = [str(t.get("name") or "").strip() for t in config()["targets"]]
+        names = [n for n in names if n]
+        return ", ".join(names) if names else "Telegram"
+    except Exception:
+        return "Telegram"
 
 
 def broadcast(text: str) -> int:

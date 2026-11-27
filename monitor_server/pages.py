@@ -180,7 +180,7 @@ def _kpi(label: str, value: str) -> str:
     return f'<div class="kpi"><small>{e(label)}</small><span class="v">{value}</span></div>'
 
 
-def fleet_page(user, devs, snaps, unacked, now, today) -> str:
+def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram") -> str:   # ── FLEET_SWITCH_LABEL_20261127 ── channel
     total_net = total_open = online = 0
     cards = []
     for d in devs:
@@ -220,11 +220,11 @@ def fleet_page(user, devs, snaps, unacked, now, today) -> str:
             admin += (f'<form method="post" action="/devices/{e(d["key"])}/relay" style="margin-top:6px">'
                       f'<input type="hidden" name="csrf" value="{e(user["csrf"])}">'
                       f'<input type="hidden" name="relay" value="{0 if d.get("relay", 1) else 1}">'
-                      f'<button>{"Telegram alerts: turn off" if d.get("relay", 1) else "Telegram alerts: turn on"}</button></form>')
+                      f'<button>{("Stop sending to " if d.get("relay", 1) else "Send to ") + e(channel)}</button></form>')   # ── FLEET_SWITCH_LABEL_20261127 ──
         cards.append(
             f'<div class="card"><h3>{e(d["label"])} <span class="badge b-{st_cls}">{st_txt}</span> {alert_link}</h3>'
             f'<div class="meta">seen {ago(d.get("last_seen"), now)} · v{e(d.get("app_version") or "?")}'
-            f' · {e(d.get("tier") or "")} · {"Telegram alerts on" if d.get("relay", 1) else "Telegram alerts off"}</div>'
+            f' · {e(d.get("tier") or "")} · {("sent to " if d.get("relay", 1) else "not sent to ") + e(channel)}</div>'   # ── FLEET_SWITCH_LABEL_20261127 ──
             f'<div class="nums"><div><small>Net today</small>{money(tot.get("net"))}</div>'
             f'<div><small>Realised</small>{money(tot.get("realised"))}</div>'
             f'<div><small>Unrealised</small>{money(tot.get("unrealised"))}</div>'

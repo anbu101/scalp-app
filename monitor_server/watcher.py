@@ -15,8 +15,9 @@ the monitor, every TICK_S, sends to the Telegram targets (relay.broadcast):
                after it happened (and not older than REMIND_MAX_AGE_S) → posted
                once more with a link to the Alerts page.
 
-Which machines: the same per-machine "Telegram alerts" switch as criticals
-(devices.relay). A machine switched off gets none of these.
+Which machines: the same per-machine portal switch as criticals ("Send to
+<channel>" on the Fleet card; devices.relay) — not the app's own Telegram setting,
+so a non-admin install with no Telegram is covered (FLEET_SWITCH_LABEL_20261127). A machine switched off gets none of these.
 
 Trading day without a holiday list: today is a trading day once ANY machine
 (switched on or off) has sent a snapshot saying the market is open; that is
