@@ -8,9 +8,11 @@ the monitor, every TICK_S, sends to the Telegram targets (relay.broadcast):
                day → "🔴 offline · last seen HH:MM" once; "✅ back online" when it
                returns. A machine that never started today counts (last seen an
                earlier day).
-  SUMMARY      at SUMMARY_AT (15:50 IST) on a trading day, one fleet message:
-               per machine net, realised, charges, closed trades, carried legs;
-               fleet total. Built from day_summary (each machine's last snapshot).
+  SUMMARY      at SUMMARY_AT (15:50 IST) on a trading day, one fleet summary CARD
+               (fleet_card.py: machine × strategy matrix, booked P&L, net after
+               charges, week, month) with a one-line caption; the text summary
+               (booked, charges, net, open legs per machine) when the card cannot
+               be drawn or Telegram refuses it. From day_summary (last snapshots).
   REMINDER     a CRITICAL / ORDER_REJECTED nobody acknowledged REMIND_AFTER_S
                after it happened (and not older than REMIND_MAX_AGE_S) → posted
                once more with a link to the Alerts page.
@@ -36,6 +38,7 @@ from datetime import datetime
 from html import escape
 from typing import Any, Dict, List, Optional
 
+import fleet_card   # ── FLEET_SUMMARY_CARD_20261127 ──
 import relay
 import store
 
@@ -144,7 +147,10 @@ def _money(v: Any) -> str:
     return ("+" if x > 0 else "−" if x < 0 else "") + f"₹{abs(x):,}"
 
 
-def daily_summary(now: float) -> Optional[str]:
+def _summary_rows(now: float):
+    """── FLEET_SUMMARY_CARD_20261127 ── today's (devices, day_summary rows) for the 15:50
+    summary, ONCE a day (recorded in notices); None before 15:50, on a non-trading day,
+    when already sent, or when no switched-on machine reported."""
     if _minute(now) < SUMMARY_AT or not trading_day(now):
         return None
     day = store.ist_day(now)
@@ -156,6 +162,16 @@ def daily_summary(now: float) -> Optional[str]:
         return None
     if not rows:
         return None
+    return devs, rows
+
+
+def daily_summary(now: float) -> Optional[str]:
+    """The text summary (sent when the card cannot be drawn or sent)."""
+    got = _summary_rows(now)
+    return _summary_text(now, *got) if got else None
+
+
+def _summary_text(now: float, devs: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
     # ── FLEET_MTM_AND_SUMMARY_20261127 ── the app's Daily Summary: BOOKED (realised) P&L is the day's result;
     # open legs and their P&L are listed apart as "not booked", never added to it.
     lines = [f"📊 <b>FLEET SUMMARY</b> · {_ist(now).strftime('%a %d %b')}"]
@@ -180,6 +196,54 @@ def daily_summary(now: float) -> Optional[str]:
                          f" · {k} trade{'' if k == 1 else 's'}" + (f" · {ol} leg(s) open" if ol else ""))
     lines.append(f"\n<b>Fleet: {_money(fleet_r)} booked · {_money(fleet_r - fleet_c)} after charges</b>\n{PORTAL}/day")
     return "\n".join(lines)
+
+
+def _strategy_name(s_: Dict[str, Any]) -> str:
+    return str(s_.get("codename") or s_.get("id") or "?")
+
+
+def card_data(now: float, devs: Dict[str, Any], rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """── FLEET_SUMMARY_CARD_20261127 ── (TD-126) what fleet_card draws: per machine its BOOKED
+    (realised) P&L, charges, closed trades, open legs, and per strategy booked + closed trades
+    (a strategy is shown when it closed a trade or booked something today); the fleet's week
+    and month net = the sum of the machines' own week_net / month_net (net after charges)."""
+    ms, wk, mo = [], [], []
+    for r in rows:
+        t = r["totals"] or {}
+        st = {}
+        for s_ in r["rows"] or []:
+            k, real = int(s_.get("closed_trades") or 0), float(s_.get("realised") or 0)
+            if k or real:
+                st[_strategy_name(s_)] = (real, k)
+        ms.append({"name": str(devs[r["device_key"]].get("label") or "machine"), "strategies": st,
+                   "booked": float(t.get("realised") or 0), "charges": float(t.get("charges") or 0),
+                   "trades": int(t.get("closed_trades") or 0), "open_legs": int(t.get("open_legs") or 0),
+                   "unrealised": float(t.get("unrealised") or 0)})
+        if t.get("week_net") is not None:
+            wk.append(float(t["week_net"]))
+        if t.get("month_net") is not None:
+            mo.append(float(t["month_net"]))
+    return {"date": _ist(now).strftime("%a %d %b %Y"), "time": _ist(now).strftime("%H:%M"),
+            "week": sum(wk) if wk else None, "month": sum(mo) if mo else None, "machines": ms}
+
+
+def daily_summary_msg(now: float) -> Optional[Dict[str, Any]]:
+    """── FLEET_SUMMARY_CARD_20261127 ── the 15:50 summary: {"text", "png", "caption"}.
+    png is None when the card cannot be drawn (then the text is sent)."""
+    got = _summary_rows(now)
+    if not got:
+        return None
+    devs, rows = got
+    text = _summary_text(now, devs, rows)
+    data = card_data(now, devs, rows)
+    png = fleet_card.render(data)
+    fb = sum(m["booked"] for m in data["machines"])
+    fc = sum(m["charges"] for m in data["machines"])
+    n = len(data["machines"])
+    caption = (f"📊 <b>Fleet summary</b> · {_ist(now).strftime('%a %d %b')}\n"
+               f"{_money(fb)} booked · {_money(fb - fc)} after charges · {n} machine{'' if n == 1 else 's'}\n"
+               f"{PORTAL}/day")
+    return {"text": text, "png": png, "caption": caption}
 
 
 def reminders(now: float) -> List[str]:
@@ -210,13 +274,16 @@ def tick(now: Optional[float] = None) -> int:
             msgs += fn(now)
         except Exception as e:
             print(f"[WATCH] {fn.__name__} failed: {e!r}")
+    card = 0
     try:
-        s = daily_summary(now)
-        if s:
-            msgs.append(s)
+        sm = daily_summary_msg(now)   # ── FLEET_SUMMARY_CARD_20261127 ── the card, else the text
+        if sm and sm["png"]:
+            card = relay.broadcast_photo(sm["png"], sm["caption"], sm["text"])
+        elif sm:
+            msgs.append(sm["text"])
     except Exception as e:
         print(f"[WATCH] summary failed: {e!r}")
-    return sum(relay.broadcast(m) for m in msgs)
+    return card + sum(relay.broadcast(m) for m in msgs)
 
 
 def _loop() -> None:

@@ -625,6 +625,150 @@ q = drain()
 srv_src = (HERE / "server.py").read_text()
 check("TC-MONSRV-0056 tick() sends the notices to the Telegram targets; the monitor starts the watcher at start-up",
       store_n == len(q) >= 1 and all(x[1] == "999" for x in q) and "watcher.start()" in srv_src, (store_n, q))
+# ── FLEET_SUMMARY_CARD_20261127 ── (TD-126) the 15:50 summary as one matrix card
+import fleet_card as FC   # noqa: E402
+
+
+def _m(name, st, chg=0.0, ol=0, un=0.0):
+    return {"name": name, "strategies": st, "booked": sum(v[0] for v in st.values()), "charges": chg,
+            "trades": sum(v[1] for v in st.values()), "open_legs": ol, "unrealised": un}
+
+
+_S5 = ["Icarus", "Velvet", "Scalpel", "Timberwolf", "Tripwire"]
+CASES = {
+    "1x1": [_m("Anbu", {"Icarus": (7450, 1)}, 85)],
+    "1x5": [_m("Anbu", {s: (1000 * (i + 1) * (-1 if i == 2 else 1), i + 1) for i, s in enumerate(_S5)}, 900)],
+    "3x1": [_m("Anbu", {"Icarus": (7750, 5)}, 400), _m("Ravi", {"Icarus": (-8200, 5)}, 400, 2, -1150),
+            _m("Dhivakar", {"Icarus": (7950, 1)}, 80)],
+    "3x5": [_m("Anbu", {s: (2000 + i * 900, 2) for i, s in enumerate(_S5)}, 700), _m("Ravi", {"Velvet": (3900, 5)}, 300),
+            _m("Dhivakar", {"Icarus": (2300, 3), "Scalpel": (1300, 5)}, 250, 2, -1150)],
+    "10x5": [_m(f"M{i:02d}", {s: ((i * 3700 + j * 2100) % 23000 - 6000, 1 + (i + j) % 5) for j, s in enumerate(_S5)
+                               if (i + j) % 3}, 500) for i in range(9)] + [_m("Idle", {})],
+    "9strat": [_m("Anbu", {f"S{j}": (1000 + j, 1) for j in range(9)}, 100), _m("Ravi", {"S0": (500, 1), "S8": (700, 2)}, 50)],
+}
+for _k in CASES:
+    for _r in CASES[_k]:
+        _r["machines_case"] = _k
+L = {k: FC.layout({"machines": v, "week": 184300, "month": 312950}) for k, v in CASES.items()}
+check("TC-MONSRV-0075 the fleet card adapts: 1 machine → no Fleet row, '<name> booked', best/worst strategy; "
+      "1 strategy → Trades + P/L bar (no bar for 1×1), '<strategy> only'; ≥2×≥2 → full grid with a Fleet row; "
+      "> 6 strategies → 5 + Others; best machine first, no-trade machines last; boxes = booked, net, Week, Month",
+      L["1x1"]["mode"] == "bar" and not L["1x1"]["bar"] and not L["1x1"]["fleet_row"]
+      and [b[0] for b in L["1x1"]["boxes"]] == ["Anbu booked", "Net after charges", "Week", "Month"]
+      and [f[0] for f in L["1x1"]["foot"]] == ["Open at close", "Charges"]
+      and L["1x5"]["mode"] == "grid" and len(L["1x5"]["cols"]) == 5 and not L["1x5"]["fleet_row"]
+      and [f[0] for f in L["1x5"]["foot"]][:2] == ["Best strategy", "Worst strategy"]
+      and L["3x1"]["mode"] == "bar" and L["3x1"]["bar"] and L["3x1"]["fleet_row"]
+      and L["3x1"]["header_sub"] == "3 machines · Icarus only"
+      and [r["name"] for r in L["3x1"]["machines"]] == ["Dhivakar", "Anbu", "Ravi"]
+      and [f[0] for f in L["3x1"]["foot"]][:2] == ["Best machine", "Worst machine"]
+      and L["3x5"]["mode"] == "grid" and len(L["3x5"]["cols"]) == 5 and L["3x5"]["fleet_row"]
+      and L["3x5"]["header_sub"] == "3 machines · 5 strategies"
+      and [b[0] for b in L["3x5"]["boxes"]] == ["Fleet booked", "Net after charges", "Week", "Month"]
+      and L["10x5"]["machines"][-1]["name"] == "Idle"
+      and len(L["9strat"]["cols"]) == 5 and len(L["9strat"]["others"]) == 4 and L["9strat"]["cols"][0] in ("S0", "S8"),
+      {k: (v["mode"], v["cols"], [f[0] for f in v["foot"]]) for k, v in L.items()})
+PNG = {k: FC.render({"date": "Mon 30 Nov 2026", "time": "15:50", "week": 184300, "month": None, "machines": v})
+       for k, v in CASES.items()}
+import struct as _struct   # noqa: E402
+_dims = {k: _struct.unpack(">II", v[16:24]) if v else None for k, v in PNG.items()}
+check("TC-MONSRV-0076 every combination draws a PNG card (1840 px wide; taller with more machines); a broken input "
+      "returns None (then the text summary is sent) instead of raising",
+      all(v and v[:8] == b"\x89PNG\r\n\x1a\n" for v in PNG.values()) and all(d[0] == 1840 for d in _dims.values())
+      and _dims["1x1"][1] < _dims["3x5"][1] < _dims["10x5"][1]
+      and FC.render({"machines": [{"name": "x", "strategies": {"a": ("bad", "x")}}]}) is None, _dims)
+_lo = FC.layout({"machines": [_m("A", {"X": (500, 1)}), _m("B", {"X": (200, 1)})]})
+_none = FC.layout({"machines": CASES["1x1"], "week": None, "month": None})
+check("TC-MONSRV-0077 numbers as the app prints them: ₹1,28,667 (Indian grouping), −₹450, cells +9.8k / +1.11L; "
+      "'Lowest machine' when nobody lost; Week / Month '—' when no machine reported them",
+      FC.inr(128667) == "+₹1,28,667" and FC.inr(-450) == "−₹450" and FC.inr(0) == "₹0" and FC.inr(10000000) == "+₹1,00,00,000"
+      and FC.short(9800) == "+9.8k" and FC.short(111000) == "+1.11L" and FC.short(-450) == "−450"
+      and _lo["foot"][1][0] == "Lowest machine"
+      and _none["boxes"][2][1:] == ("—", FC.MUTED, "not reported") and _none["boxes"][3][1] == "—",
+      (_lo["foot"], _none["boxes"]))
+
+snapw("WA", T(15, 45, day=30), True, {"realised": 8200, "charges": 410, "closed_trades": 4, "open_legs": 2,
+                                       "unrealised": -1150, "week_net": 51000, "month_net": 120000},
+      [{"id": "IC_V2", "codename": "Icarus", "state": "OPEN", "realised": 6100, "closed_trades": 3, "open_legs": 2},
+       {"id": "TMA_V2", "codename": "Timberwolf", "state": "FLAT", "realised": 2100, "closed_trades": 1},
+       {"id": "VET_V1", "codename": "Velvet", "state": "IDLE", "realised": 0, "closed_trades": 0}])
+snapw("WC", T(15, 45, day=30), True, {"realised": -900, "charges": 120, "closed_trades": 2, "week_net": -3000,
+                                       "month_net": 15000},
+      [{"id": "IC_V2", "codename": "Icarus", "state": "FLAT", "realised": -900, "closed_trades": 2}])
+snapw("WB", T(15, 45, day=30), True, {"realised": 99999, "closed_trades": 9, "week_net": 99999})
+msg_early = watcher.daily_summary_msg(T(15, 49, day=30))
+msg = watcher.daily_summary_msg(T(15, 50, day=30))
+msg_again = watcher.daily_summary_msg(T(15, 52, day=30))
+cd = watcher.card_data(T(15, 50, day=30), {d["key"]: d for d in store.devices()},
+                       [r for r in store.day_summaries("2026-11-30") if r["device_key"] in ("WA", "WC")])
+check("TC-MONSRV-0078 at 15:50, once: the card (PNG) + caption 'booked · after charges · N machines' + the text "
+      "summary as fallback; per machine booked/charges/trades/open legs, per strategy only what closed or booked "
+      "today (IDLE left out); Week / Month = sum of the machines' own; a switched-off machine is left out",
+      msg_early is None and msg and msg["png"] and msg["png"][:4] == b"\x89PNG" and msg_again is None
+      and "Fleet summary</b> · Mon 30 Nov" in msg["caption"] and "+₹7,300 booked · +₹6,770 after charges · 2 machines" in msg["caption"]
+      and "/day" in msg["caption"] and "FLEET SUMMARY" in msg["text"] and "Anbu" not in msg["text"]
+      and sorted(m["name"] for m in cd["machines"]) == ["Kumar", "Ravi"]
+      and next(m for m in cd["machines"] if m["name"] == "Ravi")["strategies"] == {"Icarus": (6100.0, 3), "Timberwolf": (2100.0, 1)}
+      and next(m for m in cd["machines"] if m["name"] == "Ravi")["open_legs"] == 2
+      and cd["week"] == 48000 and cd["month"] == 135000 and cd["date"] == "Mon 30 Nov 2026", (msg and msg["caption"], cd))
+
+relay._reset_for_tests()
+drain()
+_d1 = _wdt(2026, 12, 1, 15, 50, tzinfo=store.IST).timestamp()
+_d2 = _wdt(2026, 12, 2, 15, 50, tzinfo=store.IST).timestamp()
+
+
+def _day_snap(ts):   # the snapshot table keeps one row per machine: write each day's just before its tick
+    snapw("WA", ts - 300, True, {"realised": 100, "charges": 10, "closed_trades": 1},
+          [{"id": "IC_V2", "codename": "Icarus", "realised": 100, "closed_trades": 1}])
+
+
+_day_snap(_d1)
+n_card = watcher.tick(_d1)
+q_card = drain()
+_keep_render = FC.render
+watcher.fleet_card.render = lambda data: None
+_day_snap(_d2)
+n_text = watcher.tick(_d2)
+q_text = drain()
+watcher.fleet_card.render = _keep_render
+check("TC-MONSRV-0079 tick() at 15:50 queues the card for every target (photo + caption + text fallback); when the "
+      "card cannot be drawn it queues the text summary instead",
+      n_card == len(q_card) == 1 and len(q_card[0]) == 5 and q_card[0][1] == "999" and q_card[0][3][:4] == b"\x89PNG"
+      and "Fleet summary" in q_card[0][4] and "FLEET SUMMARY" in q_card[0][2]
+      and n_text == len(q_text) == 1 and len(q_text[0]) == 3 and "FLEET SUMMARY" in q_text[0][2],
+      ([len(x) for x in q_card], [len(x) for x in q_text]))
+
+_calls = []
+_keep = (relay._send_photo, relay._send, relay.time.sleep)
+relay.time.sleep = lambda s: None
+relay._send = lambda tok, chat, text: _calls.append(("text", text)) or True
+relay._send_photo = lambda tok, chat, png, cap: _calls.append(("photo", cap)) or True
+relay._deliver(("t", "1", "TEXT", b"png", "CAP"))
+ok_calls = list(_calls)
+_calls.clear()
+relay._send_photo = lambda tok, chat, png, cap: _calls.append(("photo", cap)) or False
+relay._deliver(("t", "1", "TEXT", b"png", "CAP"))
+fail_calls = list(_calls)
+_calls.clear()
+relay._deliver(("t", "1", "PLAIN"))
+plain_calls = list(_calls)
+relay._send_photo, relay._send, relay.time.sleep = _keep
+body, ctype = relay._multipart({"chat_id": "1", "caption": "C"}, "photo", "fleet-summary.png", b"PNGDATA", "image/png")
+check("TC-MONSRV-0080 relay: the card goes as sendPhoto (multipart, image/png, caption); refused twice → the text "
+      "summary goes instead (never lost); plain notices unchanged",
+      ok_calls == [("photo", "CAP")] and fail_calls == [("photo", "CAP"), ("photo", "CAP"), ("text", "TEXT")]
+      and plain_calls == [("text", "PLAIN")] and ctype.startswith("multipart/form-data; boundary=")
+      and b'name="photo"; filename="fleet-summary.png"' in body and b"Content-Type: image/png" in body
+      and b"PNGDATA" in body and b'name="caption"' in body and "sendPhoto" in (HERE / "relay.py").read_text(),
+      (ok_calls, fail_calls, plain_calls))
+_req = (HERE / "requirements.txt").read_text()
+_dep = (HERE / "deploy-monitor.command").read_text()
+check("TC-MONSRV-0081 the droplet gets what the card needs: Pillow in requirements.txt (installed by the deploy), "
+      "fleet_card.py deployed (FILES = every non-test *.py), fonts from the droplet's DejaVu folder",
+      re.search(r"^pillow>=", _req, re.M) is not None and "pip install --quiet -r requirements.txt" in _dep
+      and "ls *.py | grep -v '^test_'" in _dep and "/usr/share/fonts/truetype/dejavu" in FC.FONT_DIRS
+      and FC._font_paths()[0] is not None)
 store.DB_PATH = _keep_db
 
 cf2 = (HERE / "Caddyfile").read_text()

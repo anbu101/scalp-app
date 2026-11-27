@@ -172,6 +172,70 @@ def broadcast(text: str) -> int:
         return 0
 
 
+def broadcast_photo(png: bytes, caption: str, fallback_text: str) -> int:
+    """── FLEET_SUMMARY_CARD_20261127 ── (TD-126) the fleet summary card to every target:
+    a photo with a short caption; if Telegram refuses the photo twice, that target gets
+    fallback_text (the text summary) instead, so the summary is never lost.
+    Queue items are (token, chat_id, fallback_text, png, caption). Never raises."""
+    try:
+        cfg = config()
+        if not cfg["bot_token"] or not cfg["targets"]:
+            return 0
+        n = 0
+        for t in cfg["targets"]:
+            try:
+                _q.put_nowait((cfg["bot_token"], str(t["chat_id"]), fallback_text, png, caption[:1024]))
+                n += 1
+            except queue.Full:
+                print("[RELAY] queue full — summary card dropped")
+        _ensure_worker()
+        return n
+    except Exception as e:
+        print(f"[RELAY] broadcast_photo failed: {e!r}")
+        return 0
+
+
+def _multipart(fields: Dict[str, str], name: str, filename: str, blob: bytes, ctype: str):
+    boundary = "----scalpfleet" + os.urandom(12).hex()
+    out = bytearray()
+    for k, v in fields.items():
+        out += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").encode()
+    out += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n"
+            f"Content-Type: {ctype}\r\n\r\n").encode() + blob + b"\r\n"
+    out += f"--{boundary}--\r\n".encode()
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
+
+
+def _send_photo(token: str, chat_id: str, png: bytes, caption: str) -> bool:
+    try:
+        body, ctype = _multipart({"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+                                 "photo", "fleet-summary.png", png, "image/png")
+        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendPhoto", data=body,
+                                     headers={"Content-Type": ctype})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status == 200
+    except Exception as e:
+        print(f"[RELAY] photo send failed: {type(e).__name__}")
+        return False
+
+
+def _deliver(item: tuple) -> None:
+    """One queued item: a text message, or a photo that falls back to its text."""
+    if len(item) == 5:
+        token, chat_id, text, png, caption = item
+        if _send_photo(token, chat_id, png, caption):
+            return
+        time.sleep(2)
+        if _send_photo(token, chat_id, png, caption):
+            return
+        print("[RELAY] summary card refused twice — sending the text summary")
+    else:
+        token, chat_id, text = item
+    if not _send(token, chat_id, text):
+        time.sleep(2)
+        _send(token, chat_id, text)
+
+
 def _send(token: str, chat_id: str, text: str) -> bool:
     try:
         data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode": "HTML",
@@ -186,10 +250,7 @@ def _send(token: str, chat_id: str, text: str) -> bool:
 
 def _worker() -> None:
     while True:
-        token, chat_id, text = _q.get()
-        if not _send(token, chat_id, text):
-            time.sleep(2)
-            _send(token, chat_id, text)
+        _deliver(_q.get())   # ── FLEET_SUMMARY_CARD_20261127 ── text or photo
         time.sleep(0.05)
 
 
