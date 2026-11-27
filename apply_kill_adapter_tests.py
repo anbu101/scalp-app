@@ -26,6 +26,7 @@
 #  ("OFF" vs "off" before .upper(), 1800 // 60 vs / 60, a `remaining <= 0` that
 #  0 never reaches, the watch counter's start value).
 #  Tests and tooling only: the app is unchanged, no release needed.
+#  This script's own tests run with HOME = a temp folder (CL-22).
 #
 #  Run ONLY this script:
 #     cd ~/dev/scalp-app && python3 apply_kill_adapter_tests.py
@@ -256,6 +257,9 @@ if "--skip-tests" in args:
 else:
     say(f"running tests with {py}")
     env = dict(os.environ, PYTHONPATH=backend, SCALP_TEST_MODE="1")
+    _home = tempfile.mkdtemp(prefix="apply_home_")   # DEF-113: tests never get the real HOME (CL-22)
+    env["HOME"] = _home
+    env["USERPROFILE"] = _home
     failed, envmiss = [], []
     for where, t in TESTS:
         cwd = backend if where == "backend" else repo

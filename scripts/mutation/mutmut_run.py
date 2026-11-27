@@ -86,7 +86,8 @@ MODULES = {
     "kill_switch": {
         "file": E + "kill_switch.py",
         "reach": r"kill_switch",
-        "suites": [E + "test_kill_switch.py", "app/trading/test_fleet_modes.py", E + "test_mutmut_safety.py"],
+        "suites": [E + "test_kill_switch.py", E + "test_kill_switch_adapters.py",   # KILL_ADAPTER_TESTS_20261126 (TD-074)
+                   "app/trading/test_fleet_modes.py", E + "test_mutmut_safety.py"],
     },
 }
 ORDER = list(MODULES)
