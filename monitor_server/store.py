@@ -291,7 +291,43 @@ def devices(include_all: bool = False) -> List[Dict[str, Any]]:
     """In-fleet machines; include_all=True adds waiting / removed ones (admin lists). ── FLEET_MEMBERSHIP_20261127 ──"""
     if include_all:
         return _rows("SELECT * FROM devices ORDER BY label COLLATE NOCASE")
-    return _rows("SELECT * FROM devices WHERE membership='in' ORDER BY label COLLATE NOCASE")
+    # ── FLEET_FROM_LICENSE_ADMIN_20261127 ── a licence pre-approved from License Admin that has not reported yet
+    # (last_seen NULL) is in the fleet but shown nowhere until its first report
+    return _rows("SELECT * FROM devices WHERE membership='in' AND last_seen IS NOT NULL ORDER BY label COLLATE NOCASE")
+
+
+def licence_label(key: str) -> Optional[str]:
+    """── FLEET_FROM_LICENSE_ADMIN_20261127 ── the licence's label (read-only licenses.db), or None if no such licence."""
+    if not LICENSE_DB.exists():
+        return None
+    c = sqlite3.connect(f"file:{LICENSE_DB}?mode=ro", uri=True, timeout=5)
+    try:
+        r = c.execute("SELECT label FROM licenses WHERE key=?", (key,)).fetchone()
+    finally:
+        c.close()
+    return (r[0] or key[:8]) if r else None
+
+
+def fleet_statuses() -> Dict[str, Dict[str, Any]]:
+    """── FLEET_FROM_LICENSE_ADMIN_20261127 ── every machine the monitor knows, by licence key, for License Admin."""
+    return {d["key"]: {"membership": d.get("membership") or "in", "last_seen": d.get("last_seen"),
+                       "label": d.get("label")} for d in devices(include_all=True)}
+
+
+def set_fleet(key: str, membership: str) -> Optional[str]:
+    """── FLEET_FROM_LICENSE_ADMIN_20261127 ── License Admin's Add to / Remove from fleet. A licence that never
+    reported gets a placeholder row (pre-approved). Returns None on success, else why."""
+    if membership not in ("in", "out"):
+        return "membership must be in or out"
+    if device(key):
+        set_membership(key, membership)
+        return None
+    label = licence_label(key)
+    if label is None:
+        return "no such licence"
+    with conn() as c:
+        c.execute("INSERT OR IGNORE INTO devices (key, label, membership) VALUES (?,?,?)", (key, label, membership))
+    return None
 
 
 def set_membership(key: str, membership: str) -> bool:   # ── FLEET_MEMBERSHIP_20261127 ──

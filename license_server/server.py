@@ -18,6 +18,8 @@ Endpoints:
 GET  /admin/portal/users     Fleet Monitor portal accounts + pending links   ── PORTAL_USERS_ADMIN_20261127 ──
 POST /admin/portal/invite    {username, role} → one-time setup link (no password here)
 POST /admin/portal/action    {username, action: reset|disable|enable|unlock|remove|cancel_invite}
+GET  /admin/portal/fleet     each licence's Fleet Monitor status                ── FLEET_FROM_LICENSE_ADMIN_20261127 ──
+POST /admin/portal/fleet     {key, membership: in|out} (pre-approves a licence that never reported)
   GET  /admin/list            all licenses (admin)
   GET  /admin/ui              admin web dashboard
   GET  /min_version           PUBLIC - app self-update nudge (advisory only)
@@ -585,6 +587,29 @@ def admin_portal_action(req: PortalActionRequest, x_admin_secret: str | None = H
     if req.action not in portal_users.ACTIONS:
         raise HTTPException(400, "unknown action")
     return _portal(portal_users.forward("POST", f"/internal/users/{name}/{req.action}"))
+
+
+# ── FLEET_FROM_LICENSE_ADMIN_20261127 ── fleet in / out per licence, from the licence row's Actions
+class PortalFleetRequest(BaseModel):
+    key: str = Field(max_length=64)
+    membership: str = Field(max_length=8)
+
+
+@app.get("/admin/portal/fleet")
+def admin_portal_fleet(x_admin_secret: str | None = Header(default=None)):
+    _require_admin(x_admin_secret)
+    return _portal(portal_users.forward("GET", "/internal/fleet"))
+
+
+@app.post("/admin/portal/fleet")
+def admin_portal_fleet_set(req: PortalFleetRequest, x_admin_secret: str | None = Header(default=None)):
+    _require_admin(x_admin_secret)
+    key = req.key.strip().upper()
+    if not re.match(r"^[A-Z0-9-]{4,64}$", key):
+        raise HTTPException(400, "bad licence key")
+    if req.membership not in ("in", "out"):
+        raise HTTPException(400, "membership must be in or out")
+    return _portal(portal_users.forward("POST", f"/internal/fleet/{key}", {"membership": req.membership}))
 
 
 ADMIN_UI_FILE = Path(__file__).resolve().parent / "admin_ui.html"

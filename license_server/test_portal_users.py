@@ -2,6 +2,7 @@
 # ── PORTAL_USERS_ADMIN_20261127 ── (TD-113) TC-LICPU-0001…0007
 # ── MONITOR_DEPLOY_FILES_20261127 ── (DEF-110) TC-LICPU-0008
 # ── PORTAL_COPY_FIX_20261127 ── (DEF-111) TC-LICPU-0009
+# ── FLEET_FROM_LICENSE_ADMIN_20261127 ── TC-LICPU-0010…0011
 # The License Admin page manages Fleet Monitor portal accounts: the license
 # server forwards /admin/portal/* to the monitor's internal API with its token.
 # A fake monitor (http.server on a free port) records what it receives.
@@ -128,6 +129,18 @@ check("TC-LICPU-0004 actions: a bad name or an unknown action is refused here (4
       b1[0] == 400 and b2[0] == 400 and g[0] == 200 and len(SEEN) == n + 1
       and SEEN[-1]["path"] == "/internal/users/ravi/disable", (b1, b2, g, SEEN[-1:]))
 
+n0 = len(SEEN)
+fr = [status_of(lambda: server.admin_portal_fleet(x_admin_secret="nope"))[0],
+      status_of(lambda: server.admin_portal_fleet_set(server.PortalFleetRequest(key="K", membership="in"), x_admin_secret=None))[0]]
+g = status_of(lambda: server.admin_portal_fleet(x_admin_secret=A))
+bad_k = status_of(lambda: server.admin_portal_fleet_set(server.PortalFleetRequest(key="../x", membership="in"), x_admin_secret=A))
+bad_m = status_of(lambda: server.admin_portal_fleet_set(server.PortalFleetRequest(key="SCLP-AB12", membership="maybe"), x_admin_secret=A))
+ok_s = status_of(lambda: server.admin_portal_fleet_set(server.PortalFleetRequest(key=" sclp-ab12 ", membership="in"), x_admin_secret=A))
+check("TC-LICPU-0010 fleet endpoints: admin secret required; the list and each change go to the monitor's internal "
+      "fleet API (key upper-cased); a bad key or status is refused here",
+      fr == [401, 401] and g[0] == 200 and bad_k[0] == 400 and bad_m[0] == 400 and ok_s[0] == 200
+      and [x["path"] for x in SEEN[n0:]] == ["/internal/fleet", "/internal/fleet/SCLP-AB12"]
+      and SEEN[-1]["body"] == {"membership": "in"} and SEEN[-1]["token"] == "T" * 43, (fr, g, bad_k, bad_m, ok_s, SEEN[n0:]))
 mon.shutdown()
 mon.server_close()
 down = status_of(lambda: server.admin_portal_users(x_admin_secret=A))
@@ -155,6 +168,11 @@ imps = [m for m in re.findall(r"^import (\w+)", (HERE / "server.py").read_text()
 check("TC-LICPU-0008 every module server.py imports from this folder is copied AND checked present by the deploy (DEF-110)",
       imps and all(f" {m}.py " in scp_line + " " and f" {m}.py " in sanity + " " for m in imps), (imps, scp_line, sanity))
 
+fleet_js = ui[ui.index("FLEET_FROM_LICENSE_ADMIN_20261127 BEGIN"):ui.index("FLEET_FROM_LICENSE_ADMIN_20261127 END")]
+check("TC-LICPU-0011 admin page: each licence row's Actions shows its Fleet status with Add to fleet / Remove from "
+      "fleet (remove asks first); loaded after the licences; nothing shown if the monitor is unreachable",
+      "${fleetCell(l)}" in ui and "loadFleet();" in ui and "Remove from fleet" in fleet_js and "Add to fleet" in fleet_js
+      and "confirm(" in fleet_js and "fleetMap === null" in fleet_js and "data-k=\"${esc(l.key)}\"" in fleet_js)
 cp = ui[ui.index("function copyText"):ui.index("let toastT")]
 check("TC-LICPU-0009 Copy works on this plain-HTTP page: the async clipboard only in a secure context, else a "
       "hidden textarea + execCommand('copy'); a failure says so (DEF-111)",

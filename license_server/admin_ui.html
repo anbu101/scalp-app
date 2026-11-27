@@ -501,6 +501,7 @@ async function loadLicenses(silent) {
     const d = await call("/admin/list");
     licenses = d.licenses || [];
     render();
+    loadFleet();   // ── FLEET_FROM_LICENSE_ADMIN_20261127 ──
     return true;
   } catch(e) {
     if (!silent) toast("Load failed: " + e.message);
@@ -568,12 +569,40 @@ function render() {
           ? `<button class="small" onclick="doSimple('unrevoke','${l.key}')">Unrevoke</button>`
           : `<button class="small danger" onclick="doRevoke('${l.key}','${esc(l.label)}')">Revoke</button>`}
         <button class="small" onclick="doRebind('${l.key}')">Rebind</button>
-      </div></td>`;
+        ${fleetCell(l)}
+      </div></td>`;   /* ── FLEET_FROM_LICENSE_ADMIN_20261127 ── */
     tbody.appendChild(tr);
   }
   document.getElementById("stats").textContent =
     `${licenses.length} licenses · ${active} active`;
 }
+/* ── FLEET_FROM_LICENSE_ADMIN_20261127 BEGIN ── Fleet Monitor in / out per licence */
+let fleetMap = null;   // null = monitor not reachable (no fleet buttons)
+async function loadFleet() {
+  try { fleetMap = (await call("/admin/portal/fleet")).fleet || {}; }
+  catch (e) { fleetMap = null; }
+  render();
+}
+function fleetCell(l) {
+  if (fleetMap === null) return "";
+  const f = fleetMap[l.key];
+  const m = f ? f.membership : "none";
+  const label = m === "in" ? (f.last_seen ? "In fleet" : "In fleet · not reported yet")
+              : m === "pending" ? "Waiting for approval" : m === "out" ? "Not in fleet" : "Not reported yet";
+  const cls = m === "in" ? "b-active" : m === "pending" ? "b-expired" : "b-unact";
+  const btn = m === "in"
+    ? `<button class="small" data-k="${esc(l.key)}" onclick="fleetSet(this.dataset.k,'out')">Remove from fleet</button>`
+    : `<button class="small" data-k="${esc(l.key)}" onclick="fleetSet(this.dataset.k,'in')">Add to fleet</button>`;
+  return `<div style="flex-basis:100%;margin-top:4px"><span class="badge ${cls}" title="Fleet Monitor">${esc(label)}</span></div>${btn}`;
+}
+async function fleetSet(key, membership) {
+  const l = licenses.find(x => x.key === key) || {};
+  if (membership === "out" && !confirm(`Remove ${l.label || key} from the Fleet Monitor?\n\nIt disappears from the portal and the channel; its earlier data comes back if you add it again.`)) return;
+  try { await call("/admin/portal/fleet", { key, membership }); toast(membership === "in" ? "Added to fleet ✓" : "Removed from fleet ✓"); }
+  catch (e) { toast("Fleet: " + e.message); }
+  loadFleet();
+}
+/* ── FLEET_FROM_LICENSE_ADMIN_20261127 END ── */
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 /* ---------- actions ---------- */

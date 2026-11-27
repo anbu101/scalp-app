@@ -11,6 +11,7 @@
 #                                        ── LICENSE_HTTPS_20261127 ── (TD-111) TC-MONSRV-0059
 #                                        ── ALERT_STRATEGY_INFER_20261127 ── TC-MONSRV-0060…0064
 #                                        ── FLEET_MEMBERSHIP_20261127 ── TC-MONSRV-0065…0070
+#                                        ── FLEET_FROM_LICENSE_ADMIN_20261127 ── TC-MONSRV-0071…0073
 #
 # The Fleet Monitor service end to end: the real FastAPI app under uvicorn on
 # a free local port (no Starlette TestClient), a throw-away monitor.db and a
@@ -734,6 +735,34 @@ check("TC-MONSRV-0070 Add back restores the machine with its earlier data; the c
       "Ravi &lt;b&gt;" in vw.get("/").text and "Ravi &lt;b&gt;" in back
       and not watcher._on({"membership": "pending"}) and not watcher._on({"membership": "out"})
       and watcher._on({"membership": "in"}))
+store.NEW_MACHINES = "auto"
+
+# ── fleet from License Admin (FLEET_FROM_LICENSE_ADMIN_20261127) ──
+f0 = api.get("/internal/fleet").status_code
+fl = api.get("/internal/fleet", headers=IH).json()
+check("TC-MONSRV-0071 internal fleet list: token required; every known machine by licence key with its status",
+      f0 == 403 and fl["ok"] and fl["fleet"]["KEY-RAVI"]["membership"] == "in"
+      and fl["fleet"]["KEY-NEW"]["membership"] == "in", fl)
+with sqlite3.connect(TMP / "licenses.db") as c:
+    c.execute("INSERT OR REPLACE INTO licenses VALUES ('KEY-PRE', 'Preapproved Pal', 'STANDARD', 'HW-PRE', 0)")
+store.NEW_MACHINES = "approval"
+pre = api.post("/internal/fleet/key-pre", headers=IH, json={"membership": "in"})
+hidden_pre = "Preapproved Pal" not in ad.get("/").text and all(d["key"] != "KEY-PRE" for d in store.devices())
+first = ingest("KEY-PRE", "HW-PRE", [ev(1, "CRITICAL", message="pre first")])
+check("TC-MONSRV-0072 pre-approve from License Admin: a licence that never reported is 'in' but shown nowhere (no "
+      "empty Offline card, no offline alert); its FIRST report is kept at once, no waiting",
+      pre.status_code == 200 and pre.json()["fleet"]["membership"] == "in" and hidden_pre
+      and first.json()["enabled"] is True and "Preapproved Pal" in ad.get("/").text
+      and any(a["summary"] == "pre first" for a in store.alerts("KEY-PRE", False, now - 600)), (pre.text, first.json()))
+o1 = api.post("/internal/fleet/KEY-PRE", headers=IH, json={"membership": "out"})
+gone = "Preapproved Pal" not in vw.get("/").text
+b1 = api.post("/internal/fleet/bad key!", headers=IH, json={"membership": "in"}).status_code
+b2 = api.post("/internal/fleet/KEY-NOPE", headers=IH, json={"membership": "in"}).status_code
+b3 = api.post("/internal/fleet/KEY-PRE", headers=IH, json={"membership": "maybe"}).status_code
+api.post("/internal/fleet/KEY-PRE", headers=IH, json={"membership": "in"})
+check("TC-MONSRV-0073 remove / add through the same API; a malformed key 400, an unknown licence 404, a bad "
+      "status 400",
+      o1.status_code == 200 and gone and b1 in (400, 404) and b2 == 404 and b3 == 400, (o1.text, b1, b2, b3))
 store.NEW_MACHINES = "auto"
 
 uv.should_exit = True

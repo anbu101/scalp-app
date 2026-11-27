@@ -29,6 +29,8 @@ license server that every app depends on.
   GET  /internal/users                    accounts + pending links
   POST /internal/users/invite             {username, role} → {url, expires}
   POST /internal/users/{name}/{action}    reset | disable | enable | unlock | remove | cancel_invite
+  GET  /internal/fleet                    every machine's fleet status by licence key   ── FLEET_FROM_LICENSE_ADMIN_20261127 ──
+  POST /internal/fleet/{key}             {membership: in|out} (pre-approves a licence that never reported)
 """
 
 from __future__ import annotations
@@ -331,6 +333,32 @@ async def internal_invite(request: Request):
     if isinstance(out, str):
         return JSONResponse({"ok": False, "error": out}, status_code=400)
     return {"ok": True, **out}
+
+
+@app.get("/internal/fleet")   # ── FLEET_FROM_LICENSE_ADMIN_20261127 ──
+def internal_fleet(request: Request):
+    if not _internal_ok(request):
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+    return {"ok": True, "fleet": store.fleet_statuses()}
+
+
+@app.post("/internal/fleet/{key}")   # ── FLEET_FROM_LICENSE_ADMIN_20261127 ──
+async def internal_fleet_set(request: Request, key: str):
+    if not _internal_ok(request):
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+    import re as _re
+    key = key.strip().upper()
+    if not _re.match(r"^[A-Z0-9-]{4,64}$", key):
+        return JSONResponse({"ok": False, "error": "bad licence key"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    why = store.set_fleet(key, str(body.get("membership") or ""))
+    if why:
+        return JSONResponse({"ok": False, "error": why}, status_code=404 if why == "no such licence" else 400)
+    store.audit(_by(request), "fleet_add" if body.get("membership") == "in" else "fleet_remove", key)
+    return {"ok": True, "fleet": store.fleet_statuses().get(key)}
 
 
 @app.post("/internal/users/{name}/{action}")
