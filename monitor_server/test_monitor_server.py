@@ -7,6 +7,7 @@
 #                                        ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) TC-MONSRV-0047…0048
 #                                        ── FLEET_WATCH_20261127 ── (TD-112) TC-MONSRV-0049…0056
 #                                        ── FLEET_SWITCH_LABEL_20261127 ── TC-MONSRV-0044 reworded, 0057
+#                                        ── KITE_STATUS_PORTAL_20261127 ── (TD-112) TC-MONSRV-0058
 #
 # The Fleet Monitor service end to end: the real FastAPI app under uvicorn on
 # a free local port (no Starlette TestClient), a throw-away monitor.db and a
@@ -493,6 +494,17 @@ check("TC-MONSRV-0057 the switch names where it sends: 'sent to / not sent to Ma
       "not sent to Market Makers channel" in named and "sent to Market Makers channel" in named
       and "Send to Market Makers channel<" in named and "Stop sending to Market Makers channel<" in named
       and "Telegram alerts" not in named, named[:200])
+
+chips = [pages.kite_chip(None, now), pages.kite_chip({"logged_in": True, "trade_ready": True, "checked_at": now}, now),
+         pages.kite_chip({"logged_in": True, "trade_ready": False, "checked_at": now}, now),
+         pages.kite_chip({"logged_in": False, "trade_ready": False, "checked_at": now}, now)]
+ingest("KEY-RAVI", "HW-RAVI", snapshot=dict(snap, broker={"logged_in": False, "trade_ready": False, "checked_at": now}))
+kc_page = ad.get("/").text
+check("TC-MONSRV-0058 Kite status on the card: ✓ / trading off / NOT logged in (red), with the check time; nothing "
+      "when the machine sent no fresh answer (older app, outside 08:30–15:30)",
+      chips[0] == "" and "b-ok" in chips[1] and "Kite ✓" in chips[1] and "Kite: trading off" in chips[2]
+      and "b-bad" in chips[3] and "NOT logged in" in chips[3] and "checked" in chips[1]
+      and "Kite: NOT logged in" in kc_page, chips)
 
 # ── Charges on the card, carried legs dated (FLEET_OPEN_CADENCE_20261127) ──
 snap2 = dict(snap, totals={"net": -3404, "realised": -12542, "unrealised": 9581, "charges": 443,

@@ -1,5 +1,6 @@
 # backend/app/monitor/test_monitor_ship.py — ── FLEET_MONITOR_20261127 ── (TD-110) TC-MON-0001…0027
 #                                           ── FLEET_OPEN_CADENCE_20261127 ── (TD-119) TC-MON-0028
+#                                           ── KITE_STATUS_PORTAL_20261127 ── (TD-112) TC-MON-0029…0030
 #
 # The app half of the Fleet Monitor: the outbox, the LIVE-only taps in
 # api/telegram_api.py, the snapshot, the shipper's cadence / ack / back-off,
@@ -326,10 +327,47 @@ check("TC-MON-0028 a snapshot that says 'market closed' is followed 60 s later i
       "(the open is never 5 min late); 300 s before 09:10, after 15:45 and on a Saturday (TD-119)",
       got == [60, 60, 300, 300, 300], got)
 
+import app.jobs.broker_session_watch as BSW   # noqa: E402
+BSW.LAST.clear()
+none_yet = snapshot.broker_status(1_800_000_000)
+BSW.record_status(True, False, ts=1_800_000_000)
+fresh_b = snapshot.broker_status(1_800_000_000 + 120)
+stale_b = snapshot.broker_status(1_800_000_000 + 660)
+check("TC-MON-0029 the snapshot carries the Kite session the 2-minute broker watch last saw (logged in / trading on), "
+      "only while fresh (≤ 10 min); nothing before the first check",
+      none_yet is None and fresh_b == {"logged_in": True, "trade_ready": False, "checked_at": 1_800_000_000}
+      and stale_b is None and '"broker": broker_status(' in (HERE.parent / "snapshot.py").read_text(), (none_yet, fresh_b, stale_b))
+
+
+class _FakeDT(BSW.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return BSW.datetime(2026, 11, 27, 10, 0, tzinfo=tz)
+
+
+class _Mgr:
+    def get_kite(self):
+        return None
+
+    def is_trade_ready(self):
+        return True
+
+
+import app.utils.market_hours as _MH   # noqa: E402
+_real_dt, _real_td, _real_emit = BSW.datetime, _MH.is_trading_day, BSW._emit
+BSW.datetime, _MH.is_trading_day, BSW._emit = _FakeDT, (lambda d=None: True), (lambda *a, **k: None)
+BSW.LAST.clear()
+try:
+    BSW.broker_session_watch_job(_Mgr())
+finally:
+    BSW.datetime, _MH.is_trading_day, BSW._emit = _real_dt, _real_td, _real_emit
+check("TC-MON-0030 a broker-watch run in its window records the answer (trade-ready session → logged in + trading on)",
+      BSW.LAST.get("logged_in") is True and BSW.LAST.get("trade_ready") is True and BSW.LAST.get("ts"), dict(BSW.LAST))
+
 src = (HERE.parents[1] / "api_server.py").read_text(encoding="utf-8")
 check("TC-MON-0027 api_server starts the ship loop under _supervise, next to the liveness ping",
       "monitor_ship_loop()" in src and '"fleet monitor"' in src)
 
 shutil.rmtree(TMP, ignore_errors=True)
-print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({28 - len(FAILS)}/28)")
+print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({30 - len(FAILS)}/30)")
 sys.exit(1 if FAILS else 0)

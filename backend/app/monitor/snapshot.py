@@ -25,6 +25,21 @@ TOTAL_KEYS = ("gross", "net", "realised", "unrealised", "charges", "open_legs",
 LEG_KEYS = ("id", "symbol", "short", "qty", "lots", "entry", "exit", "entry_ts",
             "exit_ts", "reason", "open", "gross", "charges", "net", "approx", "leg")
 MAX_LEGS = 400
+BROKER_FRESH_S = 600        # ── KITE_STATUS_PORTAL_20261127 ── older than this → not reported (job outside its window)
+
+
+def broker_status(now: float) -> Dict[str, Any] | None:
+    """── KITE_STATUS_PORTAL_20261127 ── (TD-112) this machine's Kite session as the 2-minute broker watch last
+    saw it: {"logged_in", "trade_ready", "checked_at"}, or None when there is no fresh answer."""
+    try:
+        from app.jobs.broker_session_watch import LAST
+        ts = float(LAST.get("ts") or 0)
+        if not ts or now - ts > BROKER_FRESH_S:
+            return None
+        return {"logged_in": bool(LAST.get("logged_in")), "trade_ready": bool(LAST.get("trade_ready")),
+                "checked_at": int(ts)}
+    except Exception:
+        return None
 
 
 def _pick(d: Dict[str, Any], keys) -> Dict[str, Any]:
@@ -68,7 +83,8 @@ def build() -> Dict[str, Any]:
             except Exception as e:
                 warns.append(f"{sid} legs: {e!r}"[:200])
         legs.sort(key=lambda x: int(x.get("entry_ts") or 0), reverse=True)
-        return {"day": feed.get("day"),
+        return {"broker": broker_status(time.time()),     # ── KITE_STATUS_PORTAL_20261127 ──
+                "day": feed.get("day"),
                 "market_open": bool((feed.get("session") or {}).get("market_open")),
                 "totals": _pick((feed.get("totals") or {}).get("LIVE") or {}, TOTAL_KEYS),
                 "rows": rows, "legs": legs[:MAX_LEGS],

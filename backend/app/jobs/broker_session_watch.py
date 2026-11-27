@@ -55,6 +55,16 @@ WINDOW_END_MIN = 15 * 60 + 30
 
 _STATE: Dict = {}
 
+# ── KITE_STATUS_PORTAL_20261127 ── (TD-112) the latest Kite answer, for the Fleet Monitor card
+# (app/monitor/snapshot.py reads it). Updated every run of this job, so every
+# 2 min from 08:30 to 15:30 on a trading day; empty / stale outside that.
+LAST: Dict = {}
+
+
+def record_status(logged_in: bool, trade_ready: bool, ts: Optional[float] = None) -> None:
+    import time as _t
+    LAST.update(ts=_t.time() if ts is None else ts, logged_in=bool(logged_in), trade_ready=bool(trade_ready))
+
 
 def _fresh_state(day: str) -> Dict:
     return {"day": day, "warned": False, "critical": False, "was_ready": False,
@@ -270,6 +280,7 @@ def broker_session_watch_job(manager=None) -> None:
             except Exception:
                 logged_in = False
 
+        record_status(logged_in, trade_ready)        # ── KITE_STATUS_PORTAL_20261127 ──
         needs_context = not trade_ready
         alerts = evaluate(now_min, logged_in=logged_in, trade_ready=trade_ready,
                           live_ids=_live_strategy_ids() if needs_context else [],

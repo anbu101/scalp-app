@@ -180,6 +180,19 @@ def _kpi(label: str, value: str) -> str:
     return f'<div class="kpi"><small>{e(label)}</small><span class="v">{value}</span></div>'
 
 
+def kite_chip(b: Optional[Dict[str, Any]], now: float) -> str:
+    """── KITE_STATUS_PORTAL_20261127 ── (TD-112) the machine's Kite session from its last snapshot.
+    None = no fresh answer (outside 08:30–15:30, or an app older than v12.0.26)."""
+    if not isinstance(b, dict):
+        return ""
+    when = f' title="checked {hms(b.get("checked_at"))} IST"'
+    if b.get("trade_ready"):
+        return f'<span class="badge b-ok"{when}>Kite ✓</span>'
+    if b.get("logged_in"):
+        return f'<span class="badge b-warn"{when}>Kite: trading off</span>'
+    return f'<span class="badge b-bad"{when}>Kite: NOT logged in</span>'
+
+
 def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram") -> str:   # ── FLEET_SWITCH_LABEL_20261127 ── channel
     total_net = total_open = online = 0
     cards = []
@@ -208,6 +221,7 @@ def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram"
         if d.get("dropped"):
             notes.append(f"{e(d['dropped'])} events were dropped on the machine (outbox full).")
         note_html = "".join(f'<div class="warnbox">{n}</div>' for n in notes)
+        kite = kite_chip(data.get("broker") if is_today else None, now)   # ── KITE_STATUS_PORTAL_20261127 ──
         alert_link = (f'<a href="/alerts?{urlencode({"device": d["key"], "unacked": "1"})}">'
                       f'<span class="badge b-bad">{n_un} unacknowledged</span></a>' if n_un else "")
         admin = ""
@@ -222,7 +236,7 @@ def fleet_page(user, devs, snaps, unacked, now, today, channel: str = "Telegram"
                       f'<input type="hidden" name="relay" value="{0 if d.get("relay", 1) else 1}">'
                       f'<button>{("Stop sending to " if d.get("relay", 1) else "Send to ") + e(channel)}</button></form>')   # ── FLEET_SWITCH_LABEL_20261127 ──
         cards.append(
-            f'<div class="card"><h3>{e(d["label"])} <span class="badge b-{st_cls}">{st_txt}</span> {alert_link}</h3>'
+            f'<div class="card"><h3>{e(d["label"])} <span class="badge b-{st_cls}">{st_txt}</span> {kite} {alert_link}</h3>'
             f'<div class="meta">seen {ago(d.get("last_seen"), now)} · v{e(d.get("app_version") or "?")}'
             f' · {e(d.get("tier") or "")} · {("sent to " if d.get("relay", 1) else "not sent to ") + e(channel)}</div>'   # ── FLEET_SWITCH_LABEL_20261127 ──
             f'<div class="nums"><div><small>Net today</small>{money(tot.get("net"))}</div>'
