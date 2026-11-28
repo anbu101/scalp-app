@@ -10,6 +10,10 @@
 # refuse to run unless CREDENTIALS_PATH is outside the real home.
 #
 #   cd backend && python3 app/utils/test_test_home_guard.py
+#
+# ── WEEKLY_SUITE_FIX_20261128 ── (DEF-119) what must stay untouched is the real ~/.scalp-app and the
+# real HOME itself, not every folder under the home: the weekly Master Suite keeps
+# each suite's TMPDIR and HOME in ~/scalp-regression/<run>/tmp, inside the home.
 import json
 import os
 import subprocess
@@ -38,6 +42,8 @@ try:
     REAL = os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir)
 except Exception:
     REAL = None
+# ── WEEKLY_SUITE_FIX_20261128 ── the folder the guard protects (the app's data, credentials, logs)
+REAL_APP = os.path.realpath(os.path.join(REAL, ".scalp-app")) if REAL else None
 
 PROBE = r"""
 import json, os, sys
@@ -83,9 +89,9 @@ if REAL is None:
 else:
     TC = "TC-UTIL-0037"
     out, log = probe("test_probe.py", REAL, {"PROBE_PATHS": "1"})
-    ok = bool(out) and not under(out["home"], REAL) and out["test_home"] and \
+    ok = bool(out) and os.path.realpath(out["home"]) != REAL and out["test_home"] and \
         os.path.realpath(out["home"]) == os.path.realpath(out["test_home"]) and \
-        not under(out["app_home"], REAL) and not under(out["creds"], REAL)
+        not under(out["app_home"], REAL_APP) and not under(out["creds"], REAL_APP)
     check(f"{TC} a test_*.py run started with the real HOME gets a throw-away home before any app path "
           f"is worked out (credentials, app folder, Path.home())", ok, out or log)
     check(f"{TC} … and that throw-away home is removed when the run ends",
@@ -94,7 +100,7 @@ else:
     TC = "TC-UTIL-0038"
     out, log = probe("plain_probe.py", REAL, {"SCALP_TEST_MODE": "1"})
     check(f"{TC} SCALP_TEST_MODE=1 counts as a test run whatever the script is called",
-          bool(out) and not under(out["home"], REAL), out or log)
+          bool(out) and os.path.realpath(out["home"]) != REAL, out or log)
 
     TC = "TC-UTIL-0039"
     out, log = probe("run_live.py", REAL)
@@ -107,7 +113,8 @@ else:
           bool(out) and os.path.realpath(out["home"]) == REAL and out["test_home"] is None, out or log)
 
     TC = "TC-UTIL-0042"
-    other = str(TMP / "elsewhere" / "logs")
+    # ── WEEKLY_SUITE_FIX_20261128 ── outside the home (TMP may be inside it); nothing creates it
+    other = os.path.join(os.path.realpath("/tmp"), "scalp-home-guard-elsewhere", "logs")
     out, log = probe("test_vars.py", REAL, {"SCALP_APP_HOME": os.path.join(REAL, ".scalp-app"),
                                             "DB_PATH": os.path.join(REAL, ".scalp-app", "data", "app.db"),
                                             "SCALP_LOG_DIR": other})
@@ -127,9 +134,9 @@ check(f"{TC} a HOME that is already not the real one (run_suites, a suite's own 
 # ── save_credentials: all or nothing ─────────────────────────────────
 from app.config import zerodha_credentials_store as CS   # noqa: E402
 
-if REAL is not None and under(str(CS.CREDENTIALS_PATH), REAL):
-    print(f"  REFUSING to test saves: {CS.CREDENTIALS_PATH} is in the real home — the guard did not run")
-    FAILS.append("save checks not run: CREDENTIALS_PATH in the real home")
+if REAL_APP is not None and under(str(CS.CREDENTIALS_PATH), REAL_APP):   # ── WEEKLY_SUITE_FIX_20261128 ──
+    print(f"  REFUSING to test saves: {CS.CREDENTIALS_PATH} is in the real ~/.scalp-app — the guard did not run")
+    FAILS.append("save checks not run: CREDENTIALS_PATH in the real ~/.scalp-app")
 else:
     TC = "TC-UTIL-0043"
     CS.save_credentials(" key123 ", " sec456 ")

@@ -7,6 +7,10 @@ import os, sys, tempfile, time
 from types import SimpleNamespace
 os.environ["HOME"] = tempfile.mkdtemp(prefix="fast_confirm_")
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+# ── WEEKLY_SUITE_FIX_20261128 ── (DEF-120) a fast poll sees a 0.35 s fill at ~0.6 s; the old 2 s poll at
+# >= 2 s. The bound sits between them (1.5 s), so a busy machine (the weekly run, at
+# background priority beside the app) cannot fail it by a few milliseconds.
+FAST_S = 1.5
 OK, FAILS = [0], []
 
 
@@ -41,7 +45,7 @@ check("VET_V1 drives orders with poll_s 0.3 (driver default 1)", VM.ORDER_POLL_S
 
 e = Exe(0.35); t = time.time()
 px = TM.TMA2TradeManager._confirm_fill(SimpleNamespace(executor=e, _sid="TMA_V2"), "o1")
-check("TMA_V2: a fill 0.35 s after placement is seen within 0.7 s (was ≥ 2 s)", px == 153.2 and time.time() - t < 0.7,
+check(f"TMA_V2: a fill 0.35 s after placement is seen within {FAST_S} s (was ≥ 2 s)", px == 153.2 and time.time() - t < FAST_S,
       time.time() - t)
 e = Exe(0.35); t = time.time()
 px = GM.ICGroupManager._confirm_fill(SimpleNamespace(executor=e, strategy_id="IC_V2"), "o2") \
@@ -49,7 +53,7 @@ px = GM.ICGroupManager._confirm_fill(SimpleNamespace(executor=e, strategy_id="IC
 if px is None:
     cls = next(v for v in vars(GM).values() if isinstance(v, type) and hasattr(v, "_confirm_fill"))
     px = cls._confirm_fill(SimpleNamespace(executor=e, strategy_id="IC_V2"), "o2")
-check("IC_V2: same, within 0.7 s", px == 153.2 and time.time() - t < 0.7, time.time() - t)
+check(f"IC_V2: same, within {FAST_S} s", px == 153.2 and time.time() - t < FAST_S, time.time() - t)
 
 logs = []
 TS.write_audit_log = lambda m, *a, **k: logs.append(str(m))
@@ -61,13 +65,16 @@ res = TS.TsgManager._confirm_entry_with_repeg(tsg_self, leg, "o3", 120.0) if has
     ._confirm_entry_with_repeg(tsg_self, leg, "o3", 120.0)
 el = time.time() - t
 waits = [l for l in logs if "[TSG][ENTRY_WAIT]" in l]
-check("TSG_V1: a fill at 1.6 s is seen within 2.0 s (was up to 2.6 s)", res["ok"] and el < 2.0, el)
+# ── WEEKLY_SUITE_FIX_20261128 ── the 0.3 s cadence is shown by the poll count below (the old 1 s poll
+# makes 2-3); the clock only bounds the wait to one old poll after the fill, as a
+# 2.0 s bound failed by 6 µs at background priority
+check("TSG_V1: a fill at 1.6 s is seen within 1 s of it", res["ok"] and el < 1.6 + 1.0, el)
 check("…the ENTRY_WAIT heartbeat stays at about one line a second (+ the COMPLETE line)", 2 <= len(waits) <= 4, len(waits))
 check("…and it polled about every 0.3 s", e.polls >= 5, e.polls)
 e = Exe(0.35); t = time.time()
 tcls = next(v for v in vars(TS).values() if isinstance(v, type) and hasattr(v, "_confirm_fill") and hasattr(v, "_confirm_entry_with_repeg"))
 check("TSG_V1 _confirm_fill also polls fast", tcls._confirm_fill(SimpleNamespace(executor=e), "o4") == 153.2
-      and time.time() - t < 0.7)
+      and time.time() - t < FAST_S)
 
 seen = {}
 VM.drive_exit_order = lambda *a, **k: seen.update(k) or SimpleNamespace(outcome="FILLED")

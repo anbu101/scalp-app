@@ -112,7 +112,7 @@ Not suites (left out): `backend/app/test_selector.py` (a scratch print of pick_s
 | `backend/app/engine/lvb/test_lvb.py` | script | af767edb9600 | — |
 | `backend/app/engine/orb/test_orb_live_core.py` | script | 13c33d7fd026 | — |
 | `backend/app/engine/orb/test_orb_manager.py` | script | 40102fb834cf | — |
-| `backend/app/engine/test_entry_fast_confirm.py` | script | 822b64890a9a | — |
+| `backend/app/engine/test_entry_fast_confirm.py` | script | 4aac580ed87d | — |
 | `backend/app/engine/test_entry_reservation.py` | script | 8bc66382f809 | — |
 | `backend/app/engine/test_exit_once_restart.py` | script | 12a05eeea14d | — |
 | `backend/app/engine/test_feed_recovery.py` | script | 60bcb51ef055 | — |
@@ -160,7 +160,7 @@ Not suites (left out): `backend/app/test_selector.py` (a scratch print of pick_s
 | `backend/app/execution/test_execution_router_forwarding.py` | pytest | d94170c58ea3 | TC-EXEC-0293…0297 |
 | `backend/app/execution/test_executor_pricing.py` | script | 43b71b7299bf | — |
 | `backend/app/execution/test_exit_latency.py` | script | aedb0e3998e4 | — |
-| `backend/app/execution/test_exit_repeg_fast.py` | script | 53212432b8b7 | — |
+| `backend/app/execution/test_exit_repeg_fast.py` | script | f14d2fb3257e | — |
 | `backend/app/execution/test_gtt_verify_strict.py` | script | fdd9137eb546 | — |
 | `backend/app/execution/test_instance_guard.py` | script | ddcfe06c6531 | — |
 | `backend/app/execution/test_kill_switch.py` | pytest | f405697dcc47 | TC-EXEC-0244…0257 |
@@ -213,7 +213,7 @@ Not suites (left out): `backend/app/test_selector.py` (a scratch print of pick_s
 | `backend/app/utils/test_lot_sizes.py` | script | 0dafb0909f36 | — |
 | `backend/app/utils/test_mpl_fonts.py` | script | d9d175a65237 | TC-UTIL-0030…0036 |
 | `backend/app/utils/test_test_alert_guard.py` | script | 3420cd148508 | — |
-| `backend/app/utils/test_test_home_guard.py` | script | a105f0a7780e | TC-UTIL-0037…0044 |
+| `backend/app/utils/test_test_home_guard.py` | script | 8252b76801cf | TC-UTIL-0037…0044 |
 | `frontend/scripts/test_intl_date_cache.mjs` | node | 2f6e625793bf | TC-UI-INTL-0001…0006 |
 | `frontend/scripts/test_vet_wing_input.mjs` | node | 97cbcc7acf28 | — |
 | `license_server/test_admin_https_only.py` | root | 0183fe2fdffd | TC-LICADM-0001…0005 |

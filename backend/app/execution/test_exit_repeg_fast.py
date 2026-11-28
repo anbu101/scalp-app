@@ -122,11 +122,13 @@ time.sleep(HANG + 0.1)          # let the abandoned threads finish
 # ── Driver tests (real driver, real time, a scripted order) ───────────────
 class Ex:
     """Executor seen by the driver: one working order, scripted quotes."""
-    def __init__(self, quote_s=0.0, fill_after_s=None, quote=(1.55, 1.55, "bid"), exit_api=True):
-        self.t0 = time.time()
+    def __init__(self, quote_s=0.0, fill_after_s=None, quote=(1.55, 1.55, "bid"), exit_api=True, clock=None):
+        self.clock = clock or time.time     # ── WEEKLY_SUITE_FIX_20261128 ── the driver's clock
+        self.t0 = self.clock()
         self.quote_s, self.fill_after_s, self.q = quote_s, fill_after_s, quote
         self.modifies, self.reads, self.cancels, self.quotes = [], 0, 0, 0
         self.attempts = []
+        self.quote_end = float("inf")       # ── WEEKLY_SUITE_FIX_20261128 ── set by the exit quote
         if exit_api:
             self.fresh_sell_exit_limit = self._fresh
         self.fresh_sell_entry_limit = self._fresh_entry
@@ -135,6 +137,7 @@ class Ex:
     def _fresh(self, sym):
         self.quotes += 1
         time.sleep(self.quote_s)
+        self.quote_end = time.time()        # ── WEEKLY_SUITE_FIX_20261128 ──
         return self.q
 
     def _fresh_entry(self, sym):
@@ -143,13 +146,13 @@ class Ex:
 
     def get_order_fill(self, oid):
         self.reads += 1
-        if self.fill_after_s is not None and time.time() - self.t0 >= self.fill_after_s:
+        if self.fill_after_s is not None and self.clock() - self.t0 >= self.fill_after_s:
             return {"status": "COMPLETE", "avg_price": 1.6, "filled_qty": 195}
         return {"status": "OPEN", "filled_qty": 0}
 
     def modify_order(self, oid, price, symbol=""):
         self.attempts.append(price)
-        if self.fill_after_s is not None and time.time() - self.t0 >= self.fill_after_s:
+        if self.fill_after_s is not None and self.clock() - self.t0 >= self.fill_after_s:
             raise RuntimeError("The order for ID does not exist.")
         self.modifies.append(price)
         return True
@@ -162,17 +165,50 @@ def drive(ex, **kw):
     t0 = time.time()
     r = XD.drive_exit_order(ex, "O1", symbol=S, side="SELL", chase_s=kw.get("chase", 3.0),
                             repeg_every_s=0.1, poll_s=0.05, settle_s=0.2, log=LOG.append,
-                            start_px=1.6)
+                            start_px=1.6, sleep=kw.get("sleep", time.sleep), clock=kw.get("clock", time.time))
     return r, time.time() - t0
+
+
+class VClock:
+    """── WEEKLY_SUITE_FIX_20261128 ── (DEF-120) a clock that only the driver's own waits move: the
+    order fills, re-pegs and polls happen at the same moments however busy the
+    machine is (real-time runs missed D3 / D4b at background priority)."""
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, s):
+        self.now += s
+
+
+def vdrive(**ex_kw):
+    vc = VClock()
+    ex = Ex(clock=vc, **ex_kw)
+    r, _ = drive(ex, clock=vc, sleep=vc.sleep)
+    return ex, r
 
 
 # D1: the 16 Nov case — quote slow (longer than SLOW_QUOTE_S), order fills meanwhile
 XD.SLOW_QUOTE_S = 0.3
 ex = Ex(quote_s=0.5, fill_after_s=0.3)
-r, dt = drive(ex)
+SLEPT = []                                  # ── WEEKLY_SUITE_FIX_20261128 ── (DEF-120) the driver's own waits
+
+
+def rec_sleep(s):
+    SLEPT.append((time.time(), s))
+    time.sleep(s)
+
+
+r, dt = drive(ex, sleep=rec_sleep)
 check("D1 16 Nov replay: order filled during a slow quote → FILLED, NO modify attempted",
       r.filled and r.avg_price == 1.6 and not ex.attempts, f"{r} attempts={ex.attempts}")
-check("D1 result right after the slow quote (no extra wait)", dt < 0.5 + 0.3, f"{dt:.2f}s")
+# ── WEEKLY_SUITE_FIX_20261128 ── counted, not timed: no wait of the driver's after the slow quote and no
+# second quote (a wall-clock bound of 0.8 s failed by 0.08 s in the weekly run)
+after = [s for at, s in SLEPT if at >= ex.quote_end]
+check("D1 result right after the slow quote (no extra wait)", not after and ex.quotes == 1,
+      f"{dt:.2f}s, waits after the quote {after}, quotes {ex.quotes}")
 
 # D2: slow quote, order still open → modify still sent (re-price not skipped)
 ex = Ex(quote_s=0.4, fill_after_s=None)
@@ -180,12 +216,10 @@ r, dt = drive(ex, chase=0.6)
 check("D2 slow quote, order still open: re-priced (modify sent)", bool(ex.modifies), f"{ex.modifies}")
 
 # D3: fast quotes → behaviour as before: modifies sent, no extra order reads
-ex_new = Ex(quote_s=0.0, fill_after_s=0.55)
-r_new, _ = drive(ex_new)
-ex_old = Ex(quote_s=0.0, fill_after_s=0.55)
+ex_new, r_new = vdrive(quote_s=0.0, fill_after_s=0.55)
 _orig = XD.SLOW_QUOTE_S
 XD.SLOW_QUOTE_S = 1e9                       # old behaviour: never re-read after a quote
-r_old, _ = drive(ex_old)
+ex_old, r_old = vdrive(quote_s=0.0, fill_after_s=0.55)
 XD.SLOW_QUOTE_S = _orig
 check("D3 fast quotes: same outcome and same re-peg prices as before",
       r_new.filled and r_old.filled and ex_new.modifies[:3] == ex_old.modifies[:3], f"{ex_new.modifies} vs {ex_old.modifies}")
@@ -193,12 +227,10 @@ check("D3 fast quotes: no extra order-status reads per re-peg",
       abs(ex_new.reads - ex_old.reads) <= 1, f"{ex_new.reads} vs {ex_old.reads}")
 
 # D4: driver picks the exit quote; an executor without it falls back to the entry quote
-ex = Ex(quote_s=0.0, fill_after_s=0.25)
-drive(ex)
+ex, _ = vdrive(quote_s=0.0, fill_after_s=0.25)
 check("D4 driver uses the exit quote (fresh_sell_exit_limit)", ex.quotes > 0 and ex.entry_quotes == 0,
       f"exit {ex.quotes} entry {ex.entry_quotes}")
-ex = Ex(quote_s=0.0, fill_after_s=0.25, exit_api=False)
-drive(ex)
+ex, _ = vdrive(quote_s=0.0, fill_after_s=0.25, exit_api=False)
 check("D4b executor without it (Angel/Dhan/fakes): entry quote as before", ex.entry_quotes > 0)
 
 # R1: router forwards; degrades to the entry quote
