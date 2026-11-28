@@ -72,7 +72,8 @@ MODULES = {
     "execution_router": {
         "file": E + "execution_router.py",
         "reach": r"execution_router|ExecutionRouter|test_fleet_live",
-        "suites": [E + "test_execution_router_contract.py", E + "test_strict_reads_all.py",
+        "suites": [E + "test_execution_router_contract.py", E + "test_execution_router_forwarding.py",   # ROUTER_FORWARDING_20261128 (TD-076)
+                   E + "test_strict_reads_all.py",
                    E + "test_gtt_verify_strict.py", E + "test_oco_stop_buffer.py", E + "test_exit_latency.py",
                    E + "test_exit_repeg_fast.py", E + "test_wing_fast_fill.py", N + "test_fleet_live.py"],
     },
