@@ -114,6 +114,24 @@ def clear_carry(strategy_id: str):
         write_audit_log(f"[IC][{strategy_id}][CARRY][CLEAR_FAIL] {e!r}")
 
 
+def archive_stale_carry(strategy_id: str) -> Optional[Path]:
+    """── IC_STALE_CARRY_ONCE_20261128 ── (TD-134) a carry snapshot too old to restore (the engine refused it and alerted once) is kept
+    for reference as <sid>_carry.stale-<YYYYMMDD-HHMMSS>.json, so the next boot does not raise the same alarm.
+    Returns the new path, or None if the rename failed (then the file stays and the alarm repeats — the safe side)."""
+    try:
+        from datetime import datetime
+        cp = _carry_path(strategy_id)
+        if not cp.exists():
+            return None
+        dst = STATE_DIR / f"{strategy_id}_carry.stale-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        os.replace(cp, dst)
+        write_audit_log(f"[IC][{strategy_id}][CARRY][STALE_ARCHIVED] refused snapshot kept as {dst.name}")
+        return dst
+    except Exception as e:
+        write_audit_log(f"[IC][{strategy_id}][CARRY][STALE_ARCHIVE_FAIL] {e!r}")
+        return None
+
+
 # ── IC_RESTART ── session snapshot API (mirrors the carry API; quieter
 # logging — this file is written on every mutation).
 

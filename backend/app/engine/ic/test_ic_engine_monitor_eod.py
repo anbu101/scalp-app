@@ -660,6 +660,55 @@ def test_et12c_carry_file_wins_over_session():
     ic_carry_store.clear_carry(TEST_SID)
 
 
+# ── IC_STALE_CARRY_ONCE_20261128 ── (TD-134) a carry snapshot too old to restore alerts ONCE:
+# it is refused (never restored), the CRITICAL fires, and the file is kept aside
+# as <sid>_carry.stale-*.json so the next boot is quiet.
+def test_et12d_stale_carry_alerts_once_and_is_kept_aside():
+    _Cfg.strategy = _v2cfg()
+    ic_carry_store.clear_carry(TEST_SID); ic_carry_store.clear_session(TEST_SID)
+    for old in ic_carry_store.STATE_DIR.glob(f"{TEST_SID}_carry.stale-*.json"):
+        old.unlink()
+    old_day = (ENG.now_ist() - timedelta(days=103)).strftime("%Y-%m-%d")
+    ic_carry_store.save_carry(TEST_SID, {"entry_date": old_day, "legs": [{"x": 1}]})
+    crit = []
+    sys.modules["app.api.telegram_api"].notify_critical = lambda d: crit.append(d["message"])
+    ALERTS.clear()
+    gm = SpyGM()
+    ENG.ICEngine(gm, SpyBroker())._restore_carry_if_any()          # boot 1
+    kept = list(ic_carry_store.STATE_DIR.glob(f"{TEST_SID}_carry.stale-*.json"))
+    first = (list(ALERTS), list(crit))
+    gm2 = SpyGM()
+    ENG.ICEngine(gm2, SpyBroker())._restore_carry_if_any()         # boot 2
+    assert first[0] == ["IC_CARRY_STALE"] and len(first[1]) == 1     # alerted once
+    assert "103-day-old" in first[1][0] and "will not repeat" in first[1][0] and kept[0].name in first[1][0]
+    assert ALERTS == ["IC_CARRY_STALE"] and len(crit) == 1           # boot 2 quiet
+    assert getattr(gm, "carry_restores", 0) == 0 and getattr(gm2, "carry_restores", 0) == 0
+    assert not ic_carry_store.carry_exists(TEST_SID)
+    assert len(kept) == 1 and '"x": 1' in kept[0].read_text()       # kept, not deleted
+    kept[0].unlink()
+
+
+def test_et12e_stale_carry_that_cannot_be_set_aside_keeps_alerting():
+    _Cfg.strategy = _v2cfg()
+    ic_carry_store.clear_carry(TEST_SID); ic_carry_store.clear_session(TEST_SID)
+    old_day = (ENG.now_ist() - timedelta(days=30)).strftime("%Y-%m-%d")
+    ic_carry_store.save_carry(TEST_SID, {"entry_date": old_day, "legs": [{}]})
+    real = ic_carry_store.os.replace
+    ic_carry_store.os.replace = lambda a, b: (_ for _ in ()).throw(OSError("read-only"))
+    crit = []
+    sys.modules["app.api.telegram_api"].notify_critical = lambda d: crit.append(d["message"])
+    try:
+        ALERTS.clear()
+        ENG.ICEngine(SpyGM(), SpyBroker())._restore_carry_if_any()
+        ENG.ICEngine(SpyGM(), SpyBroker())._restore_carry_if_any()
+    finally:
+        ic_carry_store.os.replace = real
+    assert ALERTS == ["IC_CARRY_STALE", "IC_CARRY_STALE"]           # the safe side: it repeats
+    assert len(crit) == 2 and "repeats at the next start" in crit[0]
+    assert ic_carry_store.carry_exists(TEST_SID)
+    ic_carry_store.clear_carry(TEST_SID)
+
+
 # ── MORNING_ALERT_GRACE_20261116 ── 16 Nov live: "09:16 square-off NOT
 # complete" fired at 09:16:07 while the last wing was still being closed
 # (all flat by 09:16:15). The CRITICAL waits until the close has stayed

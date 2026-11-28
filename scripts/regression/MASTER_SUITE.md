@@ -93,7 +93,7 @@ Not suites (left out): `backend/app/test_selector.py` (a scratch print of pick_s
 | `backend/app/engine/gc/test_gc_live_core.py` | script | 3385133e39f5 | — |
 | `backend/app/engine/ic/test_ic2_shadow_carry.py` | script | 3f0493aac5a1 | — |
 | `backend/app/engine/ic/test_ic_adj_chain_retry.py` | pytest | c9c51a6ca9d6 | TC-ICACR-0001…0004 |
-| `backend/app/engine/ic/test_ic_engine_monitor_eod.py` | pytest | bf1dc51e450c | — |
+| `backend/app/engine/ic/test_ic_engine_monitor_eod.py` | pytest | 01c639fa2f57 | — |
 | `backend/app/engine/ic/test_ic_entry_fail_report.py` | pytest | 7901b8dcf62a | — |
 | `backend/app/engine/ic/test_ic_fill_anchor.py` | pytest | 01afcf2628ce | — |
 | `backend/app/engine/ic/test_ic_fill_truth.py` | pytest | 41a2d651713b | — |

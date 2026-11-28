@@ -278,11 +278,17 @@ class ICEngine:
                          f"{self.sid}: carry snapshot is {gap_days} days old — "
                          f"NOT auto-restored. Verify Kite positions manually.",
                          severity="error", strategy_id=self.sid)
+            # ── IC_STALE_CARRY_ONCE_20261128 ── (TD-134) alert ONCE per refused snapshot: keep it aside
+            # (renamed, not deleted) so every later boot does not raise the same
+            # alarm (Karthik, 28 Nov: a 103-day-old file alerted at each start).
+            kept = ic_carry_store.archive_stale_carry(self.sid)
+            tail = (f" The old snapshot is kept as {kept.name}; this alert will not repeat."
+                    if kept else " (It could not be set aside, so this alert repeats at the next start.)")
             try:
                 from app.api.telegram_api import notify_critical
                 notify_critical({"message":
                     f"{self.sid}: refusing to restore a {gap_days}-day-old carry "
-                    f"snapshot. Check Kite positions NOW.",
+                    f"snapshot. Check Kite positions NOW." + tail,
                     "severity": "error"})
             except Exception:
                 pass
