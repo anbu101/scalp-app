@@ -117,8 +117,17 @@ def init_db() -> None:
         cols = {r[1] for r in c.execute("PRAGMA table_info(devices)")}
         if "relay" not in cols:
             c.execute("ALTER TABLE devices ADD COLUMN relay INTEGER NOT NULL DEFAULT 1")
+        had_membership = "membership" in cols
         if "membership" not in cols:      # ── FLEET_MEMBERSHIP_20261127 ── machines already reporting stay in the fleet
             c.execute("ALTER TABLE devices ADD COLUMN membership TEXT NOT NULL DEFAULT 'in'")
+        if had_membership:
+            # ── NO_PREAPPROVE_20261128 ── (DEF-121) no pre-approval. A licence pre-approved before this change: never reported → the
+            # placeholder row goes; reported only because of it (no first_seen) → waits for Add to fleet like any
+            # new machine. Machines Anbu added after they reported are untouched (they have first_seen).
+            c.execute("DELETE FROM devices WHERE last_seen IS NULL")
+            c.execute("UPDATE devices SET membership='pending', first_seen=last_seen"
+                      " WHERE first_seen IS NULL AND membership='in'")
+            c.execute("UPDATE devices SET first_seen=last_seen WHERE first_seen IS NULL")
 
 
 def ist_day(ts: Optional[float]) -> Optional[str]:
@@ -218,6 +227,7 @@ def upsert_device(lic: Dict[str, Any], machine_id: str, app_version: Optional[st
             "INSERT INTO devices (key, machine_id, label, tier, app_version, first_seen, last_seen,"
             " last_ip, epoch, dropped, membership) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(key) DO UPDATE SET machine_id=excluded.machine_id, label=excluded.label,"
+            " first_seen=COALESCE(devices.first_seen, excluded.first_seen),"   # ── NO_PREAPPROVE_20261128 ──
             " tier=excluded.tier, app_version=COALESCE(excluded.app_version, devices.app_version),"
             " last_seen=excluded.last_seen, last_ip=excluded.last_ip, epoch=excluded.epoch,"
             " dropped=excluded.dropped",
@@ -301,8 +311,8 @@ def devices(include_all: bool = False) -> List[Dict[str, Any]]:
     """In-fleet machines; include_all=True adds waiting / removed ones (admin lists). ── FLEET_MEMBERSHIP_20261127 ──"""
     if include_all:
         return _rows("SELECT * FROM devices ORDER BY label COLLATE NOCASE")
-    # ── FLEET_FROM_LICENSE_ADMIN_20261127 ── a licence pre-approved from License Admin that has not reported yet
-    # (last_seen NULL) is in the fleet but shown nowhere until its first report
+    # ── FLEET_FROM_LICENSE_ADMIN_20261127 ── a machine with no report (last_seen NULL) is shown nowhere
+    # (── NO_PREAPPROVE_20261128 ── such rows no longer exist: no pre-approval)
     return _rows("SELECT * FROM devices WHERE membership='in' AND last_seen IS NOT NULL ORDER BY label COLLATE NOCASE")
 
 
@@ -325,19 +335,18 @@ def fleet_statuses() -> Dict[str, Dict[str, Any]]:
 
 
 def set_fleet(key: str, membership: str) -> Optional[str]:
-    """── FLEET_FROM_LICENSE_ADMIN_20261127 ── License Admin's Add to / Remove from fleet. A licence that never
-    reported gets a placeholder row (pre-approved). Returns None on success, else why."""
+    """── FLEET_FROM_LICENSE_ADMIN_20261127 ── License Admin's Add to / Remove from fleet. Returns None on success,
+    else why. ── NO_PREAPPROVE_20261128 ── (DEF-121) no pre-approval: only a machine that has reported can be added (Anbu presses
+    Add to fleet for each one); a licence that never reported is refused and nothing is stored."""
     if membership not in ("in", "out"):
         return "membership must be in or out"
-    if device(key):
+    d = device(key)
+    if d and d.get("last_seen"):
         set_membership(key, membership)
         return None
-    label = licence_label(key)
-    if label is None:
+    if licence_label(key) is None and not d:
         return "no such licence"
-    with conn() as c:
-        c.execute("INSERT OR IGNORE INTO devices (key, label, membership) VALUES (?,?,?)", (key, label, membership))
-    return None
+    return "has not reported yet — it can be added once its app reports"
 
 
 def set_membership(key: str, membership: str) -> bool:   # ── FLEET_MEMBERSHIP_20261127 ──

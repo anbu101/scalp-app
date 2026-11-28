@@ -587,12 +587,15 @@ function fleetCell(l) {
   if (fleetMap === null) return "";
   const f = fleetMap[l.key];
   const m = f ? f.membership : "none";
-  const label = m === "in" ? (f.last_seen ? "In fleet" : "In fleet · not reported yet")
-              : m === "pending" ? "Waiting for approval" : m === "out" ? "Not in fleet" : "Not reported yet";
+  /* ── NO_PREAPPROVE_20261128 ── (DEF-121) no pre-approval: a licence whose app never reported has no button; it appears as
+     "Waiting for approval" once it reports, and joins only when Anbu presses Add to fleet. */
+  const label = m === "in" ? "In fleet" : m === "pending" ? "Waiting for approval" : m === "out" ? "Not in fleet" : "Not reported yet";
   const cls = m === "in" ? "b-active" : m === "pending" ? "b-expired" : "b-unact";
   const btn = m === "in"
     ? `<button class="small" data-k="${esc(l.key)}" onclick="fleetSet(this.dataset.k,'out')">Remove from fleet</button>`
-    : `<button class="small" data-k="${esc(l.key)}" onclick="fleetSet(this.dataset.k,'in')">Add to fleet</button>`;
+    : (m === "pending" || m === "out")
+    ? `<button class="small" data-k="${esc(l.key)}" onclick="fleetSet(this.dataset.k,'in')">Add to fleet</button>`
+    : "";
   return `<div style="flex-basis:100%;margin-top:4px"><span class="badge ${cls}" title="Fleet Monitor">${esc(label)}</span></div>${btn}`;
 }
 async function fleetSet(key, membership) {

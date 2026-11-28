@@ -922,23 +922,29 @@ check("TC-MONSRV-0071 internal fleet list: token required; every known machine b
 with sqlite3.connect(TMP / "licenses.db") as c:
     c.execute("INSERT OR REPLACE INTO licenses VALUES ('KEY-PRE', 'Preapproved Pal', 'STANDARD', 'HW-PRE', 0)")
 store.NEW_MACHINES = "approval"
-pre = api.post("/internal/fleet/key-pre", headers=IH, json={"membership": "in"})
-hidden_pre = "Preapproved Pal" not in ad.get("/").text and all(d["key"] != "KEY-PRE" for d in store.devices())
+pre = api.post("/internal/fleet/key-pre", headers=IH, json={"membership": "in"})   # ── NO_PREAPPROVE_20261128 ── (DEF-121)
+pre_row = store.device("KEY-PRE")
 first = ingest("KEY-PRE", "HW-PRE", [ev(1, "CRITICAL", message="pre first")])
-check("TC-MONSRV-0072 pre-approve from License Admin: a licence that never reported is 'in' but shown nowhere (no "
-      "empty Offline card, no offline alert); its FIRST report is kept at once, no waiting",
-      pre.status_code == 200 and pre.json()["fleet"]["membership"] == "in" and hidden_pre
-      and first.json()["enabled"] is True and "Preapproved Pal" in ad.get("/").text
-      and any(a["summary"] == "pre first" for a in store.alerts("KEY-PRE", False, now - 600)), (pre.text, first.json()))
+waiting = store.device("KEY-PRE")
+check("TC-MONSRV-0072 no pre-approval (DEF-121): Add to fleet for a licence that never reported is refused (409 'has not "
+      "reported yet') and nothing is stored; its first report waits for approval like any new machine (nothing kept, "
+      "nothing on any page)",
+      pre.status_code == 409 and "not reported" in pre.json()["error"] and pre_row is None
+      and first.json()["enabled"] is False and waiting["membership"] == "pending" and waiting["first_seen"]
+      and "Preapproved Pal" not in vw.get("/").text
+      and not any(a["summary"] == "pre first" for a in store.alerts("KEY-PRE", False, now - 600)), (pre.text, first.json()))
+add = api.post("/internal/fleet/KEY-PRE", headers=IH, json={"membership": "in"})
+after_add = ingest("KEY-PRE", "HW-PRE", [ev(2, "CRITICAL", message="pre second")])
 o1 = api.post("/internal/fleet/KEY-PRE", headers=IH, json={"membership": "out"})
 gone = "Preapproved Pal" not in vw.get("/").text
 b1 = api.post("/internal/fleet/bad key!", headers=IH, json={"membership": "in"}).status_code
 b2 = api.post("/internal/fleet/KEY-NOPE", headers=IH, json={"membership": "in"}).status_code
 b3 = api.post("/internal/fleet/KEY-PRE", headers=IH, json={"membership": "maybe"}).status_code
 api.post("/internal/fleet/KEY-PRE", headers=IH, json={"membership": "in"})
-check("TC-MONSRV-0073 remove / add through the same API; a malformed key 400, an unknown licence 404, a bad "
-      "status 400",
-      o1.status_code == 200 and gone and b1 in (400, 404) and b2 == 404 and b3 == 400, (o1.text, b1, b2, b3))
+check("TC-MONSRV-0073 once it has reported, Add to fleet (Anbu) brings it in and its reports are kept; remove / add "
+      "through the same API; a malformed key 400, an unknown licence 404, a bad status 400",
+      add.status_code == 200 and add.json()["fleet"]["membership"] == "in" and after_add.json()["enabled"] is True
+      and o1.status_code == 200 and gone and b1 in (400, 404) and b2 == 404 and b3 == 400, (add.text, o1.text, b1, b2, b3))
 store.NEW_MACHINES = "auto"
 
 dayp = ad.get(f"/day?day={today}").text
@@ -1085,6 +1091,29 @@ check("TC-MONSRV-0090 the page asks for app.css / app.js by a fingerprint of the
       and "immutable" in c_new.headers.get("cache-control", "") and "immutable" in j_new.headers.get("cache-control", "")
       and c_old.headers.get("cache-control") == "max-age=60" and changed,
       (css_v and css_v.group(1), c_new and c_new.headers.get("cache-control"), c_old.headers.get("cache-control")))
+
+# ── NO_PREAPPROVE_20261128 (DEF-121): rows pre-approved before the change are undone at start-up ──
+pa_db = TMP / "preapproved.db"
+_kp = store.DB_PATH
+store.DB_PATH = pa_db
+store.init_db()
+with store.conn() as c:
+    c.execute("INSERT INTO devices (key, label, membership) VALUES ('K-NEVER', 'Never reported', 'in')")
+    c.execute("INSERT INTO devices (key, label, membership, last_seen) VALUES ('K-KARTHIK', 'Joined by pre-approval', 'in', 1795000000)")
+    c.execute("INSERT INTO devices (key, label, membership, first_seen, last_seen) VALUES ('K-ADDED', 'Added by Anbu', 'in', 1794000000, 1795000000)")
+store.init_db()
+rows = {r["key"]: r for r in store.devices(include_all=True)}
+store.init_db()
+again = {r["key"]: (r["membership"], r["first_seen"]) for r in store.devices(include_all=True)}
+store.upsert_device({"key": "K-ADDED", "label": "Added by Anbu"}, "M", "12.0.30", "", "E", 0, 1796000000)
+kept_first = store.device("K-ADDED")["first_seen"]
+store.DB_PATH = _kp
+check("TC-MONSRV-0091 start-up undoes pre-approval (DEF-121): a never-reported placeholder is dropped; a machine that "
+      "joined only through it goes back to 'Waiting for approval'; a machine Anbu added stays in; running it again "
+      "changes nothing; a later report keeps the first-seen time",
+      "K-NEVER" not in rows and rows["K-KARTHIK"]["membership"] == "pending" and rows["K-KARTHIK"]["first_seen"] == 1795000000
+      and rows["K-ADDED"]["membership"] == "in" and again == {k: (r["membership"], r["first_seen"]) for k, r in rows.items()}
+      and kept_first == 1794000000, {k: (r["membership"], r["first_seen"]) for k, r in rows.items()})
 
 uv.should_exit = True
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL PASSED'}  ({OK[0]}/{OK[0] + len(FAILS)})")

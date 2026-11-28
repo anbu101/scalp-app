@@ -3,6 +3,7 @@
 # ── MONITOR_DEPLOY_FILES_20261127 ── (DEF-110) TC-LICPU-0008
 # ── PORTAL_COPY_FIX_20261127 ── (DEF-111) TC-LICPU-0009
 # ── FLEET_FROM_LICENSE_ADMIN_20261127 ── TC-LICPU-0010…0011
+# ── NO_PREAPPROVE_20261128 ── TC-LICPU-0012
 # The License Admin page manages Fleet Monitor portal accounts: the license
 # server forwards /admin/portal/* to the monitor's internal API with its token.
 # A fake monitor (http.server on a free port) records what it receives.
@@ -173,6 +174,12 @@ check("TC-LICPU-0011 admin page: each licence row's Actions shows its Fleet stat
       "fleet (remove asks first); loaded after the licences; nothing shown if the monitor is unreachable",
       "${fleetCell(l)}" in ui and "loadFleet();" in ui and "Remove from fleet" in fleet_js and "Add to fleet" in fleet_js
       and "confirm(" in fleet_js and "fleetMap === null" in fleet_js and "data-k=\"${esc(l.key)}\"" in fleet_js)
+# ── NO_PREAPPROVE_20261128 ── (DEF-121)
+check("TC-LICPU-0012 no pre-approval: a licence whose app never reported shows 'Not reported yet' with NO button; "
+      "Add to fleet only for a machine waiting for approval or removed (DEF-121)",
+      '(m === "pending" || m === "out")' in fleet_js and "not reported yet\")" not in fleet_js
+      and "In fleet · not reported yet" not in ui and '"Not reported yet"' in fleet_js
+      and "pre-approves" not in (HERE / "server.py").read_text(), fleet_js[:300])
 cp = ui[ui.index("function copyText"):ui.index("let toastT")]
 check("TC-LICPU-0009 Copy works on this plain-HTTP page: the async clipboard only in a secure context, else a "
       "hidden textarea + execCommand('copy'); a failure says so (DEF-111)",

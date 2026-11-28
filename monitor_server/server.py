@@ -30,7 +30,7 @@ license server that every app depends on.
   POST /internal/users/invite             {username, role} → {url, expires}
   POST /internal/users/{name}/{action}    reset | disable | enable | unlock | remove | cancel_invite
   GET  /internal/fleet                    every machine's fleet status by licence key   ── FLEET_FROM_LICENSE_ADMIN_20261127 ──
-  POST /internal/fleet/{key}             {membership: in|out} (pre-approves a licence that never reported)
+  POST /internal/fleet/{key}             {membership: in|out} for a machine that has reported (── NO_PREAPPROVE_20261128 ── no pre-approval)
 """
 
 from __future__ import annotations
@@ -422,7 +422,8 @@ async def internal_fleet_set(request: Request, key: str):
         body = {}
     why = store.set_fleet(key, str(body.get("membership") or ""))
     if why:
-        return JSONResponse({"ok": False, "error": why}, status_code=404 if why == "no such licence" else 400)
+        return JSONResponse({"ok": False, "error": why},
+                            status_code=404 if why == "no such licence" else 409 if "not reported" in why else 400)
     store.audit(_by(request), "fleet_add" if body.get("membership") == "in" else "fleet_remove", key)
     return {"ok": True, "fleet": store.fleet_statuses().get(key)}
 

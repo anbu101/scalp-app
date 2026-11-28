@@ -19,7 +19,7 @@ GET  /admin/portal/users     Fleet Monitor portal accounts + pending links   ─
 POST /admin/portal/invite    {username, role} → one-time setup link (no password here)
 POST /admin/portal/action    {username, action: reset|disable|enable|unlock|remove|cancel_invite}
 GET  /admin/portal/fleet     each licence's Fleet Monitor status                ── FLEET_FROM_LICENSE_ADMIN_20261127 ──
-POST /admin/portal/fleet     {key, membership: in|out} (pre-approves a licence that never reported)
+POST /admin/portal/fleet     {key, membership: in|out} for a machine that has reported (── NO_PREAPPROVE_20261128 ── no pre-approval)
   GET  /admin/list            all licenses (admin)
   GET  /admin/ui              admin web dashboard
   GET  /min_version           PUBLIC - app self-update nudge (advisory only)
