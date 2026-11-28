@@ -374,6 +374,17 @@ rc, out = cli("--report")
 chk("TC-GATE-0039", "--report summarises the log", rc == 0 and "commits logged" in out, out)
 shutil.rmtree(d, ignore_errors=True)
 
+# ── GATE_FIXTURE_EXEMPT_20261128 ── the gate's own fixtures are no finding (TD-049) ──
+d = repo()
+rc, out, fin = one(d, "scripts/test_reliability_checklist.py",
+                   'x = one(d, "c.py", \'API_KEY = "a1b2c3d4e5f6g7h8i9j0"\')\nassert elapsed < 0.2, elapsed\n')
+chk("TC-GATE-0080", "CL-01 / CL-10: the sample key and 0.2 s bound in the gate's own suite are not findings",
+    status_of(fin, "CL-01") is None and status_of(fin, "CL-10") is None, fin)
+rc, out, fin = one(d, "scripts/test_other.py", 'API_KEY = "a1b2c3d4e5f6g7h8i9j0"\nassert elapsed < 0.2, elapsed\n')
+chk("TC-GATE-0081", "…the same lines in any other file still fail CL-01 and CL-10",
+    status_of(fin, "CL-01") == "fail" and status_of(fin, "CL-10") == "fail", fin)
+shutil.rmtree(d, ignore_errors=True)
+
 # ── items.py itself ──────────────────────────────────────────────────
 ns = {}
 exec(compile(open(ITEMS).read(), ITEMS, "exec"), ns)

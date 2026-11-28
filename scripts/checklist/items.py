@@ -72,9 +72,15 @@ def hits_note(hits, k=3):
 SECRET = re.compile(r"""(?i)\b(api_?key|api_?secret|secret(_key)?|access_?token|bot_?token|password|passwd)\b['"]?\s*[:=]\s*[rbu]?['"]([A-Za-z0-9]{16,}|\d{6,}:[A-Za-z0-9_\-]{30,})['"]""")
 
 
+# ── GATE_FIXTURE_EXEMPT_20261128 ── the gate's own suite feeds sample lines that MUST trip
+# CL-01 / CL-10 (a fake API key, a 0.2 s bound); checked there, they are no finding (TD-049).
+GATE_FIXTURES = ("scripts/test_reliability_checklist.py",)
+
+
 def cl01(ctx):
     hits = []
-    for p, n, s in added(ctx, lambda p: not p.endswith((".lock", ".svg", ".min.js")), SECRET):
+    for p, n, s in added(ctx, lambda p: not p.endswith((".lock", ".svg", ".min.js")) and p not in GATE_FIXTURES,
+                         SECRET):
         v = SECRET.search(s).group(3)
         if re.search(r"(?i)x{4,}|your_|example|dummy|placeholder|changeme|<", v):
             continue
@@ -246,7 +252,7 @@ TIMING = re.compile(r"(?i)\b\w*(elapsed|took|duration|latency|secs|seconds|_dt|_
 
 
 def cl10(ctx):
-    hits = added(ctx, is_test, TIMING)
+    hits = added(ctx, lambda p: is_test(p) and p not in GATE_FIXTURES, TIMING)
     return bool(hits), [f"{p}:{n} timing bound under 1 s — slower Macs miss it (DEF-037: 0.21 s vs 0.2 s); "
                         f"use ≥ 1 s or a relative check" for p, n, _ in hits], ""
 
